@@ -48,7 +48,7 @@ StudyLoop 是一个面向个人学习材料的自适应辅导系统：它把文�
 
 上传文件先经过格式白名单、大小限制、解析和自适应切块，再进入 Chroma 向量索引与 BM25 语料。查询阶段使用向量检索与 BM25 的 RRF 融合；query rewrite、HyDE、multi-query 和 cross-encoder reranker 都是可选阶段，可独立关闭。
 
-这证明了检索链路存在，但不证明检索效果优于任何基线。公开仓库没有发布 Recall@K、MRR 或引用准确率，原因见 [docs/EVALUATION.md](docs/EVALUATION.md)。
+公开仓库发布了一个有明确边界的英文 BM25 组件回归：同一 SciFact test split、相同 BM25 参数下，对比修复前字符切分与当前业务 tokenizer。它不证明 Hybrid、生成答案、中文检索或引用准确率；结果、逐查询指标和离线校验命令见 [evaluation/scifact_bm25](evaluation/scifact_bm25/) 与 [docs/EVALUATION.md](docs/EVALUATION.md)。
 
 ### 2. 工具调用必须形成 observation 闭环
 
@@ -158,14 +158,17 @@ curl -F "file=@examples/sample_document.md" http://localhost:8001/documents/uplo
 ```bash
 python -m pytest -q
 
+# 不需要数据集或模型；校验仓库内已发布的逐查询指标、聚合值、源码与 artifact hash
+python evaluation/scifact_bm25/verify.py
+
 cd frontend
 npm run lint
 npm run build
 ```
 
-GitHub Actions 会运行后端确定性测试、scripted Agent demo、前端 lint/build 和 Docker Compose 配置校验。测试默认使用不可访问的本地占位 provider，防止误调用收费接口。
+GitHub Actions 会运行后端确定性测试、scripted Agent demo、公开 SciFact 指标 artifact 校验、前端 lint/build 和 Docker Compose 配置校验。测试默认使用不可访问的本地占位 provider，防止误调用收费接口。
 
-公开版本刻意移除了本地向量库、上传语料、模型评测日志、原始轨迹和来源不清晰的面试题数据。当前能够公开验证的是控制流与工程契约，不是模型质量指标；请勿把单元测试通过数写成 Agent 成功率。
+公开版本刻意移除了本地向量库、上传语料、模型评测日志、原始轨迹和来源不清晰的面试题数据。当前能够公开验证的是控制流、工程契约和有边界的英文 BM25 组件回归，不是模型质量指标；请勿把单元测试通过数写成 Agent 成功率。
 
 ## 主要目录
 
@@ -178,6 +181,7 @@ study-loop/
 ├── frontend/               React/Vite 前端
 ├── scripts/                不依赖真实模型的确定性 Agent demo
 ├── tests/                  mock/unit/control-flow tests
+├── evaluation/             可离线校验的公开组件评测证据
 ├── docs/                   架构边界与公开评测政策
 ├── examples/               可再分发的合成示例材料
 └── docker-compose.yml      PostgreSQL + backend + frontend

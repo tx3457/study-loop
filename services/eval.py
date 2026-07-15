@@ -24,7 +24,7 @@ from openai import AsyncOpenAI
 from dotenv import load_dotenv
 
 from models.eval import (
-    ABConfig, ABResult, JudgeVerdict,
+    ABConfig, ABResult, JudgeScore, JudgeVerdict,
     VariantMetrics, VariantResult,
 )
 from models.quiz import QuizResponse
@@ -64,7 +64,7 @@ async def judge_question(
 ) -> JudgeVerdict:
     """LLM-as-Judge：对单道题目多维度评分。
 
-    用 structured output 强制输出 JudgeVerdict schema，
+    用 structured output 强制输出 JudgeScore schema，
     避免自由文本解析错误和幻觉评分。
     """
     try:
@@ -81,15 +81,20 @@ async def judge_question(
                     "请按评分标准输出结构化评分。"
                 )},
             ],
-            response_format=JudgeVerdict,
+            response_format=JudgeScore,
         )
-        return resp.choices[0].message.parsed
+        score = resp.choices[0].message.parsed
+        if score is None:
+            raise ValueError("judge returned no parsed score")
+        score = JudgeScore.model_validate(score)
+        return JudgeVerdict.model_validate(score.model_dump())
     except Exception as e:
-        logger.warning(f"[judge] 评分失败，返回默认值: {e}")
+        logger.warning(f"[judge] 评分失败，标记为无效样本: {e}")
         return JudgeVerdict(
-            relevance=3, clarity=3, difficulty_feel="unknown",
-            covers_weak_point=False, matched_point="无",
-            faithfulness=True, reasoning=f"judge 调用失败: {e}",
+            status="error",
+            reasoning="judge 调用失败，本样本不计入质量指标",
+            error_type=type(e).__name__,
+            error_message=str(e)[:500],
         )
 
 
@@ -110,18 +115,32 @@ async def judge_batch(
 # ═══════════════════════════════════════════════════════════════════════════
 
 def aggregate_metrics(verdicts: list[JudgeVerdict]) -> VariantMetrics:
-    """将逐题评分聚合为组级指标。"""
-    n = len(verdicts) or 1
+    """将有效逐题评分聚合为组级指标。
+
+    Judge 失败是运行健康信号，不是题目质量评分，因此不进入
+    relevance/clarity/faithfulness 的分子或分母。全部失败时保留
+    旧数值字段为 0.0，并由 ``valid_count=0`` 明确表示不可评估。
+    """
+    valid = [v for v in verdicts if v.status == "valid"]
+    total_count = len(verdicts)
+    valid_count = len(valid)
+    failed_count = total_count - valid_count
+    n = valid_count or 1
     difficulty_dist: dict[str, int] = {}
-    for v in verdicts:
+    for v in valid:
+        # valid verdicts are model-validated to contain all score fields.
         difficulty_dist[v.difficulty_feel] = difficulty_dist.get(v.difficulty_feel, 0) + 1
 
     return VariantMetrics(
-        weak_point_coverage=sum(1 for v in verdicts if v.covers_weak_point) / n,
-        avg_relevance=sum(v.relevance for v in verdicts) / n,
-        avg_clarity=sum(v.clarity for v in verdicts) / n,
-        faithfulness_rate=sum(1 for v in verdicts if v.faithfulness) / n,
+        weak_point_coverage=sum(1 for v in valid if v.covers_weak_point) / n,
+        avg_relevance=sum(v.relevance for v in valid) / n,
+        avg_clarity=sum(v.clarity for v in valid) / n,
+        faithfulness_rate=sum(1 for v in valid if v.faithfulness) / n,
         difficulty_dist=difficulty_dist,
+        total_count=total_count,
+        valid_count=valid_count,
+        failed_count=failed_count,
+        judge_success_rate=valid_count / total_count if total_count else 0.0,
     )
 
 
@@ -231,11 +250,25 @@ def _build_result(
     bm = aggregate_metrics(baseline_verdicts)
     tm = aggregate_metrics(treatment_verdicts)
 
+    quality_comparable = bm.valid_count > 0 and tm.valid_count > 0
     delta = {
-        "weak_point_coverage": round(tm.weak_point_coverage - bm.weak_point_coverage, 3),
-        "avg_relevance": round(tm.avg_relevance - bm.avg_relevance, 2),
-        "avg_clarity": round(tm.avg_clarity - bm.avg_clarity, 2),
-        "faithfulness_rate": round(tm.faithfulness_rate - bm.faithfulness_rate, 3),
+        "weak_point_coverage": (
+            round(tm.weak_point_coverage - bm.weak_point_coverage, 3)
+            if quality_comparable else None
+        ),
+        "avg_relevance": (
+            round(tm.avg_relevance - bm.avg_relevance, 2)
+            if quality_comparable else None
+        ),
+        "avg_clarity": (
+            round(tm.avg_clarity - bm.avg_clarity, 2)
+            if quality_comparable else None
+        ),
+        "faithfulness_rate": (
+            round(tm.faithfulness_rate - bm.faithfulness_rate, 3)
+            if quality_comparable else None
+        ),
+        "judge_success_rate": round(tm.judge_success_rate - bm.judge_success_rate, 3),
     }
 
     return ABResult(

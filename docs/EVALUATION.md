@@ -27,10 +27,20 @@ keeps ASCII words/numbers as tokens, and emits CJK unigrams plus adjacent
 bigrams. This is intentionally described as a heuristic tokenizer rather than
 a general Chinese word segmenter.
 
-An offline regression under the resume-audit workspace runs that exact source
-file on the public BEIR SciFact test split (5,183 documents, 300 queries). With
-all other BM25 settings held fixed, the pre-fix character baseline versus the
-current tokenizer produced:
+The checked-in evidence under [`evaluation/scifact_bm25/`](../evaluation/scifact_bm25/)
+contains a sanitized 300-query metric artifact, a manifest with dataset/source
+hashes, and a standard-library verifier.  The verifier requires neither the
+dataset nor a model and recomputes the aggregate metrics and paired bootstrap
+interval from the published query-level rows:
+
+```bash
+python evaluation/scifact_bm25/verify.py
+```
+
+The original offline regression ran the exact business tokenizer on the public
+BEIR SciFact test split (5,183 documents, 300 queries). With all other BM25
+settings held fixed, the pre-fix character baseline versus the current
+tokenizer produced:
 
 | Metric | Character baseline | Current tokenizer |
 | --- | ---: | ---: |
@@ -38,11 +48,29 @@ current tokenizer produced:
 | MRR@10 | 0.0734 | 0.6184 |
 | nDCG@10 | 0.0852 | 0.6523 |
 
-The runner records per-query results, source hashes, corpus hashes, a fixed
-bootstrap seed, and a paired 95% confidence interval for the nDCG@10 delta
-([0.5197, 0.6141]). These numbers measure English BM25 retrieval only. They do
-not establish Chinese retrieval quality, hybrid/RRF uplift, answer quality,
-Agent task success, production latency, or user impact.
+The public artifact records per-query metrics, source hashes, corpus hashes, a
+fixed bootstrap seed, and a paired 95% confidence interval for the nDCG@10
+delta ([0.5197, 0.6141]).  It excludes query/document text, local paths, model
+artifacts, credentials, and the SciFact dataset itself.
+
+A full recomputation is also provided, but it deliberately does not download
+or redistribute SciFact.  The user must obtain the dataset from the upstream
+BEIR source, review its current license/terms, and provide the extracted files:
+
+```bash
+python evaluation/scifact_bm25/run.py \
+  --data-dir /path/to/scifact \
+  --zip-path /path/to/scifact.zip \
+  --output /tmp/studyloop-scifact-results.jsonl
+python evaluation/scifact_bm25/verify.py \
+  --results /tmp/studyloop-scifact-results.jsonl
+```
+
+A fresh clone can therefore verify the published artifact immediately, but
+cannot honestly claim a fresh full-dataset rerun until the upstream dataset is
+supplied. These numbers measure English BM25 retrieval only. They do not
+establish Chinese retrieval quality, hybrid/RRF uplift, answer quality, Agent
+task success, production latency, or user impact.
 
 ## Citation contract and remaining measurement boundary
 

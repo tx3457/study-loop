@@ -6,17 +6,16 @@ A/B 评测数据模型（Phase 7 工程补洞 #3）
  评估维度包括知识点覆盖率、难度对齐度、题目清晰度。A/B 桩支持切换检索策略
  和 CE 参数，实验结果以 JSON 返回，便于接入 dashboard 或写入数据库做长期追踪。"
 """
-from pydantic import BaseModel, Field
+from typing import Literal
+
+from pydantic import BaseModel, Field, model_validator
 
 
 # ── LLM-as-Judge 单题评分 ──────────────────────────────────────────────────
 
-class JudgeVerdict(BaseModel):
-    """LLM Judge 对单道题目的结构化评分。
+class JudgeScore(BaseModel):
+    """LLM 成功返回时的结构化评分 schema。"""
 
-    用 structured output（response_format）强制 LLM 输出此 schema，
-    避免自由文本解析错误。
-    """
     relevance: int = Field(ge=1, le=5, description="题目与检索内容的相关性 1-5")
     clarity: int = Field(ge=1, le=5, description="题目表述清晰度 1-5")
     difficulty_feel: str = Field(description="题目感知难度: easy / medium / hard / expert")
@@ -24,6 +23,44 @@ class JudgeVerdict(BaseModel):
     matched_point: str = Field(description="匹配的具体知识点，无则填'无'")
     faithfulness: bool = Field(description="题目和答案是否忠实于原文，无编造")
     reasoning: str = Field(description="Judge 的评分理由（一句话）")
+
+
+class JudgeVerdict(BaseModel):
+    """Judge 单题结果：成功时带评分，失败时显式标记 error。
+
+    评分字段对 error 结果为 ``None``，避免用伪造默认分数表示
+    Judge 失败。旧的成功结果形状仍保留，只增加状态字段。
+    """
+
+    relevance: int | None = Field(default=None, ge=1, le=5, description="题目与检索内容的相关性 1-5")
+    clarity: int | None = Field(default=None, ge=1, le=5, description="题目表述清晰度 1-5")
+    difficulty_feel: str | None = Field(default=None, description="题目感知难度")
+    covers_weak_point: bool | None = Field(default=None, description="是否覆盖用户薄弱知识点")
+    matched_point: str | None = Field(default=None, description="匹配的具体知识点")
+    faithfulness: bool | None = Field(default=None, description="题目和答案是否忠实于原文")
+    reasoning: str = Field(description="Judge 的评分理由（一句话）")
+    status: Literal["valid", "error"] = Field(default="valid", description="Judge 调用状态")
+    error_type: str | None = Field(default=None, description="Judge 失败异常类型")
+    error_message: str | None = Field(default=None, description="Judge 失败摘要")
+
+    @model_validator(mode="after")
+    def validate_status_payload(self):
+        score_fields = (
+            self.relevance,
+            self.clarity,
+            self.difficulty_feel,
+            self.covers_weak_point,
+            self.matched_point,
+            self.faithfulness,
+        )
+        if self.status == "valid" and any(value is None for value in score_fields):
+            raise ValueError("valid judge verdict requires all score fields")
+        if self.status == "error":
+            if not self.error_type:
+                raise ValueError("error judge verdict requires error_type")
+            if any(value is not None for value in score_fields):
+                raise ValueError("error judge verdict cannot contain score fields")
+        return self
 
 
 # ── A/B 实验配置 ────────────────────────────────────────────────────────────
@@ -57,6 +94,10 @@ class VariantMetrics(BaseModel):
     avg_clarity: float = Field(description="平均清晰度 1-5")
     faithfulness_rate: float = Field(description="忠实率 0-1")
     difficulty_dist: dict[str, int] = Field(description="难度分布计数")
+    total_count: int = Field(default=0, ge=0, description="总 Judge 样本数")
+    valid_count: int = Field(default=0, ge=0, description="有效 Judge 样本数")
+    failed_count: int = Field(default=0, ge=0, description="Judge 失败样本数")
+    judge_success_rate: float = Field(default=0.0, ge=0.0, le=1.0, description="Judge 有效样本占比")
 
 
 class VariantResult(BaseModel):
