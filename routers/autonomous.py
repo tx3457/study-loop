@@ -39,6 +39,12 @@ from fastapi import APIRouter, HTTPException
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
+from models.citation import CitationView, GroundingStatus
+from services.citations import (
+    EvidenceRegistry,
+    collect_search_evidence,
+    resolve_citations,
+)
 from services.injection import check_injection, check_output_leak
 from services.llm import llm_chat
 from services.react_controls import (
@@ -95,6 +101,8 @@ class AutonomousSession:
     rounds_used: int
     user_id: str
     document_id: Optional[str]
+    evidence_registry: EvidenceRegistry
+    grounding_required: bool
     pending_ask_call_id: str                        # 待回答的 ask_user 工具 call_id
     created_at: float = field(default_factory=time.time)
 
@@ -126,6 +134,10 @@ class AutonomousRequest(BaseModel):
     query: str = Field(..., description="用户自然语言学习目标")
     user_id: str = Field(default="default", description="用户 ID")
     document_id: Optional[str] = Field(default=None, description="可选文档 ID")
+    grounding_required: bool = Field(
+        default=False,
+        description="为 true 时，文档回答必须返回本轮检索得到的有效 chunk ID，否则安全弃答。",
+    )
 
 
 class ContinueRequest(BaseModel):
@@ -158,6 +170,12 @@ class AutonomousResponse(BaseModel):
     # 范式标记（P2 新增）
     finalize_reason: Optional[str] = Field(default=None, description="LLM 调用 finalize 时给的结束理由")
 
+    # 可验证引用字段（向后兼容：旧客户端可忽略）
+    citations: list[CitationView] = Field(default_factory=list)
+    invalid_citation_ids: list[str] = Field(default_factory=list)
+    abstained: bool = Field(default=False, description="是否因证据不足而安全弃答")
+    grounding_status: GroundingStatus = Field(default=GroundingStatus.NOT_REQUESTED)
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # State Summary（每轮注入给 LLM 防健忘）
@@ -167,6 +185,7 @@ def _build_state_summary(
     tools_called: list[str],
     plan: list[str],
     round_idx: int,
+    evidence_registry: EvidenceRegistry,
 ) -> str:
     """浓缩当前进度，让 LLM 一眼看清。"""
     tools_used_unique = list(dict.fromkeys(tools_called))
@@ -184,6 +203,8 @@ def _build_state_summary(
         for s in recent:
             preview = (s.observation_preview or "")[:120]
             parts.append(f"  · {s.tool_name}({s.tool_args}) → {preview}")
+    if evidence_registry:
+        parts.append(f"本轮可引用 chunk_ids：{list(evidence_registry)[-8:]}")
     return "\n".join(parts)
 
 
@@ -232,6 +253,8 @@ async def _run_react_loop(
     document_id: Optional[str],
     starting_round: int,
     run_id: str,
+    evidence_registry: EvidenceRegistry,
+    grounding_required: bool,
 ) -> AutonomousResponse:
     """从 starting_round 开始跑 ReAct 循环。命中 finalize / ask_user / max_rounds 时返回。"""
     truncated = False
@@ -240,7 +263,9 @@ async def _run_react_loop(
 
     for round_idx in range(starting_round, MAX_AUTONOMOUS_ROUNDS):
         # ── 注入 [Current state] 让 LLM 不健忘（仅本次调用，不持久化）──
-        state_summary = _build_state_summary(steps, tools_called, plan, round_idx)
+        state_summary = _build_state_summary(
+            steps, tools_called, plan, round_idx, evidence_registry
+        )
         state_msg = [
             {"role": "system", "content": build_react_decision_prompt(state_summary)}
         ]
@@ -274,8 +299,12 @@ async def _run_react_loop(
             else:
                 final_answer = "（LLM 未给出回复且未调用工具，循环结束）"
                 finalize_reason = "empty_response"
-            return _build_response(plan, steps, tools_called, final_answer,
-                                   round_idx + 1, truncated, finalize_reason)
+            return _build_response(
+                plan, steps, tools_called, final_answer,
+                round_idx + 1, truncated, finalize_reason,
+                evidence_registry=evidence_registry,
+                grounding_required=grounding_required,
+            )
 
         # ── 逐个处理本轮 outcomes（顺序与 LLM 给的 tool_calls 一致）──
         for oc in rr.outcomes:
@@ -285,6 +314,10 @@ async def _run_react_loop(
             if fn_name == "finalize":
                 final_answer = fn_args.get("final_answer", "")
                 finalize_reason = fn_args.get("reason", "explicit_finalize")
+                citation_ids = fn_args.get("citation_ids", [])
+                if not isinstance(citation_ids, list):
+                    citation_ids = []
+                abstained = bool(fn_args.get("abstained", False))
                 is_leak, leak_reason = check_output_leak(final_answer)
                 if is_leak:
                     logger.warning(f"[autonomous] output leak in finalize: {leak_reason}")
@@ -295,8 +328,14 @@ async def _run_react_loop(
                     round_index=round_idx, tool_name="finalize", tool_args=fn_args,
                     observation_preview="(loop ended)",
                 ))
-                return _build_response(plan, steps, tools_called, final_answer,
-                                       round_idx + 1, truncated, finalize_reason)
+                return _build_response(
+                    plan, steps, tools_called, final_answer,
+                    round_idx + 1, truncated, finalize_reason,
+                    evidence_registry=evidence_registry,
+                    grounding_required=grounding_required,
+                    citation_ids=citation_ids,
+                    abstained=abstained,
+                )
 
             # ── 控制工具：ask_user → 保存 session 并返回 ──
             if fn_name == "ask_user":
@@ -313,6 +352,8 @@ async def _run_react_loop(
                     rounds_used=round_idx + 1,
                     user_id=user_id,
                     document_id=document_id,
+                    evidence_registry=evidence_registry,
+                    grounding_required=grounding_required,
                     pending_ask_call_id=oc.call_id,
                 ))
                 steps.append(StepRecord(
@@ -325,6 +366,11 @@ async def _run_react_loop(
                     rounds_used=round_idx + 1, truncated=False,
                     awaiting_user_input=True, user_question=question,
                     conversation_id=conversation_id,
+                    grounding_status=(
+                        GroundingStatus.PENDING
+                        if grounding_required
+                        else GroundingStatus.NOT_REQUESTED
+                    ),
                 )
 
             # ── 业务工具被白名单拦截（run_tool_round 已回灌错误 message）──
@@ -338,9 +384,15 @@ async def _run_react_loop(
             # ── 业务工具已 dispatch（run_tool_round 已回灌 tool message）──
             tools_called.append(fn_name)
             observation_preview = (oc.result or "")[:300]
+            evidence_error = None
+            if fn_name == "search_document":
+                accepted = collect_search_evidence(oc.result or "", evidence_registry)
+                if accepted == 0:
+                    evidence_error = "citation_payload_invalid_or_empty"
             steps.append(StepRecord(
                 round_index=round_idx, tool_name=fn_name, tool_args=fn_args,
-                observation_preview=observation_preview, blocked_reason=oc.blocked_reason,
+                observation_preview=observation_preview,
+                blocked_reason=oc.blocked_reason or evidence_error,
             ))
 
     # ── 达 max_rounds：强制收尾 ──
@@ -357,18 +409,44 @@ async def _run_react_loop(
         logger.exception(f"[autonomous] finish call failed: {e}")
         final_answer = f"执行被截断（{MAX_AUTONOMOUS_ROUNDS} 轮）"
 
-    return _build_response(plan, steps, tools_called, final_answer,
-                           MAX_AUTONOMOUS_ROUNDS, truncated, "max_rounds_truncated")
+    return _build_response(
+        plan, steps, tools_called, final_answer,
+        MAX_AUTONOMOUS_ROUNDS, truncated, "max_rounds_truncated",
+        evidence_registry=evidence_registry,
+        grounding_required=grounding_required,
+    )
 
 
 def _build_response(
     plan, steps, tools_called, final_answer, rounds_used, truncated, finalize_reason,
+    *,
+    evidence_registry: EvidenceRegistry,
+    grounding_required: bool,
+    citation_ids: list[str] | None = None,
+    abstained: bool = False,
 ) -> AutonomousResponse:
+    resolution = resolve_citations(citation_ids, evidence_registry)
+    if grounding_required and not abstained and not resolution.citations:
+        final_answer = "现有检索证据不足，无法提供带可验证引用的回答。"
+        finalize_reason = "grounding_required_without_valid_citation"
+        abstained = True
+
+    if abstained:
+        grounding_status = GroundingStatus.ABSTAINED
+    elif resolution.citations:
+        grounding_status = GroundingStatus.CITATION_IDS_VALID
+    else:
+        grounding_status = GroundingStatus.NOT_REQUESTED
+
     return AutonomousResponse(
         plan=plan, steps=steps,
         tools_called=list(dict.fromkeys(tools_called)),
         rounds_used=rounds_used, truncated=truncated,
         final_answer=final_answer, finalize_reason=finalize_reason,
+        citations=resolution.citations,
+        invalid_citation_ids=resolution.invalid_ids,
+        abstained=abstained,
+        grounding_status=grounding_status,
     )
 
 
@@ -392,6 +470,11 @@ async def autonomous_agent(req: AutonomousRequest) -> AutonomousResponse:
     context_hint = f"\n\n当前用户 ID: {req.user_id}"
     if req.document_id:
         context_hint += f"\n当前文档 ID: {req.document_id}"
+    if req.grounding_required:
+        context_hint += (
+            "\n本次请求要求可验证引用：必须先调用 search_document，并在 finalize 的 "
+            "citation_ids 中仅填写 observation 返回的真实 chunk_ids；证据不足时设置 abstained=true。"
+        )
 
     # Plan 可选：短 query 跳过
     if len(req.query.strip()) < PLAN_SKIP_QUERY_LEN:
@@ -419,6 +502,7 @@ async def autonomous_agent(req: AutonomousRequest) -> AutonomousResponse:
         messages=messages, plan=plan, steps=[], tools_called=[],
         user_id=req.user_id, document_id=req.document_id,
         starting_round=0, run_id=run_id,
+        evidence_registry={}, grounding_required=req.grounding_required,
     )
 
 
@@ -455,4 +539,6 @@ async def continue_autonomous(req: ContinueRequest) -> AutonomousResponse:
         steps=session.steps, tools_called=session.tools_called,
         user_id=session.user_id, document_id=session.document_id,
         starting_round=session.rounds_used, run_id=run_id,
+        evidence_registry=session.evidence_registry,
+        grounding_required=session.grounding_required,
     )

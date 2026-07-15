@@ -5,10 +5,10 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 import asyncio
-from rank_bm25 import BM25Okapi
 from services.retry import with_retry
 from services.tracing import traceable
 from services.reranker import RerankerUnavailable, rerank_docs, reranker_enabled
+from services.bm25 import build_bm25_index, rank_bm25
 from services.query_rewriter import (
     hyde_enabled,
     hyde_rewrite,
@@ -16,6 +16,7 @@ from services.query_rewriter import (
     multiquery_enabled,
     rrf_merge_ranked_lists,
 )
+from services.tokenization import BM25_TOKENIZER_ID
 
 logger = logging.getLogger(__name__)
 load_dotenv(Path(__file__).parent.parent / ".env")
@@ -80,7 +81,7 @@ async def _get_bm25_index(collection, document_id: str) -> dict:
     """取或构建某文档的 BM25 索引,带进程内缓存。返回 {bm25, all_docs, all_ids}。
 
     缓存在 deal_document / delete_document 时按 document_id 失效。
-    （生产可进一步换持久化 BM25 + jieba 分词，这里先解决"每查询全量重建"的热点）
+    分词由 services.tokenization 统一提供，确保索引和查询使用同一规则。
     """
     cached = _bm25_cache.get(document_id)
     if cached is not None:
@@ -88,8 +89,13 @@ async def _get_bm25_index(collection, document_id: str) -> dict:
     all_results = await asyncio.to_thread(collection.get, include=["documents"])
     all_docs = all_results["documents"]
     all_ids = all_results["ids"]
-    bm25 = BM25Okapi([list(doc) for doc in all_docs]) if all_docs else None
-    entry = {"bm25": bm25, "all_docs": all_docs, "all_ids": all_ids}
+    bm25 = build_bm25_index(all_docs)
+    entry = {
+        "bm25": bm25,
+        "all_docs": all_docs,
+        "all_ids": all_ids,
+        "tokenizer_id": BM25_TOKENIZER_ID,
+    }
     _bm25_cache[document_id] = entry
     return entry
 
@@ -150,10 +156,7 @@ async def hybrid_query_document(
     if bm25 is None:
         bm25_ids, bm25_docs = [], []
     else:
-        bm25_scores = bm25.get_scores(list(query))
-        bm25_ranked = sorted(
-            enumerate(bm25_scores), key=lambda x: x[1], reverse=True
-        )[:recall_n]
+        bm25_ranked = rank_bm25(bm25, query, recall_n)
         bm25_ids = [all_ids[i] for i, _ in bm25_ranked]
         bm25_docs = [all_docs[i] for i, _ in bm25_ranked]
 
@@ -264,8 +267,7 @@ async def bm25_only_query_document(document_id: str, query: str, n_results: int 
     all_docs, all_ids, bm25 = idx["all_docs"], idx["all_ids"], idx["bm25"]
     if bm25 is None:
         return {"documents": [[]], "ids": [[]]}
-    bm25_scores = bm25.get_scores(list(query))
-    ranked = sorted(enumerate(bm25_scores), key=lambda x: x[1], reverse=True)[:n_results]
+    ranked = rank_bm25(bm25, query, n_results)
     top_ids = [all_ids[i] for i, _ in ranked]
     top_docs = [all_docs[i] for i, _ in ranked]
     return {"documents": [top_docs], "ids": [top_ids]}

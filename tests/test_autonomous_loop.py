@@ -15,6 +15,7 @@ routers/autonomous.py 的 ~8 轮 ReAct 循环此前零单测。
 全程 mock，无网络。跑：
   python -m pytest test/test_autonomous_loop.py -q
 """
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -73,6 +74,53 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out.tools_called, ["search_document"])
         disp.assert_awaited_once()
 
+    async def test_grounding_filters_unretrieved_citation_ids(self):
+        responses = [
+            _assistant_msg(tool_calls=[_tool_call(
+                "c1", "search_document", '{"document_id": "d", "query": "RAG"}'
+            )]),
+            _assistant_msg(tool_calls=[_tool_call(
+                "c2",
+                "finalize",
+                '{"final_answer": "基于资料回答", "reason": "证据充分", '
+                '"citation_ids": ["d_chunk_2", "fake_chunk_9"], "abstained": false}',
+            )]),
+        ]
+        tool_result = json.dumps({
+            "document_id": "d",
+            "chunks": ["first", "second"],
+            "chunk_ids": ["d_chunk_1", "d_chunk_2"],
+        })
+        with patch.object(au, "_client", _mock_client(responses)), \
+             patch.object(au, "check_injection", AsyncMock(return_value=(False, ""))), \
+             patch.object(tool_loop, "dispatch_tool", AsyncMock(return_value=tool_result)):
+            out = await au.autonomous_agent(AutonomousRequest(
+                query=SHORT_Q, user_id="u", grounding_required=True
+            ))
+
+        self.assertEqual([item.chunk_id for item in out.citations], ["d_chunk_2"])
+        self.assertEqual(out.invalid_citation_ids, ["fake_chunk_9"])
+        self.assertEqual(out.grounding_status, "citation_ids_valid")
+        self.assertFalse(out.abstained)
+
+    async def test_grounding_required_without_valid_citation_abstains(self):
+        responses = [_assistant_msg(tool_calls=[_tool_call(
+            "c1",
+            "finalize",
+            '{"final_answer": "未经支持的回答", "reason": "done", '
+            '"citation_ids": ["invented_chunk_1"], "abstained": false}',
+        )])]
+        with patch.object(au, "_client", _mock_client(responses)), \
+             patch.object(au, "check_injection", AsyncMock(return_value=(False, ""))):
+            out = await au.autonomous_agent(AutonomousRequest(
+                query=SHORT_Q, user_id="u", grounding_required=True
+            ))
+
+        self.assertTrue(out.abstained)
+        self.assertEqual(out.grounding_status, "abstained")
+        self.assertEqual(out.invalid_citation_ids, ["invented_chunk_1"])
+        self.assertIn("证据不足", out.final_answer)
+
     async def test_implicit_finalize_no_tool_calls(self):
         responses = [_assistant_msg(content="我直接知道答案：RAG 是检索增强生成")]
         with patch.object(au, "_client", _mock_client(responses)), \
@@ -116,6 +164,42 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
             out = await au.continue_autonomous(ContinueRequest(conversation_id=cid, user_reply="doc123"))
         self.assertEqual(out.final_answer, "好的，用 doc123")
         self.assertNotIn(cid, au._sessions)        # session 用完销毁
+
+    async def test_continue_preserves_citation_evidence_registry(self):
+        first_responses = [
+            _assistant_msg(tool_calls=[_tool_call(
+                "c1", "search_document", '{"document_id": "d", "query": "RAG"}'
+            )]),
+            _assistant_msg(tool_calls=[_tool_call(
+                "c2", "ask_user", '{"question": "是否继续？"}'
+            )]),
+        ]
+        tool_result = json.dumps({
+            "document_id": "d",
+            "chunks": ["persisted evidence"],
+            "chunk_ids": ["d_chunk_3"],
+        })
+        with patch.object(au, "_client", _mock_client(first_responses)), \
+             patch.object(au, "check_injection", AsyncMock(return_value=(False, ""))), \
+             patch.object(tool_loop, "dispatch_tool", AsyncMock(return_value=tool_result)):
+            first = await au.autonomous_agent(AutonomousRequest(
+                query=SHORT_Q, user_id="u", grounding_required=True
+            ))
+
+        continue_responses = [_assistant_msg(tool_calls=[_tool_call(
+            "c3",
+            "finalize",
+            '{"final_answer": "继续后的回答", "reason": "done", '
+            '"citation_ids": ["d_chunk_3"]}',
+        )])]
+        with patch.object(au, "_client", _mock_client(continue_responses)), \
+             patch.object(au, "check_injection", AsyncMock(return_value=(False, ""))):
+            out = await au.continue_autonomous(ContinueRequest(
+                conversation_id=first.conversation_id, user_reply="继续"
+            ))
+
+        self.assertEqual([item.chunk_id for item in out.citations], ["d_chunk_3"])
+        self.assertEqual(out.grounding_status, "citation_ids_valid")
 
     async def test_blocked_tool_not_dispatched(self):
         responses = [
