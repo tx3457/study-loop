@@ -1,0 +1,37 @@
+"""
+GraderAgent：AI 批改 + 个性化讲解（Phase 4 Day 15-17）
+
+直接复用 services/grader.py::grade_session，该函数从内存 sessions 读取答案并调用 LLM。
+GraderAgent 的职责是将批改结果写入共享状态（grading_report），
+供后续 AdaptAgent(adapt_writer) 更新用户画像使用。
+
+失败处理：
+  Transient error → with_retry 指数退避重试（最多 3 次）
+  RetryExhausted  → 抛出 ValueError，由 main.py 的 handler 返回 503
+"""
+import logging
+from langgraph.graph import StateGraph, START, END
+from services.grader import grade_session
+from services.retry import with_retry, RetryExhausted
+from services.tracing import traceable
+from agents.state import OrchestratorState
+
+logger = logging.getLogger(__name__)
+
+
+@traceable(name="grader_agent.grade", run_type="llm")
+async def _grade(state: OrchestratorState) -> dict:
+    """调用 AI 批改服务（带重试），将结果序列化为 dict 写入共享状态。"""
+    try:
+        report = await with_retry(lambda: grade_session(state["session_id"]))
+    except RetryExhausted:
+        logger.error("[grader_agent] grade retries exhausted for session %s", state["session_id"])
+        raise ValueError("AI 批改服务暂时不可用，请稍后重试")
+    return {"grading_report": report.model_dump()}
+
+
+_builder = StateGraph(OrchestratorState)
+_builder.add_node("grade", _grade)
+_builder.add_edge(START, "grade")
+_builder.add_edge("grade", END)
+grader_agent = _builder.compile()

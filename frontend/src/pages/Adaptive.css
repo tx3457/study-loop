@@ -1,0 +1,159 @@
+/* Adaptive Learning 页面样式（自包含，作用域 .adaptive-page）*/
+.adaptive-page {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 8px 4px 48px;
+  color: #1f2937;
+}
+
+.adaptive-page .page-header { margin-bottom: 18px; }
+.adaptive-page .page-header h2 { margin: 0 0 4px; font-size: 22px; }
+.adaptive-page .page-sub { margin: 0; color: #6b7280; font-size: 14px; }
+
+/* ── 表单 ───────────────────────────────────────────────────────── */
+.adaptive-page .adp-form {
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 16px 18px;
+  margin-bottom: 16px;
+}
+.adaptive-page .form-row { display: flex; flex-direction: column; margin-bottom: 12px; }
+.adaptive-page .form-row-inline { flex-direction: row; gap: 16px; }
+.adaptive-page .form-row-inline > div { flex: 1; display: flex; flex-direction: column; }
+.adaptive-page label { font-size: 13px; font-weight: 600; color: #374151; margin-bottom: 6px;
+  display: flex; align-items: center; justify-content: space-between; }
+.adaptive-page textarea,
+.adaptive-page input {
+  border: 1px solid #d1d5db; border-radius: 8px; padding: 8px 10px;
+  font-size: 14px; font-family: inherit; outline: none; transition: border-color .15s;
+}
+.adaptive-page textarea:focus,
+.adaptive-page input:focus { border-color: #6366f1; }
+.adaptive-page .form-actions { display: flex; align-items: center; gap: 12px; margin-top: 4px; }
+.adaptive-page .hint { color: #6b7280; font-size: 13px; }
+
+/* ── 按钮 ───────────────────────────────────────────────────────── */
+.adaptive-page .btn-primary {
+  background: #4f46e5; color: #fff; border: none; border-radius: 8px;
+  padding: 9px 18px; font-size: 14px; font-weight: 600; cursor: pointer; transition: background .15s;
+}
+.adaptive-page .btn-primary:hover:not(:disabled) { background: #4338ca; }
+.adaptive-page .btn-primary:disabled { background: #c7c9d9; cursor: not-allowed; }
+.adaptive-page .btn-ghost {
+  background: transparent; color: #4f46e5; border: 1px solid #c7d2fe;
+  border-radius: 8px; padding: 8px 14px; font-size: 13px; cursor: pointer;
+}
+.adaptive-page .btn-link {
+  background: none; border: none; color: #6366f1; font-size: 12px; cursor: pointer; padding: 0;
+}
+
+/* ── 上一轮成绩 banner ──────────────────────────────────────────── */
+.adaptive-page .report-banner {
+  background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 10px;
+  padding: 10px 14px; font-size: 14px; margin-bottom: 14px; color: #0c4a6e;
+}
+.adaptive-page .report-banner .gaps { display: block; margin-top: 4px; color: #b45309; font-size: 13px; }
+.adaptive-page .error-banner {
+  background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c;
+  border-radius: 10px; padding: 10px 14px; margin-bottom: 14px; font-size: 14px;
+}
+
+/* ── Agent 决策卡片（核心看点）───────────────────────────────────── */
+.adaptive-page .decision-card {
+  background: linear-gradient(135deg, #fafaff, #f5f3ff);
+  border: 1px solid #ddd6fe; border-left: 4px solid #7c3aed;
+  border-radius: 10px; padding: 12px 16px; margin-bottom: 16px;
+}
+.adaptive-page .decision-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.adaptive-page .decision-title { font-weight: 700; color: #5b21b6; }
+.adaptive-page .decision-meta { color: #6b7280; font-size: 13px; }
+.adaptive-page .decision-reason { margin-top: 8px; font-size: 14px; color: #374151; line-height: 1.5; }
+.adaptive-page .decision-targets { margin-top: 6px; font-size: 13px; color: #b45309; }
+
+/* action 徽章 */
+.adaptive-page .act-badge {
+  display: inline-block; padding: 2px 9px; border-radius: 999px;
+  font-size: 12px; font-weight: 600; white-space: nowrap;
+}
+.adaptive-page .act-advance   { background: #dcfce7; color: #166534; }
+.adaptive-page .act-remediate { background: #fee2e2; color: #991b1b; }
+.adaptive-page .act-continue  { background: #e0e7ff; color: #3730a3; }
+.adaptive-page .act-plan      { background: #fef3c7; color: #92400e; }
+.adaptive-page .act-finish    { background: #e5e7eb; color: #374151; }
+
+/* ── 答题区 ─────────────────────────────────────────────────────── */
+.adaptive-page .quiz-section,
+.adaptive-page .done-section,
+.adaptive-page .traj-section {
+  background: #fff; border: 1px solid #e5e7eb; border-radius: 12px;
+  padding: 16px 18px; margin-bottom: 16px;
+}
+.adaptive-page .quiz-section h3,
+.adaptive-page .done-section h3,
+.adaptive-page .traj-section h3 { margin: 0 0 12px; font-size: 16px; }
+.adaptive-page .quiz-item { margin-bottom: 16px; }
+.adaptive-page .quiz-q { font-weight: 600; margin-bottom: 8px; line-height: 1.5; }
+.adaptive-page .quiz-options { display: flex; flex-direction: column; gap: 6px; }
+.adaptive-page .opt {
+  display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+  border: 1px solid #e5e7eb; border-radius: 8px; cursor: pointer; font-size: 14px; transition: all .12s;
+}
+.adaptive-page .opt:hover { border-color: #c7d2fe; background: #f8f8ff; }
+.adaptive-page .opt-sel { border-color: #6366f1; background: #eef2ff; }
+.adaptive-page .quiz-text { width: 100%; }
+
+/* ── 结束 ───────────────────────────────────────────────────────── */
+.adaptive-page .done-summary {
+  background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 8px;
+  padding: 12px 14px; font-size: 14px; line-height: 1.6; color: #14532d;
+}
+.adaptive-page .learning-path { margin-top: 12px; }
+.adaptive-page .learning-path pre {
+  background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px;
+  padding: 10px; font-size: 12px; overflow-x: auto; max-height: 280px;
+}
+
+/* ── 轨迹表 ─────────────────────────────────────────────────────── */
+.adaptive-page .traj-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.adaptive-page .traj-table th,
+.adaptive-page .traj-table td {
+  text-align: left; padding: 7px 10px; border-bottom: 1px solid #f0f0f3;
+}
+.adaptive-page .traj-table th { color: #6b7280; font-weight: 600; font-size: 12px; }
+.adaptive-page .traj-table tbody tr:last-child td { border-bottom: none; }
+
+/* ── teach 徽章 ─────────────────────────────────────────────────── */
+.adaptive-page .act-teach { background: #cffafe; color: #155e75; }
+
+/* ── 讲解轮 ─────────────────────────────────────────────────────── */
+.adaptive-page .lesson-section {
+  background: #f0fdfa; border: 1px solid #99f6e4; border-left: 4px solid #0d9488;
+  border-radius: 12px; padding: 16px 18px; margin-bottom: 16px;
+}
+.adaptive-page .lesson-section h3 { margin: 0 0 10px; font-size: 16px; color: #115e59; }
+.adaptive-page .lesson-body {
+  white-space: pre-wrap; line-height: 1.7; font-size: 14px; color: #134e4a;
+  margin-bottom: 14px;
+}
+
+/* ── 逐题反馈 ───────────────────────────────────────────────────── */
+.adaptive-page .feedback-section {
+  background: #fff; border: 1px solid #e5e7eb; border-radius: 12px;
+  padding: 14px 16px; margin-bottom: 16px;
+}
+.adaptive-page .feedback-section h3 { margin: 0 0 10px; font-size: 15px; }
+.adaptive-page .fb-item {
+  border-left: 3px solid #e5e7eb; padding: 6px 10px; margin-bottom: 8px; border-radius: 4px;
+}
+.adaptive-page .fb-ok  { border-left-color: #22c55e; background: #f0fdf4; }
+.adaptive-page .fb-bad { border-left-color: #ef4444; background: #fef2f2; }
+.adaptive-page .fb-head { display: flex; gap: 8px; align-items: baseline; }
+.adaptive-page .fb-mark { font-weight: 700; }
+.adaptive-page .fb-ok .fb-mark  { color: #16a34a; }
+.adaptive-page .fb-bad .fb-mark { color: #dc2626; }
+.adaptive-page .fb-q { font-size: 14px; font-weight: 600; }
+.adaptive-page .fb-body { margin: 6px 0 2px 22px; font-size: 13px; color: #374151; }
+.adaptive-page .fb-line { margin-bottom: 4px; }
+.adaptive-page .fb-ai { color: #1f2937; line-height: 1.5; }
+.adaptive-page .fb-gap { color: #b45309; margin-top: 4px; }

@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+chroma_db/
+.checkpoints/
+.memory_snapshot.json
+frontend/
+tests/
+.deepeval/
+.omc/
+.omx/
+.playwright-cli/
+.git/
+*.log
+*.jsonl
