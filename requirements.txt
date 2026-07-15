@@ -32,5 +32,6 @@ sentence-transformers>=3.0.0
 mcp>=1.0.0
 
 # LangGraph SQLite checkpointer for interrupt/resume
-langgraph-checkpoint-sqlite>=2.0.0
-aiosqlite>=0.20.0
+langgraph-checkpoint-sqlite==2.0.11
+# checkpoint-sqlite 2.x relies on Connection.is_alive, removed in aiosqlite 0.22.
+aiosqlite==0.21.0
