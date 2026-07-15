@@ -38,7 +38,14 @@ async def _search_document(document_id: str, query: str) -> str:
     # 也破坏了"生产 == 评测"不变量。改走 retrieve_with_rewrite 恢复一致。
     result = await retrieve_with_rewrite(document_id, query)
     chunks = result["documents"][0][:3]    # 避免 token 爆炸
-    return json.dumps({"chunks": chunks}, ensure_ascii=False)
+    chunk_ids = result["ids"][0][:3]
+    if len(chunks) != len(chunk_ids):
+        raise ValueError("retrieval returned misaligned documents and ids")
+    return json.dumps({
+        "document_id": document_id,
+        "chunks": chunks,
+        "chunk_ids": chunk_ids,
+    }, ensure_ascii=False)
 
 
 async def _generate_quiz(

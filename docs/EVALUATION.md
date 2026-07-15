@@ -18,24 +18,63 @@ control-flow contracts such as:
 assistant and ToolRegistry path with a scripted model policy and fake handlers;
 it is not evidence of real-model task success.
 
+## Reproducible retrieval regression
+
+The business BM25 path now uses the same versioned, language-aware heuristic
+tokenizer for documents and queries (`BM25_TOKENIZER_ID` in
+`services/tokenization.py`). It normalizes text with NFKC and case folding,
+keeps ASCII words/numbers as tokens, and emits CJK unigrams plus adjacent
+bigrams. This is intentionally described as a heuristic tokenizer rather than
+a general Chinese word segmenter.
+
+An offline regression under the resume-audit workspace runs that exact source
+file on the public BEIR SciFact test split (5,183 documents, 300 queries). With
+all other BM25 settings held fixed, the pre-fix character baseline versus the
+current tokenizer produced:
+
+| Metric | Character baseline | Current tokenizer |
+| --- | ---: | ---: |
+| Recall@10 | 0.1286 | 0.7757 |
+| MRR@10 | 0.0734 | 0.6184 |
+| nDCG@10 | 0.0852 | 0.6523 |
+
+The runner records per-query results, source hashes, corpus hashes, a fixed
+bootstrap seed, and a paired 95% confidence interval for the nDCG@10 delta
+([0.5197, 0.6141]). These numbers measure English BM25 retrieval only. They do
+not establish Chinese retrieval quality, hybrid/RRF uplift, answer quality,
+Agent task success, production latency, or user impact.
+
+## Citation contract and remaining measurement boundary
+
+The autonomous endpoint now registers retrieved chunk IDs server-side, accepts
+only citation IDs from the current run, expands snippets from that registry,
+and fails closed to an explicit abstention when grounding is required but no
+valid citation survives. Unit tests cover forged IDs, no-citation abstention,
+and evidence continuity across human-in-the-loop resume.
+
+This contract is implementation evidence, not a citation-accuracy result. A
+publishable percentage still requires a versioned answerable/unanswerable set,
+claim-support labels, multiple real-model runs, and a deterministic scoring
+artifact.
+
 ## What is deliberately not claimed
 
-This public snapshot does not publish a model-quality benchmark, task completion
-rate, RAG Recall@K/MRR, real-provider latency, or token cost. Earlier local
-experiments depended on private vector collections and interview-question data
-whose redistribution provenance was unclear, so their datasets, outputs, logs,
-and aggregate reports were excluded rather than presented as reproducible
-evidence.
+This public snapshot does not publish a real-model task completion rate,
+citation-accuracy percentage, real-provider latency, or token cost. Earlier
+local experiments depended on private vector collections and
+interview-question data whose redistribution provenance was unclear, so their
+datasets, outputs, logs, and aggregate reports were excluded rather than
+presented as reproducible evidence.
 
 Unit-test pass counts must not be described as Agent success rates.
 
-## Requirements for a future public benchmark
+## Requirements for a future end-to-end benchmark
 
 A publishable evaluation should use a redistributable corpus and versioned task
 set, pin provider/model settings, store per-case trajectories without secrets,
 and report at least:
 
-- retrieval Recall@K/MRR and citation support rate;
+- retrieval Recall@K/MRR for each retrieval arm and citation support rate;
 - end-to-end task completion and first-tool accuracy;
 - average/P95 steps and latency, tool failure rate, and truncation rate;
 - token usage/cost when the provider exposes usage;

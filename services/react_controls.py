@@ -31,6 +31,17 @@ _FINALIZE_TOOL = {
                     "type": "string",
                     "description": "为什么这里可以结束？例如 '已完成 plan 所有步骤' / '已获取学习路径'",
                 },
+                "citation_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "回答所依据的 search_document observation 中真实 chunk_ids。",
+                    "default": [],
+                },
+                "abstained": {
+                    "type": "boolean",
+                    "description": "检索证据不足、选择不作答时为 true。",
+                    "default": False,
+                },
             },
             "required": ["final_answer"],
         },
@@ -94,6 +105,7 @@ def build_react_system_prompt(
             "update_learning_profile → plan_next_step → finalize"
         )
     principles.extend([
+        "如果使用 search_document 的内容回答，finalize 时必须把实际 observation 中的 chunk_ids 放入 citation_ids；不得编造 ID",
         "简单概念问题（如『什么是 RAG』）如果你知道答案，直接 finalize 给答案，不需要调工具",
         "不要输出空 message 或 '执行完毕' 这种废话——要么调工具要么调 finalize",
         "同一个工具不要短时间重复调用（除非参数明显不同）",
