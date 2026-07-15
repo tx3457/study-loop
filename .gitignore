@@ -1,0 +1,55 @@
+# ── Python ─────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+
+# ── 环境 / 密钥 ─────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── 数据 / 向量库 / Checkpointer ────────
+chroma_db/
+.checkpoints/
+uploads/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# ── 本机记忆快照（InMemoryStore 兜底，跨会话持久化；生产走 Postgres）──
+.memory_snapshot.json
+
+# ── 评测产物（保留脚本与汇总 json，忽略日志/增量）──
+.deepeval/
+artifacts/
+traces/
+*.log
+*.jsonl
+*.jsonl.*
+*.bak
+*.bak.*
+
+# ── 前端 ───────────────────────────────
+node_modules/
+frontend/node_modules/
+frontend/dist/
+dist/
+*.local
+
+# ── OMC / IDE / OS ─────────────────────
+.omc/
+.omx/
+.playwright-cli/
+.vscode/
+.idea/
+.DS_Store

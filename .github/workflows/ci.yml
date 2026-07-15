@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      LLM_API_KEY: ci-placeholder
+      LLM_BASE_URL: http://127.0.0.1:9/v1
+      LLM_MODEL: ci-placeholder
+      STRUCTURED_API_KEY: ci-placeholder
+      STRUCTURED_BASE_URL: http://127.0.0.1:9/v1
+      STRUCTURED_MODEL: ci-placeholder
+      EMBEDDING_API_KEY: ci-placeholder
+      EMBEDDING_BASE_URL: http://127.0.0.1:9/v1
+      LLM_EMBEDDING_MODEL: ci-placeholder
+      CHROMA_DIR: /tmp/study-loop-chroma
+      MEMORY_SNAPSHOT_PATH: /tmp/study-loop-memory.json
+      CHECKPOINT_DB_PATH: /tmp/study-loop-checkpoints/orchestrator.db
+      QUERY_REWRITE_ENABLED: "false"
+      HYDE_ENABLED: "false"
+      MULTIQUERY_ENABLED: "false"
+      RERANKER_ENABLED: "false"
+      MCP_LIVE_ENABLED: "false"
+      LANGCHAIN_TRACING_V2: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+      - name: Run deterministic tests
+        run: python -m pytest -q
+      - name: Run deterministic Agent demo
+        run: python scripts/demo_react_tutor_agent.py
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run build
+
+  compose-config:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Docker Compose configuration
+        run: ENV_FILE=.env.example docker compose config --quiet

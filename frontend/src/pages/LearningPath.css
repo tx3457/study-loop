@@ -1,0 +1,298 @@
+/* ═══════════════════════════════════════════════════════════════════
+   Learning Path Page — Timeline & Stage Cards
+   ═══════════════════════════════════════════════════════════════════ */
+
+.lp-page {
+  max-width: 800px;
+  animation: fadeIn 0.5s var(--ease-out);
+}
+
+/* ── Controls ─────────────────────────────────────────────────────── */
+
+.lp-controls {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.lp-select {
+  flex: 1;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  font-family: var(--font-body);
+  font-size: 14px;
+  color: var(--text-primary);
+  appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%239CA3AF' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 14px center;
+  cursor: pointer;
+  transition: border-color 0.2s;
+}
+
+.lp-select:focus {
+  outline: none;
+  border-color: var(--accent-blue);
+  box-shadow: 0 0 0 3px var(--accent-blue-soft);
+}
+
+.lp-generate-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 24px;
+  background: var(--accent-blue);
+  color: white;
+  font-size: 14px;
+  font-weight: 600;
+  border-radius: var(--radius-sm);
+  transition: all 0.2s var(--ease-out);
+  white-space: nowrap;
+}
+
+.lp-generate-btn:hover:not(:disabled) {
+  background: #1D4ED8;
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
+}
+
+.lp-generate-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ── Skeleton ─────────────────────────────────────────────────────── */
+
+.lp-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  padding-top: 12px;
+}
+
+.skeleton-stage {
+  display: flex;
+  gap: 20px;
+  animation: fadeIn 0.5s var(--ease-out) both;
+}
+
+.skeleton-circle {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: var(--border-light);
+  flex-shrink: 0;
+  animation: shimmer 1.5s infinite linear;
+  background-size: 200% 100%;
+  background-image: linear-gradient(90deg, var(--border-light) 25%, var(--bg-card) 50%, var(--border-light) 75%);
+}
+
+.skeleton-lines {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.skeleton-line {
+  height: 14px;
+  border-radius: 4px;
+  background: var(--border-light);
+  animation: shimmer 1.5s infinite linear;
+  background-size: 200% 100%;
+  background-image: linear-gradient(90deg, var(--border-light) 25%, var(--bg-card) 50%, var(--border-light) 75%);
+}
+
+.w60 { width: 60%; }
+.w80 { width: 80%; }
+.w40 { width: 40%; }
+
+/* ── Result Header ────────────────────────────────────────────────── */
+
+.lp-result {
+  animation: fadeInUp 0.5s var(--ease-out);
+}
+
+.lp-header-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  padding: 24px 28px;
+  margin-bottom: 32px;
+  box-shadow: var(--shadow-sm);
+}
+
+.lp-path-title {
+  font-size: 24px;
+  margin-bottom: 10px;
+}
+
+.lp-meta-row {
+  display: flex;
+  gap: 20px;
+}
+
+.lp-meta-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+/* ── Timeline ─────────────────────────────────────────────────────── */
+
+.lp-timeline {
+  display: flex;
+  flex-direction: column;
+}
+
+.timeline-item {
+  display: flex;
+  gap: 20px;
+  animation: fadeInUp 0.4s var(--ease-out) both;
+}
+
+.timeline-track {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex-shrink: 0;
+  width: 40px;
+}
+
+.timeline-node {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: linear-gradient(135deg, var(--accent-blue) 0%, #1D4ED8 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.25);
+}
+
+.timeline-item:nth-child(3n+2) .timeline-node {
+  background: linear-gradient(135deg, var(--accent-gold) 0%, #B8943F 100%);
+  box-shadow: 0 2px 8px rgba(201, 168, 83, 0.25);
+}
+
+.timeline-item:nth-child(3n+3) .timeline-node {
+  background: linear-gradient(135deg, #8B5CF6 0%, #6D28D9 100%);
+  box-shadow: 0 2px 8px rgba(139, 92, 246, 0.25);
+}
+
+.node-number {
+  font-family: var(--font-display);
+  font-size: 18px;
+  font-weight: 700;
+  color: white;
+}
+
+.timeline-line {
+  width: 2px;
+  flex: 1;
+  min-height: 20px;
+  background: var(--border);
+}
+
+/* ── Timeline Card ────────────────────────────────────────────────── */
+
+.timeline-card {
+  flex: 1;
+  background: var(--bg-card);
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  padding: 20px 24px;
+  margin-bottom: 16px;
+  transition: all 0.25s var(--ease-out);
+}
+
+.timeline-card:hover {
+  border-color: var(--border);
+  box-shadow: var(--shadow-md);
+  transform: translateX(4px);
+}
+
+.tc-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.tc-title {
+  font-family: var(--font-body);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.tc-time {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+.tc-desc {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+  margin-bottom: 12px;
+}
+
+.tc-topics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.topic-tag {
+  font-size: 12px;
+  padding: 3px 10px;
+  border-radius: 20px;
+  background: var(--accent-blue-soft);
+  color: var(--accent-blue);
+  font-weight: 500;
+}
+
+.timeline-item:nth-child(3n+2) .topic-tag {
+  background: var(--accent-gold-soft);
+  color: #92700C;
+}
+
+.timeline-item:nth-child(3n+3) .topic-tag {
+  background: #EDE9FE;
+  color: #6D28D9;
+}
+
+/* ── Responsive ───────────────────────────────────────────────────── */
+
+@media (max-width: 768px) {
+  .lp-controls {
+    flex-direction: column;
+  }
+
+  .timeline-card {
+    padding: 16px;
+  }
+}
