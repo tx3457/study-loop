@@ -1,9 +1,9 @@
 """Regression tests for fail-closed LLM-as-Judge aggregation."""
 
+import asyncio
+
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
 
 import services.eval as eval_service
 from models.eval import ABConfig, JudgeScore, JudgeVerdict
@@ -37,15 +37,14 @@ def _error_verdict(error_type: str = "RuntimeError") -> JudgeVerdict:
     )
 
 
-@pytest.mark.asyncio
-async def test_judge_exception_returns_explicit_error_without_fake_scores():
+def test_judge_exception_returns_explicit_error_without_fake_scores():
     client = MagicMock()
     client.beta.chat.completions.parse = AsyncMock(
         side_effect=RuntimeError("provider unavailable")
     )
 
     with patch.object(eval_service, "_client", client):
-        verdict = await eval_service.judge_question("q", "a", "source", [])
+        verdict = asyncio.run(eval_service.judge_question("q", "a", "source", []))
 
     assert verdict.status == "error"
     assert verdict.error_type == "RuntimeError"
@@ -53,8 +52,7 @@ async def test_judge_exception_returns_explicit_error_without_fake_scores():
     assert verdict.relevance is None
 
 
-@pytest.mark.asyncio
-async def test_successful_judge_call_preserves_flat_valid_verdict():
+def test_successful_judge_call_preserves_flat_valid_verdict():
     score = JudgeScore(
         relevance=5,
         clarity=4,
@@ -72,7 +70,9 @@ async def test_successful_judge_call_preserves_flat_valid_verdict():
     )
 
     with patch.object(eval_service, "_client", client):
-        verdict = await eval_service.judge_question("q", "a", "source", ["RAG"])
+        verdict = asyncio.run(
+            eval_service.judge_question("q", "a", "source", ["RAG"])
+        )
 
     assert verdict.status == "valid"
     assert verdict.relevance == 5
