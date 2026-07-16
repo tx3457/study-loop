@@ -65,6 +65,11 @@
 .autonomous-page .btn-link:hover {
   text-decoration: underline;
 }
+.autonomous-page .field-error {
+  margin-top: 6px;
+  color: var(--accent-danger);
+  font-size: 12px;
+}
 
 .autonomous-page .form-actions {
   display: flex;

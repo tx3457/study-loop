@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { getUserProfile, getUserSessions, getDocuments, getWrongQuestions } from '../api/client'
 import './Dashboard.css'
 
@@ -20,42 +20,61 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true)
   const [noProfile, setNoProfile] = useState(false)
   const [wrongLoading, setWrongLoading] = useState(false)
+  const [wrongError, setWrongError] = useState(null)
+  const [error, setError] = useState(null)
+  const wrongRequestId = useRef(0)
 
   /* ── 加载数据 ──────────────────────────────────────────────────── */
-  useEffect(() => {
-    async function load() {
-      try {
-        const [docs, sess] = await Promise.all([
-          getDocuments(),
-          getUserSessions().catch(() => []),
-        ])
-        setDocuments(docs.documents || [])
-        setSessions(Array.isArray(sess) ? sess : [])
-
-        const prof = await getUserProfile().catch(() => null)
-        if (prof) {
-          setProfile(prof)
-        } else {
-          setNoProfile(true)
-        }
-      } catch {
-        setNoProfile(true)
-      } finally {
-        setLoading(false)
-      }
+  const loadDashboard = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const [docs, sess, prof] = await Promise.all([
+        getDocuments(),
+        getUserSessions(),
+        getUserProfile(),
+      ])
+      setDocuments(docs.documents || [])
+      setSessions(Array.isArray(sess) ? sess : [])
+      setProfile(prof)
+      setNoProfile(!prof)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setLoading(false)
     }
-    load()
   }, [])
 
+  useEffect(() => { loadDashboard() }, [loadDashboard])
+
   /* ── 加载错题本 ────────────────────────────────────────────────── */
-  useEffect(() => {
-    if (!wrongDoc) { setWrongQuestions(null); return }
+  const loadWrongQuestions = useCallback(async (documentId) => {
+    const requestId = ++wrongRequestId.current
     setWrongLoading(true)
-    getWrongQuestions(wrongDoc)
-      .then(data => setWrongQuestions(data))
-      .catch(() => setWrongQuestions({ document_id: wrongDoc, total: 0, entries: [] }))
-      .finally(() => setWrongLoading(false))
-  }, [wrongDoc])
+    setWrongError(null)
+    try {
+      const data = await getWrongQuestions(documentId)
+      if (requestId !== wrongRequestId.current) return
+      setWrongQuestions(data)
+    } catch (err) {
+      if (requestId !== wrongRequestId.current) return
+      setWrongQuestions(null)
+      setWrongError(err.message)
+    } finally {
+      if (requestId === wrongRequestId.current) setWrongLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!wrongDoc) {
+      wrongRequestId.current += 1
+      setWrongQuestions(null)
+      setWrongError(null)
+      setWrongLoading(false)
+      return
+    }
+    loadWrongQuestions(wrongDoc)
+  }, [loadWrongQuestions, wrongDoc])
 
   /* ── 衍生数据 ──────────────────────────────────────────────────── */
   const mastery = profile?.topic_mastery || {}
@@ -87,7 +106,15 @@ export default function Dashboard() {
         <p className="page-desc">基于三层记忆系统的学习分析：知识点掌握度、学习趋势、错题回顾。</p>
       </header>
 
-      {noProfile && realSessions.length === 0 ? (
+      {error ? (
+        <div className="load-error-state" role="alert">
+          <p className="state-title">无法加载学习报告</p>
+          <p className="state-desc">{error}</p>
+          <button type="button" className="state-action" onClick={loadDashboard}>
+            重新加载
+          </button>
+        </div>
+      ) : noProfile && realSessions.length === 0 ? (
         <div className="dash-empty">
           <div className="empty-icon">
             <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round">
@@ -162,6 +189,7 @@ export default function Dashboard() {
               <h2 className="card-title">错题本</h2>
               <select
                 className="wrong-select"
+                aria-label="错题文档"
                 value={wrongDoc}
                 onChange={e => setWrongDoc(e.target.value)}
               >
@@ -172,7 +200,21 @@ export default function Dashboard() {
 
             {wrongLoading && <div className="loading-spinner small" />}
 
-            {wrongQuestions && !wrongLoading && (
+            {wrongError && !wrongLoading && (
+              <div className="load-error-state" role="alert">
+                <p className="state-title">无法加载错题</p>
+                <p className="state-desc">{wrongError}</p>
+                <button
+                  type="button"
+                  className="state-action"
+                  onClick={() => loadWrongQuestions(wrongDoc)}
+                >
+                  重新加载
+                </button>
+              </div>
+            )}
+
+            {wrongQuestions && !wrongLoading && !wrongError && (
               wrongQuestions.total === 0 ? (
                 <p className="card-empty">该文档暂无错题</p>
               ) : (
