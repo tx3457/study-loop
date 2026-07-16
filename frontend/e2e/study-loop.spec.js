@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test'
 
-const API_PREFIX = '/__e2e_api__'
+const API_PREFIX = '/api'
 
 test.beforeEach(async ({ page }) => {
   await page.route('https://fonts.googleapis.com/**', route => route.fulfill({
@@ -30,28 +30,31 @@ function trackBrowserProblems(page) {
 async function mockApi(page, handler) {
   const unexpectedRequests = []
 
-  await page.route(`**${API_PREFIX}/**`, async route => {
-    const request = route.request()
-    const url = new URL(request.url())
-    const path = url.pathname.slice(API_PREFIX.length)
-    const response = await handler({ path, request })
+  await page.route(
+    url => url.pathname.startsWith(`${API_PREFIX}/`),
+    async route => {
+      const request = route.request()
+      const url = new URL(request.url())
+      const path = url.pathname.slice(API_PREFIX.length)
+      const response = await handler({ path, request })
 
-    if (!response) {
-      unexpectedRequests.push(`${request.method()} ${path}`)
+      if (!response) {
+        unexpectedRequests.push(`${request.method()} ${path}`)
+        await route.fulfill({
+          status: 500,
+          contentType: 'application/json',
+          body: JSON.stringify({ detail: `Unexpected E2E API request: ${request.method()} ${path}` }),
+        })
+        return
+      }
+
       await route.fulfill({
-        status: 500,
+        status: response.status || 200,
         contentType: 'application/json',
-        body: JSON.stringify({ detail: `Unexpected E2E API request: ${request.method()} ${path}` }),
+        body: JSON.stringify(response.body),
       })
-      return
     }
-
-    await route.fulfill({
-      status: response.status || 200,
-      contentType: 'application/json',
-      body: JSON.stringify(response.body),
-    })
-  })
+  )
 
   return unexpectedRequests
 }
@@ -129,6 +132,200 @@ test('quiz setup exposes named controls and pressed states', async ({ page }) =>
   ).toHaveAttribute('aria-pressed', 'true')
   expect(unexpectedRequests).toEqual([])
   expect(problems).toEqual([])
+})
+
+test('document load failure is recoverable and never shown as an empty library', async ({ page }) => {
+  let failDocuments = true
+  let documentRequests = 0
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      documentRequests += 1
+      return failDocuments
+        ? { status: 503, body: { detail: '文档服务暂时不可用' } }
+        : { body: { documents: [] } }
+    }
+    return null
+  })
+
+  await page.goto('/documents')
+
+  await expect(page.getByRole('alert')).toContainText('无法加载文档列表')
+  await expect(page.getByText('还没有文档')).toHaveCount(0)
+
+  failDocuments = false
+  await page.getByRole('button', { name: '重新加载' }).click()
+  await expect(page.getByText('还没有文档')).toBeVisible()
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  expect(documentRequests).toBeGreaterThanOrEqual(2)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('dashboard load failure is recoverable and not presented as missing learning data', async ({ page }) => {
+  let failSessions = true
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: [] } }
+    }
+    if (request.method() === 'GET' && path === '/user/default_user/sessions') {
+      return failSessions
+        ? { status: 503, body: { detail: '学习记录暂时不可用' } }
+        : { body: [] }
+    }
+    if (request.method() === 'GET' && path === '/user/default_user/profile') {
+      return { body: null }
+    }
+    return null
+  })
+
+  await page.goto('/dashboard')
+
+  await expect(page.getByRole('alert')).toContainText('无法加载学习报告')
+  await expect(page.getByText('还没有学习数据')).toHaveCount(0)
+
+  failSessions = false
+  await page.getByRole('button', { name: '重新加载' }).click()
+  await expect(page.getByText('还没有学习数据')).toBeVisible()
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('wrong-question load failure stays distinct from a valid empty result', async ({ page }) => {
+  let failWrongQuestions = true
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (request.method() === 'GET' && path === '/user/default_user/sessions') {
+      return { body: [{ date: '2026-07-16', correct_rate: 0.5 }] }
+    }
+    if (request.method() === 'GET' && path === '/user/default_user/profile') {
+      return { body: { topic_mastery: {}, weak_points: [], total_sessions: 1 } }
+    }
+    if (request.method() === 'GET' && path === '/wrong-questions/notes.md') {
+      return failWrongQuestions
+        ? { status: 503, body: { detail: '错题服务暂时不可用' } }
+        : { body: { document_id: 'notes.md', total: 0, entries: [] } }
+    }
+    return null
+  })
+
+  await page.goto('/dashboard')
+  await page.getByRole('combobox', { name: '错题文档' }).selectOption('notes.md')
+
+  await expect(page.getByRole('alert')).toContainText('无法加载错题')
+  await expect(page.getByText('该文档暂无错题')).toHaveCount(0)
+
+  failWrongQuestions = false
+  await page.getByRole('button', { name: '重新加载' }).click()
+  await expect(page.getByText('该文档暂无错题')).toBeVisible()
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('late wrong-question responses cannot overwrite the selected document', async ({ page }) => {
+  let releaseFirstRequest
+  let markFirstRequestStarted
+  const firstRequestGate = new Promise(resolve => { releaseFirstRequest = resolve })
+  const firstRequestStarted = new Promise(resolve => { markFirstRequestStarted = resolve })
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['a.md', 'b.md'] } }
+    }
+    if (request.method() === 'GET' && path === '/user/default_user/sessions') {
+      return { body: [{ date: '2026-07-16', correct_rate: 0.5 }] }
+    }
+    if (request.method() === 'GET' && path === '/user/default_user/profile') {
+      return { body: { topic_mastery: {}, weak_points: [], total_sessions: 1 } }
+    }
+    if (request.method() === 'GET' && path === '/wrong-questions/a.md') {
+      markFirstRequestStarted()
+      await firstRequestGate
+      return {
+        body: {
+          document_id: 'a.md',
+          total: 1,
+          entries: [{
+            entry_id: 'a-1',
+            question: 'A 文档错题',
+            user_answer: 'A',
+            correct_answer: 'B',
+            explanation: '来自较慢的旧请求',
+          }],
+        },
+      }
+    }
+    if (request.method() === 'GET' && path === '/wrong-questions/b.md') {
+      return {
+        body: {
+          document_id: 'b.md',
+          total: 1,
+          entries: [{
+            entry_id: 'b-1',
+            question: 'B 文档错题',
+            user_answer: 'A',
+            correct_answer: 'B',
+            explanation: '来自当前选择',
+          }],
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/dashboard')
+  const documentSelect = page.getByRole('combobox', { name: '错题文档' })
+  await documentSelect.selectOption('a.md')
+  await firstRequestStarted
+  await documentSelect.selectOption('b.md')
+  await expect(page.getByText('B 文档错题')).toBeVisible()
+
+  const firstResponse = page.waitForResponse(
+    response => response.url().endsWith('/wrong-questions/a.md')
+  )
+  releaseFirstRequest()
+  await firstResponse
+  await page.waitForTimeout(100)
+
+  await expect(documentSelect).toHaveValue('b.md')
+  await expect(page.getByText('B 文档错题')).toBeVisible()
+  await expect(page.getByText('A 文档错题')).toHaveCount(0)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('Autonomous document refresh reports failures without breaking the form', async ({ page }) => {
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { status: 503, body: { detail: '文档服务暂时不可用' } }
+    }
+    return null
+  })
+
+  await page.goto('/autonomous')
+  await page.getByRole('button', { name: '刷新文档' }).click()
+
+  await expect(page.getByRole('alert')).toContainText(
+    '文档列表加载失败：文档服务暂时不可用'
+  )
+  await expect(page.getByLabel('你的学习目标')).toBeEditable()
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('document delete control keeps a mobile-sized touch target', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['mobile-notes.md'] } }
+    }
+    return null
+  })
+
+  await page.goto('/documents')
+  const deleteButton = page.getByRole('button', { name: '删除文档 mobile-notes.md' })
+  const box = await deleteButton.boundingBox()
+
+  expect(box.width).toBeGreaterThanOrEqual(44)
+  expect(box.height).toBeGreaterThanOrEqual(44)
+  expect(unexpectedRequests).toEqual([])
 })
 
 test('Autonomous HITL dialog isolates the page and resumes with the reply', async ({ page }) => {

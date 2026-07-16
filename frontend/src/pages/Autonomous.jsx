@@ -40,6 +40,7 @@ export default function Autonomous() {
   const [state, setState] = useState(initialState)
   const [askReply, setAskReply] = useState('')
   const [documents, setDocuments] = useState([])
+  const [documentsError, setDocumentsError] = useState(null)
   const lastConversationId = useRef(null)
   const modalRef = useRef(null)
   const modalInputRef = useRef(null)
@@ -136,11 +137,12 @@ export default function Autonomous() {
   }
 
   async function loadDocs() {
+    setDocumentsError(null)
     try {
       const data = await getDocuments()
       setDocuments(data.documents || [])
     } catch (err) {
-      setState(s => ({ ...s, error: err.message }))
+      setDocumentsError(err.message)
     }
   }
 
@@ -200,6 +202,11 @@ export default function Autonomous() {
             <datalist id="doc-list">
               {documents.map(d => <option key={d} value={d} />)}
             </datalist>
+            {documentsError && (
+              <p className="field-error" role="alert">
+                文档列表加载失败：{documentsError}
+              </p>
+            )}
           </div>
         </div>
 

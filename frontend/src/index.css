@@ -175,6 +175,44 @@ button {
   opacity: 1;
 }
 
+.load-error-state {
+  padding: 36px 20px;
+  border: 1px solid rgba(220, 38, 38, 0.16);
+  border-radius: var(--radius-md);
+  background: rgba(254, 226, 226, 0.45);
+  text-align: center;
+}
+
+.state-title {
+  color: var(--text-primary);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.state-desc {
+  margin-top: 6px;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.state-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  margin-top: 18px;
+  padding: 10px 18px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-blue);
+  color: white;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.state-action:hover {
+  background: #1d4ed8;
+}
+
 /* ── Scrollbar ────────────────────────────────────────────────────── */
 
 ::-webkit-scrollbar {

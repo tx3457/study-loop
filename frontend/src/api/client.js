@@ -1,11 +1,11 @@
 /**
  * API Client — StudyLoop 后端请求封装
  *
- * 开发环境：VITE_API_URL 未设置 → 直接请求 http://localhost:8001（CORS）
- * Docker 环境：VITE_API_URL=/api → 通过 Nginx 反代到后端（同域，无 CORS）
+ * 开发环境：VITE_API_URL 未设置 → /api，由 Vite 反代到本地后端
+ * Docker 环境：VITE_API_URL=/api → 由 Nginx 反代到后端
  */
 
-const BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8001'
+const BASE_URL = import.meta.env.VITE_API_URL || '/api'
 
 /**
  * 通用请求封装，自动处理错误

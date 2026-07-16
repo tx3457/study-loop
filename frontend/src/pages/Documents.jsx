@@ -14,16 +14,18 @@ export default function Documents() {
   const [dragOver, setDragOver] = useState(false)
   const [deleting, setDeleting] = useState(null) // document_id being deleted
   const [error, setError] = useState(null)
+  const [listError, setListError] = useState(null)
   const fileInputRef = useRef(null)
 
   /* ── 加载文档列表 ──────────────────────────────────────────────── */
   const fetchDocuments = useCallback(async () => {
+    setLoading(true)
+    setListError(null)
     try {
-      setError(null)
       const data = await getDocuments()
       setDocuments(data.documents || [])
     } catch (err) {
-      setError(err.message)
+      setListError(err.message)
     } finally {
       setLoading(false)
     }
@@ -214,6 +216,14 @@ export default function Documents() {
               <div key={i} className="skeleton-card" style={{ animationDelay: `${i * 0.1}s` }} />
             ))}
           </div>
+        ) : listError ? (
+          <div className="load-error-state" role="alert">
+            <p className="state-title">无法加载文档列表</p>
+            <p className="state-desc">{listError}</p>
+            <button type="button" className="state-action" onClick={fetchDocuments}>
+              重新加载
+            </button>
+          </div>
         ) : documents.length === 0 ? (
           <div className="empty-state">
             <div className="empty-icon">
@@ -247,6 +257,7 @@ export default function Documents() {
                   </div>
                   <button
                     className="card-delete"
+                    aria-label={`删除文档 ${docId}`}
                     onClick={(e) => {
                       e.stopPropagation()
                       handleDelete(docId)
