@@ -36,7 +36,11 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 
 logger = logging.getLogger(__name__)
 # 路径流水线各阶段均为 json_schema 结构化输出 → 走 structured 供应商
-from services.llm import structured_client as _client, structured_model as _model
+from services.llm import (
+    llm_parse,
+    structured_client as _client,
+    structured_model as _model,
+)
 
 
 # ── 阶段 A：brief_extraction ─────────────────────────────────────────────
@@ -178,13 +182,14 @@ async def synthesize(
     if revise_hint:
         user_msg += f"\n\n【重要：修订建议（必须遵守）】\n{revise_hint}"
 
-    resp = await _client.beta.chat.completions.parse(
-        model=_model,
-        messages=[
+    resp = await llm_parse(
+        [
             {"role": "system", "content": _SYNTHESIZE_SYSTEM},
             {"role": "user", "content": user_msg},
         ],
-        response_format=LearningPath,
+        LearningPath,
+        client=_client,
+        model=_model,
     )
     path = resp.choices[0].message.parsed
     path.document_id = document_id

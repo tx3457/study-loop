@@ -50,6 +50,7 @@ dist/
 .omc/
 .omx/
 .playwright-cli/
+output/playwright/
 .vscode/
 .idea/
 .DS_Store

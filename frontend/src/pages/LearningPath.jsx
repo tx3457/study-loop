@@ -86,16 +86,20 @@ export default function LearningPath() {
 
       {/* ── 错误 ──────────────────────────────────────────────────────── */}
       {error && (
-        <div className="error-banner">
+        <div className="error-banner" role="alert">
           <span>&#9888;</span>
           <span>{error}</span>
-          <button className="error-close" onClick={() => setError(null)}>&times;</button>
+          <button className="error-close" aria-label="关闭错误提示" onClick={() => setError(null)}>&times;</button>
         </div>
       )}
 
       {/* ── 加载骨架 ──────────────────────────────────────────────────── */}
       {loading && (
-        <div className="lp-skeleton">
+        <div className="lp-skeleton" aria-busy="true">
+          <div className="lp-loading-copy" role="status" aria-live="polite">
+            <strong>正在整理学习路径</strong>
+            <span>正在分析材料、检索重点并组织阶段，通常需要约 1 分钟。</span>
+          </div>
           {[1, 2, 3].map(i => (
             <div key={i} className="skeleton-stage" style={{ animationDelay: `${i * 0.15}s` }}>
               <div className="skeleton-circle" />

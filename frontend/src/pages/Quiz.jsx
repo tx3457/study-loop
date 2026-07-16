@@ -196,10 +196,10 @@ export default function Quiz() {
       </header>
 
       {error && (
-        <div className="error-banner">
+        <div className="error-banner" role="alert">
           <span>&#9888;</span>
           <span>{error}</span>
-          <button className="error-close" onClick={() => setError(null)}>&times;</button>
+          <button className="error-close" aria-label="关闭错误提示" onClick={() => setError(null)}>&times;</button>
         </div>
       )}
 
@@ -208,8 +208,9 @@ export default function Quiz() {
         <div className="quiz-setup">
           {/* 文档选择 */}
           <div className="setup-field">
-            <label className="field-label">学习文档</label>
+            <label className="field-label" htmlFor="quiz-document">学习文档</label>
             <select
+              id="quiz-document"
               className="field-select"
               value={config.document_id}
               onChange={e => setConfig(c => ({ ...c, document_id: e.target.value }))}
@@ -222,8 +223,9 @@ export default function Quiz() {
 
           {/* 出题主题 */}
           <div className="setup-field">
-            <label className="field-label">出题主题 <span className="field-hint">（可选，留空则覆盖全文）</span></label>
+            <label className="field-label" htmlFor="quiz-topic">出题主题 <span className="field-hint">（可选，留空则覆盖全文）</span></label>
             <input
+              id="quiz-topic"
               className="field-input"
               type="text"
               placeholder="例如：第三章 向量检索"
@@ -234,12 +236,14 @@ export default function Quiz() {
 
           {/* 题数 */}
           <div className="setup-field">
-            <label className="field-label">题目数量</label>
-            <div className="count-selector">
+            <span id="quiz-count-label" className="field-label">题目数量</span>
+            <div className="count-selector" role="group" aria-labelledby="quiz-count-label">
               {[3, 5, 8, 10].map(n => (
                 <button
+                  type="button"
                   key={n}
                   className={`count-btn ${config.count === n ? 'active' : ''}`}
+                  aria-pressed={config.count === n}
                   onClick={() => setConfig(c => ({ ...c, count: n }))}
                 >
                   {n} 题
@@ -250,12 +254,14 @@ export default function Quiz() {
 
           {/* 难度 */}
           <div className="setup-field">
-            <label className="field-label">难度</label>
-            <div className="difficulty-selector">
+            <span id="quiz-difficulty-label" className="field-label">难度</span>
+            <div className="difficulty-selector" role="group" aria-labelledby="quiz-difficulty-label">
               {DIFFICULTY_OPTIONS.map(d => (
                 <button
+                  type="button"
                   key={d.value}
                   className={`diff-btn ${config.difficulty === d.value ? 'active' : ''}`}
+                  aria-pressed={config.difficulty === d.value}
                   style={{ '--diff-color': d.color }}
                   onClick={() => setConfig(c => ({ ...c, difficulty: d.value }))}
                 >
@@ -267,12 +273,14 @@ export default function Quiz() {
 
           {/* 题型 */}
           <div className="setup-field">
-            <label className="field-label">题型</label>
-            <div className="type-selector">
+            <span id="quiz-type-label" className="field-label">题型</span>
+            <div className="type-selector" role="group" aria-labelledby="quiz-type-label">
               {TYPE_OPTIONS.map(t => (
                 <button
+                  type="button"
                   key={t.value}
                   className={`type-btn ${config.type === t.value ? 'active' : ''}`}
+                  aria-pressed={config.type === t.value}
                   onClick={() => setConfig(c => ({ ...c, type: t.value }))}
                 >
                   {t.label}
@@ -282,6 +290,7 @@ export default function Quiz() {
           </div>
 
           <button
+            type="button"
             className="start-btn"
             onClick={handleStart}
             disabled={!config.document_id}
@@ -296,7 +305,7 @@ export default function Quiz() {
 
       {/* ══════════════ Loading Phase ══════════════ */}
       {phase === 'loading' && (
-        <div className="quiz-loading">
+        <div className="quiz-loading" role="status" aria-live="polite">
           <div className="loading-spinner" />
           <p className="loading-text">AI 正在出题...</p>
           <p className="loading-hint">正在检索文档并生成题目，请稍候</p>
@@ -308,7 +317,14 @@ export default function Quiz() {
         <div className="quiz-active">
           {/* 进度条 + 计时 */}
           <div className="quiz-toolbar">
-            <div className="progress-bar-wrapper">
+            <div
+              className="progress-bar-wrapper"
+              role="progressbar"
+              aria-label="答题进度"
+              aria-valuemin="0"
+              aria-valuemax={questions.length}
+              aria-valuenow={currentIdx + (phase === 'feedback' ? 1 : 0)}
+            >
               <div
                 className="progress-bar-fill"
                 style={{ width: `${((currentIdx + (phase === 'feedback' ? 1 : 0)) / questions.length) * 100}%` }}
@@ -327,11 +343,11 @@ export default function Quiz() {
 
           {/* 题目卡片 */}
           <div className="question-card" key={currentIdx}>
-            <p className="question-text">{currentQ.question}</p>
+            <p id={`quiz-question-${currentIdx}`} className="question-text">{currentQ.question}</p>
 
             {/* 选项列表 */}
             {currentQ.options && currentQ.options.length > 0 && (
-              <div className="options-list">
+              <div className="options-list" role="group" aria-labelledby={`quiz-question-${currentIdx}`}>
                 {currentQ.options.map((opt, i) => {
                   const letter = String.fromCharCode(65 + i)
                   const isSelected = selectedAnswer === opt
@@ -346,8 +362,10 @@ export default function Quiz() {
 
                   return (
                     <button
+                      type="button"
                       key={i}
                       className={optClass}
+                      aria-pressed={isSelected}
                       onClick={() => phase === 'answering' && setSelectedAnswer(opt)}
                       disabled={phase === 'feedback'}
                     >
@@ -369,6 +387,7 @@ export default function Quiz() {
             {config.type === 'short_answer' && (
               <textarea
                 className="short-answer-input"
+                aria-labelledby={`quiz-question-${currentIdx}`}
                 placeholder="请输入你的答案..."
                 value={selectedAnswer}
                 onChange={e => setSelectedAnswer(e.target.value)}

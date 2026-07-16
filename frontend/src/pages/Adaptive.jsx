@@ -14,12 +14,12 @@ import { startAdaptive, submitAdaptive, getDocuments } from '../api/client'
 import './Adaptive.css'
 
 const ACTION_META = {
-  advance:        { text: '升难度 advance',        cls: 'act-advance' },
-  teach:          { text: '讲解 teach',            cls: 'act-teach' },
-  remediate:      { text: '补薄弱点 remediate',    cls: 'act-remediate' },
-  continue:       { text: '巩固 continue',         cls: 'act-continue' },
-  switch_to_plan: { text: '转学习路径 switch',     cls: 'act-plan' },
-  finish:         { text: '结束 finish',           cls: 'act-finish' },
+  advance:        { text: '升难度',     cls: 'act-advance' },
+  teach:          { text: '讲解',       cls: 'act-teach' },
+  remediate:      { text: '补薄弱点',   cls: 'act-remediate' },
+  continue:       { text: '继续巩固',   cls: 'act-continue' },
+  switch_to_plan: { text: '转学习路径', cls: 'act-plan' },
+  finish:         { text: '结束',       cls: 'act-finish' },
 }
 
 function ActionBadge({ action }) {
@@ -113,17 +113,18 @@ export default function Adaptive() {
   return (
     <div className="adaptive-page">
       <header className="page-header">
-        <h2>🎓 Adaptive Learning</h2>
-        <p className="page-sub">
-          会教书的闭环 Agent：每轮根据你的答题表现，自主决定下一步升难度 / 补薄弱点 / 转学习路径
+        <h1 className="page-title">自适应辅导</h1>
+        <p className="page-desc">
+          系统会根据每轮答题表现调整难度、补充薄弱点或生成新的学习路径。
         </p>
       </header>
 
       {/* ── 开场输入区 ──────────────────────────────────────────────── */}
       <form className="adp-form" onSubmit={handleStart}>
         <div className="form-row">
-          <label>学习目标</label>
+          <label htmlFor="adaptive-goal">学习目标</label>
           <textarea
+            id="adaptive-goal"
             rows={2}
             value={req.goal}
             onChange={e => setReq(s => ({ ...s, goal: e.target.value }))}
@@ -133,19 +134,21 @@ export default function Adaptive() {
         </div>
         <div className="form-row form-row-inline">
           <div>
-            <label>用户 ID</label>
+            <label htmlFor="adaptive-user">用户 ID</label>
             <input
+              id="adaptive-user"
               value={req.user_id}
               onChange={e => setReq(s => ({ ...s, user_id: e.target.value }))}
               disabled={phase !== 'idle' && phase !== 'error'}
             />
           </div>
           <div className="doc-input">
-            <label>
-              文档 ID
-              <button type="button" className="btn-link" onClick={loadDocs}>↻ 刷新列表</button>
-            </label>
+            <div className="field-label-row">
+              <label htmlFor="adaptive-document">文档 ID</label>
+              <button type="button" className="btn-link" onClick={loadDocs}>刷新文档</button>
+            </div>
             <input
+              id="adaptive-document"
               list="adp-doc-list"
               value={req.document_id}
               onChange={e => setReq(s => ({ ...s, document_id: e.target.value }))}
@@ -161,7 +164,7 @@ export default function Adaptive() {
           {(phase === 'idle' || phase === 'error') && (
             <button type="submit" className="btn-primary"
               disabled={!req.document_id.trim() || !req.goal.trim()}>
-              🚀 开始自适应辅导
+              开始自适应辅导
             </button>
           )}
           {(phase === 'done' || phase === 'answering' || phase === 'error') && (
@@ -171,7 +174,7 @@ export default function Adaptive() {
         </div>
       </form>
 
-      {error && <div className="error-banner">⚠️ {error}</div>}
+      {error && <div className="error-banner" role="alert">⚠️ {error}</div>}
 
       {/* ── 上一轮成绩 ──────────────────────────────────────────────── */}
       {r && r.last_report_score != null && (
@@ -238,9 +241,13 @@ export default function Adaptive() {
           <h3>📝 第 {r.turn} 轮 · 共 {r.questions.length} 题</h3>
           {r.questions.map((q, i) => (
             <div className="quiz-item" key={i}>
-              <div className="quiz-q">{i + 1}. {q.question}</div>
+              <div id={`adaptive-question-${r.turn}-${i}`} className="quiz-q">{i + 1}. {q.question}</div>
               {q.options && q.options.length > 0 ? (
-                <div className="quiz-options">
+                <div
+                  className="quiz-options"
+                  role="radiogroup"
+                  aria-labelledby={`adaptive-question-${r.turn}-${i}`}
+                >
                   {q.options.map((opt, oi) => (
                     <label key={oi} className={`opt ${answers[i] === opt ? 'opt-sel' : ''}`}>
                       <input
@@ -256,11 +263,13 @@ export default function Adaptive() {
                 </div>
               ) : (
                 <input
+                  id={`adaptive-answer-${r.turn}-${i}`}
                   className="quiz-text"
                   value={answers[i] || ''}
                   onChange={e => setAnswer(i, e.target.value)}
                   placeholder="输入你的答案"
                   disabled={busy}
+                  aria-labelledby={`adaptive-question-${r.turn}-${i}`}
                 />
               )}
             </div>

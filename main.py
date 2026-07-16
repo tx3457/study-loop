@@ -3,6 +3,7 @@ import logging
 from fastapi import FastAPI, Path,Query,Depends,HTTPException,Request
 from fastapi.responses import HTMLResponse,JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from openai import APIError
 from pydantic import BaseModel, Field
 from routers.chat import router as chat_router
 from routers.documents import router as document_router
@@ -32,7 +33,9 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",   # Vite dev
+        "http://127.0.0.1:5173",   # Vite dev（loopback 地址）
         "http://localhost:4001",   # Docker 前端（直接访问后端时）
+        "http://127.0.0.1:4001",   # Docker 前端（loopback 地址）
     ],
     allow_methods=["*"],
     allow_headers=["*"],
@@ -99,4 +102,19 @@ async def deal(request: Request, exc: ValueError):
 
 @app.exception_handler(RetryExhausted)
 async def retry_exhausted_handler(request: Request, exc: RetryExhausted):
-    return JSONResponse(status_code=503, content={"error": "服务暂时不可用", "detail": str(exc)})
+    logging.getLogger(__name__).warning("provider retries exhausted: %s", exc)
+    return JSONResponse(
+        status_code=503,
+        content={"error": "服务暂时不可用", "detail": "模型服务请求失败"},
+    )
+
+
+@app.exception_handler(APIError)
+async def provider_error_handler(request: Request, exc: APIError):
+    logging.getLogger(__name__).warning(
+        "provider request failed: %s", type(exc).__name__
+    )
+    return JSONResponse(
+        status_code=503,
+        content={"error": "服务暂时不可用", "detail": "模型服务请求失败"},
+    )

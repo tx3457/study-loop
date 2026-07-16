@@ -16,6 +16,7 @@ routers/autonomous.py 的 ~8 轮 ReAct 循环此前零单测。
   python -m pytest test/test_autonomous_loop.py -q
 """
 import json
+import asyncio
 import sys
 import unittest
 from pathlib import Path
@@ -27,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import routers.autonomous as au
 import services.tool_loop as tool_loop
 from routers.autonomous import AutonomousRequest, ContinueRequest
+from services.retry import RetryExhausted
 
 
 def _tool_call(call_id, name, args_json):
@@ -56,6 +58,7 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         au._sessions.clear()
+        au._sessions_in_flight.clear()
 
     async def test_business_tool_then_finalize(self):
         responses = [
@@ -233,6 +236,97 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out.finalize_reason, "max_rounds_truncated")
         self.assertEqual(out.final_answer, "基于已有信息的收尾回答")
         self.assertEqual(disp.await_count, au.MAX_AUTONOMOUS_ROUNDS)
+
+    async def test_provider_failure_propagates_without_false_truncation(self):
+        finish = AsyncMock(return_value=_assistant_msg(content="不应执行"))
+        with patch.object(au, "check_injection", AsyncMock(return_value=(False, ""))), \
+             patch.object(au, "run_tool_round", AsyncMock(
+                 side_effect=RetryExhausted("provider down")
+             )), patch.object(au, "llm_chat", finish):
+            with self.assertRaises(RetryExhausted):
+                await au.autonomous_agent(AutonomousRequest(query=SHORT_Q, user_id="u"))
+
+        finish.assert_not_awaited()
+
+    async def test_continue_provider_failure_preserves_retryable_session(self):
+        ask_responses = [
+            _assistant_msg(tool_calls=[_tool_call("c1", "ask_user", '{"question": "文档?"}')]),
+        ]
+        with patch.object(au, "_client", _mock_client(ask_responses)), \
+             patch.object(au, "check_injection", AsyncMock(return_value=(False, ""))):
+            first = await au.autonomous_agent(AutonomousRequest(query=SHORT_Q, user_id="u"))
+
+        cid = first.conversation_id
+        original = au._sessions[cid]
+        original_message_count = len(original.messages)
+        original_step_count = len(original.steps)
+
+        with patch.object(au, "check_injection", AsyncMock(return_value=(False, ""))), \
+             patch.object(au, "run_tool_round", AsyncMock(
+                 side_effect=RetryExhausted("provider down")
+             )):
+            with self.assertRaises(RetryExhausted):
+                await au.continue_autonomous(
+                    ContinueRequest(conversation_id=cid, user_reply="doc123")
+                )
+
+        self.assertIn(cid, au._sessions)
+        self.assertIs(au._sessions[cid], original)
+        self.assertEqual(len(original.messages), original_message_count)
+        self.assertEqual(len(original.steps), original_step_count)
+
+    async def test_continue_failure_after_tool_progress_does_not_replay_session(self):
+        ask_responses = [
+            _assistant_msg(tool_calls=[_tool_call("c1", "ask_user", '{"question": "继续?"}')]),
+        ]
+        with patch.object(au, "_client", _mock_client(ask_responses)), \
+             patch.object(au, "check_injection", AsyncMock(return_value=(False, ""))):
+            first = await au.autonomous_agent(AutonomousRequest(query=SHORT_Q, user_id="u"))
+
+        completed_tool_round = SimpleNamespace(
+            has_tool_calls=True,
+            outcomes=[SimpleNamespace(
+                name="update_learning_profile",
+                arguments={"user_id": "u"},
+                kind="dispatched",
+                result='{"status": "updated"}',
+                blocked_reason=None,
+                call_id="c2",
+            )],
+        )
+        with patch.object(au, "check_injection", AsyncMock(return_value=(False, ""))), \
+             patch.object(au, "run_tool_round", AsyncMock(side_effect=[
+                 completed_tool_round,
+                 RetryExhausted("provider down after write"),
+             ])):
+            with self.assertRaises(RetryExhausted):
+                await au.continue_autonomous(ContinueRequest(
+                    conversation_id=first.conversation_id,
+                    user_reply="继续",
+                ))
+
+        self.assertNotIn(first.conversation_id, au._sessions)
+        self.assertNotIn(first.conversation_id, au._sessions_in_flight)
+
+    async def test_cancelled_continue_restores_unmodified_session(self):
+        ask_responses = [
+            _assistant_msg(tool_calls=[_tool_call("c1", "ask_user", '{"question": "继续?"}')]),
+        ]
+        with patch.object(au, "_client", _mock_client(ask_responses)), \
+             patch.object(au, "check_injection", AsyncMock(return_value=(False, ""))):
+            first = await au.autonomous_agent(AutonomousRequest(query=SHORT_Q, user_id="u"))
+
+        original = au._sessions[first.conversation_id]
+        with patch.object(au, "check_injection", AsyncMock(return_value=(False, ""))), \
+             patch.object(au, "run_tool_round", AsyncMock(side_effect=asyncio.CancelledError)):
+            with self.assertRaises(asyncio.CancelledError):
+                await au.continue_autonomous(ContinueRequest(
+                    conversation_id=first.conversation_id,
+                    user_reply="继续",
+                ))
+
+        self.assertIs(au._sessions[first.conversation_id], original)
+        self.assertNotIn(first.conversation_id, au._sessions_in_flight)
 
     async def test_injection_short_circuits(self):
         with patch.object(au, "check_injection", AsyncMock(return_value=(True, "注入"))), \

@@ -85,6 +85,23 @@
   padding-top: 12px;
 }
 
+.lp-loading-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.62);
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.lp-loading-copy strong {
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
 .skeleton-stage {
   display: flex;
   gap: 20px;

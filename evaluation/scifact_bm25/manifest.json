@@ -17,7 +17,8 @@
       },
       "vectorstore": {
         "path": "services/vectorstore.py",
-        "sha256": "4804c12e6efab0ec9c32b97912c5b7a848ce8e4cc5ac6083ed62654755b4cc8a"
+        "sha256": "141d4a361886f693a06fe6fa075fe5decb547fa7b4144a96dca194b29422b204",
+        "hash_refresh_note": "Refreshed after document-ingestion lifecycle changes outside the evaluated BM25 retrieval path."
       }
     }
   },

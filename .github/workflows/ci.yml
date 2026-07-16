@@ -63,6 +63,37 @@ jobs:
       - run: npm run lint
       - run: npm run build
 
+  e2e:
+    name: Browser E2E (Chromium, mocked API)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install frontend dependencies
+        run: npm ci
+      - name: Install Chromium and OS dependencies
+        run: npx playwright install --with-deps chromium
+      - name: Run browser E2E
+        run: npm run test:e2e
+        env:
+          CI: "true"
+      - name: Upload Playwright diagnostics
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: study-loop-playwright-${{ github.run_attempt }}
+          path: output/playwright/
+          if-no-files-found: warn
+          retention-days: 7
+
   compose-config:
     runs-on: ubuntu-latest
     timeout-minutes: 5

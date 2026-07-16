@@ -5,16 +5,24 @@
 升级后：parser 自动识别 .pdf/.docx/.txt/.md/图片(OCR)，chunker 自适应切分。
 """
 import os
+import logging
 from pathlib import Path
 
+from chromadb.errors import ChromaError, NotFoundError
 from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from models.quiz import Quiz
 from services.chunker import default_chunker
 from services.parser import UnsupportedFileError, parse_upload
-from services.vectorstore import deal_document, delete_document, get_all_document
+from services.vectorstore import (
+    DocumentAlreadyExistsError,
+    deal_document,
+    delete_document,
+    get_all_document,
+)
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # 上传安全限制:扩展名白名单(fail-fast,读文件前就拒绝) + 大小上限(防 OOM)
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "20")) * 1024 * 1024
@@ -51,7 +59,13 @@ async def upload_document(file: UploadFile = File(...)):
     if not chunk_texts:
         raise HTTPException(status_code=400, detail="文档解析后内容为空（可能是扫描件 OCR 失败或文件损坏）")
 
-    chunk_count = await deal_document(file.filename, file.filename, chunk_texts)
+    try:
+        chunk_count = await deal_document(file.filename, file.filename, chunk_texts)
+    except DocumentAlreadyExistsError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    except ChromaError as e:
+        logger.exception("文档索引写入失败: %s", file.filename)
+        raise HTTPException(status_code=503, detail="文档存储暂时不可用") from e
     return Quiz(
         document_id=file.filename,
         filename=file.filename,
@@ -62,11 +76,21 @@ async def upload_document(file: UploadFile = File(...)):
 
 @router.get("/documents")
 async def get_documents():
-    collections = await get_all_document()
+    try:
+        collections = await get_all_document()
+    except ChromaError as e:
+        logger.exception("文档列表读取失败")
+        raise HTTPException(status_code=503, detail="文档存储暂时不可用") from e
     return {"documents": [c.name for c in collections]}
 
 
 @router.delete("/documents/{document_id}")
 async def delete_document_by_id(document_id: str):
-    await delete_document(document_id)
+    try:
+        await delete_document(document_id)
+    except NotFoundError as e:
+        raise HTTPException(status_code=404, detail="文档不存在") from e
+    except ChromaError as e:
+        logger.exception("文档删除失败: %s", document_id)
+        raise HTTPException(status_code=503, detail="文档存储暂时不可用") from e
     return {"status": "deleted", "document_id": document_id}
