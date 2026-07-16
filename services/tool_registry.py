@@ -100,6 +100,17 @@ class ToolRegistry:
             f"(timeout={tool.metadata.timeout_sec}s, retries={tool.metadata.max_retries})"
         )
 
+    def unregister(self, name: str, *, expected_tool: Tool | None = None) -> bool:
+        """Remove a tool without deleting a newer owner that reused its name."""
+        current = self._tools.get(name)
+        if current is None:
+            return False
+        if expected_tool is not None and current is not expected_tool:
+            return False
+        del self._tools[name]
+        logger.info(f"[tool_registry] unregistered: {name}")
+        return True
+
     def get(self, name: str) -> Optional[Tool]:
         return self._tools.get(name)
 

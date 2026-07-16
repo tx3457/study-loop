@@ -6,7 +6,7 @@ from models.chat import ChatResponse, StructuredResponse
 
 from services.provider_config import (
     PROVIDER_TIMEOUT,
-    build_async_openai,
+    build_managed_async_openai,
     load_provider_configs,
 )
 from services.retry import with_retry
@@ -20,7 +20,7 @@ base_url = _chat_config.base_url
 model = _chat_config.model
 
 # 模块级共享 client：统一 LLM 入口默认用它；调用方可注入自己的 client（测试 mock / 多租户）。
-_client = build_async_openai(_chat_config)
+_client = build_managed_async_openai(_chat_config)
 
 # ── 结构化输出（json_schema）供应商分离 ──────────────────────────────────────
 # DeepSeek 等厂商不支持 OpenAI 的 json_schema response_format（实测 400:
@@ -29,7 +29,7 @@ _client = build_async_openai(_chat_config)
 # SiliconFlow 高峰期 TLS 建连可达 4-6s，超过 openai SDK 默认 connect=5.0s →
 # 全部请求在握手阶段就 APITimeoutError。放宽 connect 超时。
 structured_model = _structured_config.model
-structured_client = build_async_openai(_structured_config)
+structured_client = build_managed_async_openai(_structured_config)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -53,6 +53,10 @@ async def connect_and_register_all() -> list[str]:
 
     fail-soft：单个 server 连不上只 warn 并降级（清理该 client），不阻断启动 / 其他 server。
     """
+    if _clients:
+        logger.warning("[mcp_servers] replacing existing live MCP connections")
+        await cleanup_all()
+
     if not mcp_live_enabled():
         logger.info("[mcp_servers] MCP_LIVE_ENABLED=false，跳过 live MCP 接入")
         return []

@@ -44,6 +44,7 @@ class MCPClient:
         self._exit_stack = AsyncExitStack()
         self._session = None  # type: ignore[assignment]
         self._initialized = False
+        self._registered_tools: dict[str, Tool] = {}
 
     async def connect(self) -> None:
         """建立 stdio 子进程连接 + MCP 协议握手"""
@@ -94,11 +95,15 @@ class MCPClient:
 
     async def cleanup(self) -> None:
         """释放子进程 + session 资源(幂等,best-effort)"""
+        for name, tool in list(self._registered_tools.items()):
+            tool_registry.unregister(name, expected_tool=tool)
+        self._registered_tools.clear()
         try:
             await self._exit_stack.aclose()
         except Exception as e:
             logger.debug(f"[mcp_client] cleanup error suppressed: {type(e).__name__}: {e}")
         self._initialized = False
+        self._session = None
 
 
 async def register_mcp_tools_to_registry(
@@ -134,6 +139,7 @@ async def register_mcp_tools_to_registry(
             handler=_handler,
             metadata=ToolMetadata(timeout_sec=timeout_sec, max_retries=max_retries),
         )
+        client._registered_tools[full_name] = tool
         tool_registry.register(tool)
         registered.append(full_name)
 

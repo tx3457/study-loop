@@ -93,8 +93,15 @@ class TestRegisterMCPToolsToRegistry(unittest.IsolatedAsyncioTestCase):
 
     async def asyncSetUp(self):
         from services.tool_registry import tool_registry
-        # 清空 ToolRegistry 避免污染
+
+        self._original_tools = dict(tool_registry._tools)
         tool_registry._tools.clear()
+
+    async def asyncTearDown(self):
+        from services.tool_registry import tool_registry
+
+        tool_registry._tools.clear()
+        tool_registry._tools.update(self._original_tools)
 
     async def test_registers_all_tools_with_prefix(self):
         from services.mcp_client import (
@@ -152,6 +159,83 @@ class TestRegisterMCPToolsToRegistry(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([log[0] for log in call_log], ["read", "write", "ls"])
         self.assertEqual(call_log[0][1], {"path": "/x"})
         self.assertEqual(call_log[1][1], {"path": "/y", "content": "z"})
+
+    async def test_cleanup_unregisters_tools_owned_by_client(self):
+        from services.mcp_client import (
+            MCPClient, StdioMCPServerConfig, register_mcp_tools_to_registry,
+        )
+        from services.tool_registry import tool_registry
+
+        client = MCPClient(
+            StdioMCPServerConfig(server_name="fs", command="echo", args=[])
+        )
+        client._session = _make_mock_session([_make_mock_tool("read")])
+        client._initialized = True
+
+        await register_mcp_tools_to_registry(client)
+        self.assertTrue(tool_registry.has("mcp_fs_read"))
+
+        await client.cleanup()
+
+        self.assertFalse(tool_registry.has("mcp_fs_read"))
+        self.assertEqual(client._registered_tools, {})
+        self.assertIsNone(client._session)
+        self.assertFalse(client._initialized)
+
+    async def test_old_client_cleanup_preserves_new_tool_owner(self):
+        from services.mcp_client import (
+            MCPClient, StdioMCPServerConfig, register_mcp_tools_to_registry,
+        )
+        from services.tool_registry import tool_registry
+
+        config = StdioMCPServerConfig(server_name="fs", command="echo", args=[])
+        old_client = MCPClient(config)
+        old_client._session = _make_mock_session([_make_mock_tool("read")])
+        old_client._initialized = True
+        await register_mcp_tools_to_registry(old_client)
+        old_tool = tool_registry.get("mcp_fs_read")
+
+        new_client = MCPClient(config)
+        new_client._session = _make_mock_session([_make_mock_tool("read")])
+        new_client._initialized = True
+        await register_mcp_tools_to_registry(new_client)
+        new_tool = tool_registry.get("mcp_fs_read")
+        self.assertIsNot(old_tool, new_tool)
+
+        await old_client.cleanup()
+        self.assertIs(tool_registry.get("mcp_fs_read"), new_tool)
+
+        await new_client.cleanup()
+        self.assertFalse(tool_registry.has("mcp_fs_read"))
+
+    async def test_partial_registration_can_be_rolled_back_by_cleanup(self):
+        from services.mcp_client import (
+            MCPClient, StdioMCPServerConfig, register_mcp_tools_to_registry,
+        )
+        from services.tool_registry import tool_registry
+
+        client = MCPClient(
+            StdioMCPServerConfig(server_name="fs", command="echo", args=[])
+        )
+        client._session = _make_mock_session(
+            [_make_mock_tool("read"), _make_mock_tool("write")]
+        )
+        client._initialized = True
+        original_register = tool_registry.register
+
+        def fail_on_second_tool(tool):
+            if tool.name == "mcp_fs_write":
+                raise RuntimeError("registry unavailable")
+            original_register(tool)
+
+        with patch.object(tool_registry, "register", side_effect=fail_on_second_tool):
+            with self.assertRaisesRegex(RuntimeError, "registry unavailable"):
+                await register_mcp_tools_to_registry(client)
+
+        self.assertTrue(tool_registry.has("mcp_fs_read"))
+        await client.cleanup()
+        self.assertFalse(tool_registry.has("mcp_fs_read"))
+        self.assertFalse(tool_registry.has("mcp_fs_write"))
 
 
 if __name__ == "__main__":

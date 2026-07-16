@@ -1,4 +1,5 @@
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Path,Query,Depends,HTTPException,Request
 from fastapi.responses import HTMLResponse,JSONResponse
@@ -21,14 +22,62 @@ from routers.audit import router as audit_router
 from routers.tutor import router as tutor_router
 from routers.health import router as health_router
 from services.memory_persist import load_snapshot
-from services.provider_config import ProviderConfigurationError
+from services.provider_config import (
+    ProviderConfigurationError,
+    close_managed_provider_clients,
+)
 from services.retry import RetryExhausted
+
+
+async def _load_memory_snapshot():
+    """本机记忆快照兜底：InMemoryStore 重启后从 JSON 回灌（生产 DATABASE_URL→PostgresStore 时 no-op）。"""
+    try:
+        n = load_snapshot()
+        if n:
+            logging.getLogger(__name__).info(f"[startup] 跨会话记忆：从本机快照恢复 {n} 条")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"[startup] load_snapshot 失败（忽略）: {e}")
+
+
+async def _connect_mcp_live_servers():
+    """接入真实 MCP live server（灰度 MCP_LIVE_ENABLED）：联网搜索/抓取工具注册进 ToolRegistry。"""
+    try:
+        from services.mcp_servers import connect_and_register_all
+        names = await connect_and_register_all()
+        if names:
+            logging.getLogger(__name__).info(f"[startup] MCP live 工具接入: {names}")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"[startup] MCP live 接入失败（降级，无联网）: {e}")
+
+
+async def _cleanup_mcp_live_servers():
+    """释放 MCP live server 子进程。"""
+    try:
+        from services.mcp_servers import cleanup_all
+        await cleanup_all()
+    except Exception:
+        pass
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Own startup resources and release them in reverse dependency order."""
+    try:
+        await _load_memory_snapshot()
+        await _connect_mcp_live_servers()
+        yield
+    finally:
+        try:
+            await _cleanup_mcp_live_servers()
+        finally:
+            await close_managed_provider_clients()
 
 
 app = FastAPI(
     title="StudyLoop API",
     description="Document-grounded adaptive tutoring and bounded tool-use agents.",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 app.add_middleware(
@@ -58,39 +107,6 @@ app.include_router(adaptive_router)
 app.include_router(audit_router)
 app.include_router(tutor_router)   # Phase 2: supervisor-based MAS guided 辅导（灰度，默认 503）
 app.include_router(health_router)
-
-
-@app.on_event("startup")
-async def _load_memory_snapshot():
-    """本机记忆快照兜底：InMemoryStore 重启后从 JSON 回灌（生产 DATABASE_URL→PostgresStore 时 no-op）。"""
-    try:
-        n = load_snapshot()
-        if n:
-            logging.getLogger(__name__).info(f"[startup] 跨会话记忆：从本机快照恢复 {n} 条")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"[startup] load_snapshot 失败（忽略）: {e}")
-
-
-@app.on_event("startup")
-async def _connect_mcp_live_servers():
-    """接入真实 MCP live server（灰度 MCP_LIVE_ENABLED）：联网搜索/抓取工具注册进 ToolRegistry。"""
-    try:
-        from services.mcp_servers import connect_and_register_all
-        names = await connect_and_register_all()
-        if names:
-            logging.getLogger(__name__).info(f"[startup] MCP live 工具接入: {names}")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"[startup] MCP live 接入失败（降级，无联网）: {e}")
-
-
-@app.on_event("shutdown")
-async def _cleanup_mcp_live_servers():
-    """释放 MCP live server 子进程。"""
-    try:
-        from services.mcp_servers import cleanup_all
-        await cleanup_all()
-    except Exception:
-        pass
 
 
 @app.get("/")
