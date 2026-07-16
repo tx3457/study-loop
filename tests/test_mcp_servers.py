@@ -15,7 +15,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -43,7 +43,7 @@ class TestServerConfigs(unittest.TestCase):
 
 class TestConnectRegister(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
-        ms._clients.clear()
+        await ms.cleanup_all()
 
     async def test_disabled_returns_empty(self):
         with patch.dict(os.environ, {"MCP_LIVE_ENABLED": "false"}):
@@ -71,6 +71,47 @@ class TestConnectRegister(unittest.IsolatedAsyncioTestCase):
             inst.connect = AsyncMock(side_effect=RuntimeError("boom"))
             inst.cleanup = AsyncMock()
             names = await ms.connect_and_register_all()   # 不抛
+        self.assertEqual(names, [])
+        self.assertEqual(ms._clients, [])
+
+    async def test_repeated_connect_replaces_and_cleans_previous_client(self):
+        first = MagicMock()
+        first.connect = AsyncMock()
+        first.cleanup = AsyncMock()
+        second = MagicMock()
+        second.connect = AsyncMock()
+        second.cleanup = AsyncMock()
+
+        with patch.dict(os.environ, {"MCP_LIVE_ENABLED": "true"}), patch.object(
+            ms, "MCPClient", side_effect=[first, second]
+        ), patch.object(
+            ms,
+            "register_mcp_tools_to_registry",
+            new=AsyncMock(return_value=["mcp_ddg_search"]),
+        ):
+            await ms.connect_and_register_all()
+            names = await ms.connect_and_register_all()
+
+        first.cleanup.assert_awaited_once_with()
+        self.assertEqual(names, ["mcp_ddg_search"])
+        self.assertEqual(ms._clients, [second])
+
+    async def test_failed_reconnect_cleans_previous_and_new_clients(self):
+        previous = MagicMock()
+        previous.cleanup = AsyncMock()
+        ms._clients.append(previous)
+
+        failed = MagicMock()
+        failed.connect = AsyncMock(side_effect=RuntimeError("boom"))
+        failed.cleanup = AsyncMock()
+
+        with patch.dict(os.environ, {"MCP_LIVE_ENABLED": "true"}), patch.object(
+            ms, "MCPClient", return_value=failed
+        ):
+            names = await ms.connect_and_register_all()
+
+        previous.cleanup.assert_awaited_once_with()
+        failed.cleanup.assert_awaited_once_with()
         self.assertEqual(names, [])
         self.assertEqual(ms._clients, [])
 

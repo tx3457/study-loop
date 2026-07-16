@@ -7,8 +7,11 @@ rules and safe client defaults are defined.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import logging
 import os
+import weakref
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,6 +25,8 @@ from openai import AsyncOpenAI
 load_dotenv(Path(__file__).parent.parent / ".env")
 
 PROVIDER_TIMEOUT = httpx.Timeout(120.0, connect=20.0)
+_CLIENT_CLOSE_TIMEOUT_SECONDS = 5.0
+logger = logging.getLogger(__name__)
 
 
 def _clean(value: object) -> str | None:
@@ -140,6 +145,97 @@ class ProviderConfig:
             return None
         key_fingerprint = hashlib.sha256(self.api_key.encode("utf-8")).hexdigest()
         return (_identity_url(self.base_url), key_fingerprint)
+
+
+class ManagedProviderClient:
+    """Stable proxy that lazily creates and safely recreates an SDK client."""
+
+    def __init__(
+        self,
+        config: ProviderConfig,
+        *,
+        timeout: float | httpx.Timeout = PROVIDER_TIMEOUT,
+        max_retries: int = 2,
+        client_factory=AsyncOpenAI,
+    ) -> None:
+        self._config = config
+        self._timeout = timeout
+        self._max_retries = max_retries
+        self._client_factory = client_factory
+        self._client = None
+
+    @property
+    def capability(self) -> str:
+        return self._config.capability
+
+    @property
+    def is_initialized(self) -> bool:
+        return self._client is not None
+
+    def _ensure_client(self):
+        if self._config.issues:
+            raise ProviderConfigurationError(
+                self._config.capability, self._config.issues
+            )
+        if self._client is None:
+            self._client = self._client_factory(
+                api_key=self._config.api_key,
+                base_url=self._config.base_url,
+                timeout=self._timeout,
+                max_retries=self._max_retries,
+            )
+        return self._client
+
+    def __getattr__(self, name: str):
+        return getattr(self._ensure_client(), name)
+
+    async def close(self) -> None:
+        client = self._client
+        self._client = None
+        if client is not None:
+            await client.close()
+
+
+_managed_provider_clients = weakref.WeakSet()
+
+
+def build_managed_async_openai(
+    config: ProviderConfig,
+    *,
+    timeout: float | httpx.Timeout = PROVIDER_TIMEOUT,
+    max_retries: int = 2,
+    client_factory=AsyncOpenAI,
+) -> ManagedProviderClient:
+    """Create and register a stable process-wide provider client proxy."""
+
+    client = ManagedProviderClient(
+        config,
+        timeout=timeout,
+        max_retries=max_retries,
+        client_factory=client_factory,
+    )
+    _managed_provider_clients.add(client)
+    return client
+
+
+async def close_managed_provider_clients() -> None:
+    """Close all initialized shared clients while keeping proxies reusable."""
+
+    async def close_one(client: ManagedProviderClient) -> None:
+        try:
+            await asyncio.wait_for(
+                client.close(), timeout=_CLIENT_CLOSE_TIMEOUT_SECONDS
+            )
+        except Exception as exc:
+            logger.warning(
+                "provider client close failed for %s (%s)",
+                client.capability,
+                type(exc).__name__,
+            )
+
+    await asyncio.gather(
+        *(close_one(client) for client in tuple(_managed_provider_clients))
+    )
 
 
 def load_provider_configs(
