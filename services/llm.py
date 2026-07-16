@@ -1,22 +1,26 @@
 from typing import Optional
 
-import httpx
 from openai import AsyncOpenAI
-from models.chat import ChatResponse, StructuredResponse
-from dotenv import load_dotenv
-import os
-from pathlib import Path
 
+from models.chat import ChatResponse, StructuredResponse
+
+from services.provider_config import (
+    PROVIDER_TIMEOUT,
+    build_async_openai,
+    load_provider_configs,
+)
 from services.retry import with_retry
 
-load_dotenv(Path(__file__).parent.parent / ".env")
+_provider_configs = load_provider_configs()
+_chat_config = _provider_configs["chat"]
+_structured_config = _provider_configs["structured"]
 
-api_key = os.getenv("LLM_API_KEY")
-base_url = os.getenv("LLM_BASE_URL")
-model = os.getenv("LLM_MODEL")
+api_key = _chat_config.api_key
+base_url = _chat_config.base_url
+model = _chat_config.model
 
 # 模块级共享 client：统一 LLM 入口默认用它；调用方可注入自己的 client（测试 mock / 多租户）。
-_client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+_client = build_async_openai(_chat_config)
 
 # ── 结构化输出（json_schema）供应商分离 ──────────────────────────────────────
 # DeepSeek 等厂商不支持 OpenAI 的 json_schema response_format（实测 400:
@@ -24,14 +28,8 @@ _client = AsyncOpenAI(api_key=api_key, base_url=base_url)
 # beta.chat.completions.parse 调用仍走 STRUCTURED_*（未配置则跟随 LLM_*）。
 # SiliconFlow 高峰期 TLS 建连可达 4-6s，超过 openai SDK 默认 connect=5.0s →
 # 全部请求在握手阶段就 APITimeoutError。放宽 connect 超时。
-PROVIDER_TIMEOUT = httpx.Timeout(120.0, connect=20.0)
-
-structured_model = os.getenv("STRUCTURED_MODEL") or model
-structured_client = AsyncOpenAI(
-    api_key=os.getenv("STRUCTURED_API_KEY") or api_key,
-    base_url=os.getenv("STRUCTURED_BASE_URL") or base_url,
-    timeout=PROVIDER_TIMEOUT,
-)
+structured_model = _structured_config.model
+structured_client = build_async_openai(_structured_config)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -97,37 +95,36 @@ async def llm_parse(
 
 
 async def chat(message: str):
-    client = AsyncOpenAI(api_key=api_key,base_url=base_url)
-    response = await client.chat.completions.create(model=model,messages=[{"role":"user","content":message}])
+    response = await llm_chat([{"role": "user", "content": message}])
     return ChatResponse(
         response=response.choices[0].message.content,
         usage=response.usage.model_dump(),
     )
 
-async def chat_structured(message: str):
-    client = AsyncOpenAI(api_key=api_key,base_url=base_url)
-    response = await client.beta.chat.completions.parse(
-        model=model,
-        messages=[{"role":"user","content":message}],
-        response_format=StructuredResponse
-    )
 
+async def chat_structured(message: str):
+    response = await llm_parse(
+        [{"role": "user", "content": message}],
+        response_format=StructuredResponse,
+    )
     return response.choices[0].message.parsed
 
-async def chat_stream(message: str):
-    client = AsyncOpenAI(api_key=api_key,base_url=base_url)
-    response = client.chat.completions.create(
-        model=model,messages=[{"role":"user","content":message}],
-        stream = True
-    )
-    async for chunk in response:
-        delta = chunk.choices[0].delta.content
-        if delta:
-            yield f"data: {delta}\n\n"
 
-async def chat_history( messages: list):
-    client = AsyncOpenAI(api_key=api_key,base_url=base_url)
-    response = await client.chat.completions.create(
-        model=model,
-        messages=messages)
+async def chat_stream(message: str):
+    response = await llm_chat(
+        [{"role": "user", "content": message}],
+        stream=True,
+    )
+
+    async def iter_events():
+        async for chunk in response:
+            delta = chunk.choices[0].delta.content
+            if delta:
+                yield f"data: {delta}\n\n"
+
+    return iter_events()
+
+
+async def chat_history(messages: list):
+    response = await llm_chat(messages)
     return response.choices[0].message.content

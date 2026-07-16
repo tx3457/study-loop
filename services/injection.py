@@ -19,16 +19,11 @@ Prompt Injection 检测服务（Phase 7 工程补洞 #6）
 import os
 import re
 import logging
-from pathlib import Path
 from pydantic import BaseModel
-from openai import AsyncOpenAI
-from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).parent.parent / ".env")
+from services.llm import structured_client as _client, structured_model as _model
+
 logger = logging.getLogger(__name__)
-
-_client = AsyncOpenAI(api_key=os.getenv("LLM_API_KEY"), base_url=os.getenv("LLM_BASE_URL"))
-_model = os.getenv("LLM_MODEL")
 
 
 # ═══���══════════════════════════════════════���════════════════════════════════

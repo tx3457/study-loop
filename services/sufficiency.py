@@ -29,18 +29,11 @@ Pre-generation 质量门：retrieve 之后、generate 之前判断检索结果�
 Rewrite Query：LLM 把过窄/口语化 query 改写得更宽泛，加同义词、去具体限定。
 """
 import logging
-import os
-from pathlib import Path
 from typing import Literal
 
-from dotenv import load_dotenv
-from openai import AsyncOpenAI
+from services.llm import _client, model as _model
 
 logger = logging.getLogger(__name__)
-
-load_dotenv(Path(__file__).parent.parent / ".env")
-_client = AsyncOpenAI(api_key=os.getenv("LLM_API_KEY"), base_url=os.getenv("LLM_BASE_URL"))
-_model = os.getenv("LLM_MODEL")
 
 
 # ── 配置常量（写成模块级，便于面试讲点 + chunk_size sweep 调）─────────────────

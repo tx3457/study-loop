@@ -28,25 +28,17 @@ Critic Agent：独立 subgraph，Tutor↔Critic 反思循环的核心（Phase 7 
 """
 import json
 import logging
-import os
-from pathlib import Path
 from typing import TypedDict
 
-from dotenv import load_dotenv
-from openai import AsyncOpenAI
 from langgraph.graph import StateGraph, START, END
 
 from models.critique import CritiqueReport, CritiqueSuggestion, DimensionScore
 from services.tools import dispatch_tool
 from services.memory import get_user_profile
+from services.llm import _client, model as _model
 from services.tracing import traceable
 
-load_dotenv(Path(__file__).parent.parent / ".env")
-
 logger = logging.getLogger(__name__)
-
-_client = AsyncOpenAI(api_key=os.getenv("LLM_API_KEY"), base_url=os.getenv("LLM_BASE_URL"))
-_model = os.getenv("LLM_MODEL")
 
 # Critic 判定置信度阈值：低于此值则触发二次检索
 _REINFORCE_THRESHOLD = 0.5

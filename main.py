@@ -19,7 +19,9 @@ from routers.autonomous import router as autonomous_router
 from routers.adaptive import router as adaptive_router
 from routers.audit import router as audit_router
 from routers.tutor import router as tutor_router
+from routers.health import router as health_router
 from services.memory_persist import load_snapshot
+from services.provider_config import ProviderConfigurationError
 from services.retry import RetryExhausted
 
 
@@ -55,6 +57,7 @@ app.include_router(autonomous_router)
 app.include_router(adaptive_router)
 app.include_router(audit_router)
 app.include_router(tutor_router)   # Phase 2: supervisor-based MAS guided 辅导（灰度，默认 503）
+app.include_router(health_router)
 
 
 @app.on_event("startup")
@@ -106,6 +109,21 @@ async def retry_exhausted_handler(request: Request, exc: RetryExhausted):
     return JSONResponse(
         status_code=503,
         content={"error": "服务暂时不可用", "detail": "模型服务请求失败"},
+    )
+
+
+@app.exception_handler(ProviderConfigurationError)
+async def provider_configuration_handler(
+    request: Request, exc: ProviderConfigurationError
+):
+    logging.getLogger(__name__).warning(
+        "provider configuration invalid for %s: %s",
+        exc.capability,
+        ",".join(exc.issues),
+    )
+    return JSONResponse(
+        status_code=503,
+        content={"error": "服务暂时不可用", "detail": "模型服务尚未正确配置"},
     )
 
 
