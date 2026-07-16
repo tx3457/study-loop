@@ -132,21 +132,35 @@ export default function Documents() {
       {/* ── 上传区域 ────────────────────────────────────────────────── */}
       <section
         className={`upload-zone ${dragOver ? 'drag-over' : ''} ${uploading ? 'uploading' : ''}`}
+        role="button"
+        tabIndex={uploading ? -1 : 0}
+        aria-label="选择要上传的学习材料"
+        aria-disabled={uploading}
+        aria-busy={uploading}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
         onClick={() => !uploading && fileInputRef.current?.click()}
+        onKeyDown={(event) => {
+          if (!uploading && (event.key === 'Enter' || event.key === ' ')) {
+            event.preventDefault()
+            fileInputRef.current?.click()
+          }
+        }}
       >
         <input
           ref={fileInputRef}
           type="file"
           accept=".pdf,.docx,.txt,.md,.png,.jpg,.jpeg,.gif,.bmp,.tiff,.tif"
-          onChange={(e) => handleUpload(e.target.files[0])}
+          onChange={(event) => {
+            handleUpload(event.target.files?.[0])
+            event.target.value = ''
+          }}
           style={{ display: 'none' }}
         />
 
         {uploadProgress ? (
-          <div className="upload-progress">
+          <div className="upload-progress" role="status" aria-live="polite">
             <div className={`progress-icon ${uploadProgress.status}`}>
               {uploadProgress.status === 'uploading' && (
                 <svg className="spinner" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -173,7 +187,7 @@ export default function Documents() {
               </svg>
             </div>
             <p className="upload-title">拖拽文件到此处，或点击选择</p>
-            <p className="upload-hint">支持 .txt / .md / .csv 格式</p>
+            <p className="upload-hint">支持 PDF / DOCX / TXT / Markdown 和常见图片</p>
           </div>
         )}
 
@@ -183,10 +197,10 @@ export default function Documents() {
 
       {/* ── 错误提示 ────────────────────────────────────────────────── */}
       {error && (
-        <div className="error-banner">
+        <div className="error-banner" role="alert">
           <span className="error-icon">&#9888;</span>
           <span>{error}</span>
-          <button className="error-close" onClick={() => setError(null)}>&times;</button>
+          <button className="error-close" aria-label="关闭错误提示" onClick={() => setError(null)}>&times;</button>
         </div>
       )}
 

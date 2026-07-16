@@ -2,9 +2,12 @@ import chromadb
 from openai import AsyncOpenAI
 import logging
 import os
+import time
+import uuid
 from pathlib import Path
 from dotenv import load_dotenv
 import asyncio
+from chromadb.errors import NotFoundError
 from services.retry import with_retry
 from services.tracing import traceable
 from services.reranker import RerankerUnavailable, rerank_docs, reranker_enabled
@@ -39,6 +42,15 @@ chromadb_client = chromadb.PersistentClient(_CHROMA_DIR)
 
 # 单次 embedding 请求最多 chunk 数:大文档分批,避免撞厂商单请求 input 上限
 EMBED_BATCH_SIZE = 64
+_STAGING_PREFIX = "studyloop-staging-"
+_STAGING_TTL_SECONDS = max(
+    60, int(os.getenv("STAGING_COLLECTION_TTL_SECONDS", "3600"))
+)
+_active_staging_names: set[str] = set()
+
+
+class DocumentAlreadyExistsError(Exception):
+    """A published collection already owns this document id."""
 
 
 async def _embed(texts: list[str]):
@@ -55,20 +67,145 @@ async def _embed(texts: list[str]):
     )
 
 
+async def _collection_exists(name: str) -> bool:
+    try:
+        await asyncio.to_thread(chromadb_client.get_collection, name=name)
+    except NotFoundError:
+        return False
+    return True
+
+
+async def _get_collection_if_exists(name: str):
+    try:
+        return await asyncio.to_thread(chromadb_client.get_collection, name=name)
+    except NotFoundError:
+        return None
+
+
+def _staging_is_stale(metadata: dict, now: float | None = None) -> bool:
+    created_at = metadata.get("created_at")
+    if not isinstance(created_at, (int, float)):
+        return True
+    return (now or time.time()) - created_at >= _STAGING_TTL_SECONDS
+
+
+async def _ensure_document_slot_available(document_id: str) -> None:
+    """Reject real duplicates while migrating legacy empty ghost collections."""
+    existing = await _get_collection_if_exists(document_id)
+    if existing is None:
+        return
+
+    metadata = existing.metadata if isinstance(existing.metadata, dict) else {}
+    status = metadata.get("ingest_status")
+    count = await asyncio.to_thread(existing.count)
+    removable = (
+        status == "indexing" and _staging_is_stale(metadata)
+    ) or (
+        status != "indexed" and count == 0
+    )
+    if removable:
+        try:
+            await asyncio.to_thread(chromadb_client.delete_collection, name=document_id)
+        except NotFoundError:
+            pass
+        logger.info("[vectorstore] removed incomplete collection before upload: %s", document_id)
+        return
+
+    raise DocumentAlreadyExistsError(f"文档 '{document_id}' 已存在，请先删除后再上传")
+
+
+async def _run_blocking_to_completion(func, /, *args, **kwargs):
+    """Do not abandon an in-flight Chroma thread when the HTTP task is cancelled."""
+    task = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError as cancellation:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        if task.done() and not task.cancelled():
+            try:
+                task.result()
+            except Exception:
+                pass
+        raise cancellation
+
+
 async def deal_document(document_id: str, filename: str, chunks: list[str]):
-    collection = chromadb_client.get_or_create_collection(name=document_id)
+    # 同名重传不能继续用 add：Chroma 会忽略重复 id，导致接口成功但正文仍是旧版本。
+    await _ensure_document_slot_available(document_id)
+
+    # 先完成所有外部 embedding 调用，provider 失败时不产生任何 Chroma 写入。
     # 分批 embed:几百 chunk 一次性 embed 会撞 API input 上限(多数厂商 ~2048 条/8k token)
     embeddings: list = []
     for start in range(0, len(chunks), EMBED_BATCH_SIZE):
         resp = await _embed(chunks[start:start + EMBED_BATCH_SIZE])
         embeddings.extend(item.embedding for item in resp.data)
-    await asyncio.to_thread(
-        collection.add,
-        documents=chunks,
-        embeddings=embeddings,
-        ids=[f"{document_id}_chunk_{i}" for i in range(len(chunks))],
-        metadatas=[{"source": chunks[i][:50], "doc_id": document_id, "chunk_index": i} for i in range(len(chunks))],
-    )
+
+    # 写入唯一 staging collection；只有 add 完整成功后才 rename 发布为 document_id。
+    # 即使 cleanup 失败，列表也会过滤 staging/indexing collection，不会宣称上传成功。
+    staging_name = f"{_STAGING_PREFIX}{uuid.uuid4().hex}"
+    collection = None
+    try:
+        # create 同步执行，确保取消信号到达时已经拿到本次 staging 的所有权，
+        # 外层 cleanup 不会因后台线程稍后才创建成功而漏删。
+        collection = chromadb_client.create_collection(
+            name=staging_name,
+            metadata={
+                "ingest_status": "indexing",
+                "source_filename": filename,
+                "created_at": int(time.time()),
+            },
+        )
+        _active_staging_names.add(staging_name)
+        await _run_blocking_to_completion(
+            collection.add,
+            documents=chunks,
+            embeddings=embeddings,
+            ids=[f"{document_id}_chunk_{i}" for i in range(len(chunks))],
+            metadatas=[
+                {"source": chunks[i][:50], "doc_id": document_id, "chunk_index": i}
+                for i in range(len(chunks))
+            ],
+        )
+
+        # 防止两个并发上传在首次检查后同时发布同一个 document_id。
+        await _ensure_document_slot_available(document_id)
+        try:
+            await _run_blocking_to_completion(
+                collection.modify,
+                name=document_id,
+                metadata={"ingest_status": "indexed", "source_filename": filename},
+            )
+        except Exception as publish_error:
+            # Chroma 的 rename 冲突没有稳定的专用异常类型；以正式 collection
+            # 是否已出现判定并发同名上传，统一返回 409 而不是误报存储故障。
+            if await _collection_exists(document_id):
+                raise DocumentAlreadyExistsError(
+                    f"文档 '{document_id}' 已存在，请先删除后再上传"
+                ) from publish_error
+            raise
+    except BaseException:
+        if collection is not None:
+            cleanup_name = getattr(collection, "name", staging_name) or staging_name
+            try:
+                # 同步 cleanup，避免请求已经取消时第二个 await 再次中断清理。
+                chromadb_client.delete_collection(name=cleanup_name)
+            except Exception as cleanup_error:
+                logger.error(
+                    "[vectorstore] staging cleanup failure for %s: %s",
+                    cleanup_name,
+                    cleanup_error,
+                    exc_info=True,
+                )
+        raise
+    finally:
+        _active_staging_names.discard(staging_name)
+
     _bm25_cache.pop(document_id, None)   # 文档内容已变,BM25 缓存失效
     return len(chunks)
 
@@ -274,8 +411,49 @@ async def bm25_only_query_document(document_id: str, query: str, n_results: int 
 
 
 async def get_all_document():
-    return await asyncio.to_thread(chromadb_client.list_collections)
+    collections = await asyncio.to_thread(chromadb_client.list_collections)
+    visible = []
+    now = time.time()
+    for collection in collections:
+        metadata = collection.metadata if isinstance(collection.metadata, dict) else {}
+        status = metadata.get("ingest_status")
+        if status == "indexing":
+            if (
+                collection.name not in _active_staging_names
+                and _staging_is_stale(metadata, now)
+            ):
+                try:
+                    await asyncio.to_thread(
+                        chromadb_client.delete_collection, name=collection.name
+                    )
+                except NotFoundError:
+                    pass
+                except Exception as cleanup_error:
+                    logger.error(
+                        "[vectorstore] stale staging cleanup failure for %s: %s",
+                        collection.name,
+                        cleanup_error,
+                    )
+            continue
+
+        # 升级前的 embedding ghost 没有 metadata 且 count=0：隐藏并迁移清理。
+        if status != "indexed" and await asyncio.to_thread(collection.count) == 0:
+            try:
+                await asyncio.to_thread(
+                    chromadb_client.delete_collection, name=collection.name
+                )
+            except NotFoundError:
+                pass
+            except Exception as cleanup_error:
+                logger.error(
+                    "[vectorstore] legacy ghost cleanup failure for %s: %s",
+                    collection.name,
+                    cleanup_error,
+                )
+            continue
+        visible.append(collection)
+    return visible
 
 async def delete_document(document_id: str):
-    _bm25_cache.pop(document_id, None)   # 缓存失效
     await asyncio.to_thread(chromadb_client.delete_collection,name=document_id)
+    _bm25_cache.pop(document_id, None)   # 仅在存储删除成功后失效

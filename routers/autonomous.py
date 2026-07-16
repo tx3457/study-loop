@@ -108,6 +108,7 @@ class AutonomousSession:
 
 
 _sessions: dict[str, AutonomousSession] = {}        # 内存 session 表（demo 阶段够，生产换 Redis）
+_sessions_in_flight: set[str] = set()               # 防止同一会话并发续跑
 
 
 def _save_session(s: AutonomousSession) -> None:
@@ -271,21 +272,16 @@ async def _run_react_loop(
         ]
 
         # ── 单轮：复用 run_tool_round（D4）。控制工具交回本函数处理。──
-        try:
-            rr = await run_tool_round(
-                messages,
-                tools=get_tool_definitions() + _CONTROL_TOOLS,
-                client=_client,
-                control_tools=CONTROL_TOOL_NAMES,
-                run_id=run_id,
-                user_id=user_id,
-                tool_choice="auto",
-                extra_call_messages=state_msg,
-            )
-        except Exception as e:
-            logger.exception(f"[autonomous] LLM call failed round {round_idx}: {e}")
-            steps.append(StepRecord(round_index=round_idx, blocked_reason=f"LLM 调用失败: {e}"))
-            break
+        rr = await run_tool_round(
+            messages,
+            tools=get_tool_definitions() + _CONTROL_TOOLS,
+            client=_client,
+            control_tools=CONTROL_TOOL_NAMES,
+            run_id=run_id,
+            user_id=user_id,
+            tool_choice="auto",
+            extra_call_messages=state_msg,
+        )
 
         # ── 无 tool_calls：LLM 直接给文字（视为隐式 finalize）──
         if not rr.has_tool_calls:
@@ -514,6 +510,8 @@ async def continue_autonomous(req: ContinueRequest) -> AutonomousResponse:
     """
     session = _sessions.get(req.conversation_id)
     if not session:
+        if req.conversation_id in _sessions_in_flight:
+            raise HTTPException(status_code=409, detail="conversation 正在续跑，请稍后重试")
         raise HTTPException(status_code=404, detail="conversation 不存在或已过期")
 
     # 注入检测
@@ -524,21 +522,55 @@ async def continue_autonomous(req: ContinueRequest) -> AutonomousResponse:
             conversation_id=req.conversation_id,
         )
 
-    # 把 user_reply 作为 ask_user 的 tool response
-    session.messages.append({
+    # 原子认领 session，避免同一 conversation 的并发续跑重复执行工具。
+    session = _sessions.pop(req.conversation_id, None)
+    if session is None:
+        raise HTTPException(status_code=409, detail="conversation 正在续跑，请稍后重试")
+    _sessions_in_flight.add(req.conversation_id)
+
+    # copy-on-resume：provider 临时失败时保留原 session，可用同一 conversation_id 重试。
+    resume_messages = list(session.messages)
+    resume_steps = list(session.steps)
+    resume_tools_called = list(session.tools_called)
+    resume_evidence_registry = dict(session.evidence_registry)
+    resume_messages.append({
         "role": "tool",
         "tool_call_id": session.pending_ask_call_id,
         "content": f"User replied: {req.user_reply}",
     })
-    # 弹出 session（用过即销毁；如果再次 ask_user 会重新写入）
-    _sessions.pop(req.conversation_id, None)
 
     run_id = f"auto_cont_{uuid.uuid4().hex[:12]}"
-    return await _run_react_loop(
-        messages=session.messages, plan=session.plan,
-        steps=session.steps, tools_called=session.tools_called,
-        user_id=session.user_id, document_id=session.document_id,
-        starting_round=session.rounds_used, run_id=run_id,
-        evidence_registry=session.evidence_registry,
-        grounding_required=session.grounding_required,
+    baseline = (
+        len(resume_messages),
+        len(resume_steps),
+        len(resume_tools_called),
+        len(resume_evidence_registry),
     )
+    try:
+        return await _run_react_loop(
+            messages=resume_messages, plan=session.plan,
+            steps=resume_steps, tools_called=resume_tools_called,
+            user_id=session.user_id, document_id=session.document_id,
+            starting_round=session.rounds_used, run_id=run_id,
+            evidence_registry=resume_evidence_registry,
+            grounding_required=session.grounding_required,
+        )
+    except BaseException:
+        progressed = baseline != (
+            len(resume_messages),
+            len(resume_steps),
+            len(resume_tools_called),
+            len(resume_evidence_registry),
+        )
+        # 仅在尚未执行/记录任何新动作时恢复。若已有工具轨迹，恢复原状态会
+        # 重放可能带副作用的工具，因此保守地消费该会话。
+        if not progressed:
+            _sessions.setdefault(req.conversation_id, session)
+        else:
+            logger.warning(
+                "[autonomous] continuation failed after progress; session %s consumed",
+                req.conversation_id,
+            )
+        raise
+    finally:
+        _sessions_in_flight.discard(req.conversation_id)

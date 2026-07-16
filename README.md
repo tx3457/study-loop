@@ -2,142 +2,59 @@
 
 [![CI](https://github.com/tx3457/study-loop/actions/workflows/ci.yml/badge.svg)](https://github.com/tx3457/study-loop/actions/workflows/ci.yml)
 
-StudyLoop 是一个面向个人学习材料的自适应辅导系统：它把文档检索、练习生成、作答批改、学习画像更新和下一步教学决策连成反馈闭环，并提供受轮次上限约束的工具调用 Agent。
+StudyLoop 是一个基于个人学习材料的 AI 自适应学习系统。它支持文档检索、学习路径生成、练习与批改、学习画像，以及带工具调用的学习 Agent。
 
-> 当前定位是可审阅的学习/作品集项目，不是生产级教学平台。运行真实检索与生成需要自行配置 OpenAI-compatible chat、structured-output 和 embedding 服务。
+## 主要功能
 
-## 它解决什么问题
+- 上传并解析 PDF、Word、Markdown、文本和图片
+- 使用 Chroma 与 BM25 检索学习材料
+- 生成学习路径、练习题和学习报告
+- 自动批改答案并记录错题与掌握度
+- 提供 Autonomous Agent 和带人工确认的 Tutor Agent
+- 保存学习记忆和工作流 checkpoint
 
-普通“上传文档后出题”的应用在一次生成后就结束，后续练习无法利用学生刚产生的表现。StudyLoop 将上一轮的成绩、薄弱点和掌握度作为下一轮 observation，让系统在升难度、补薄弱点、讲解、继续巩固、转学习路径或结束之间做出选择。
+## 环境要求
 
-```text
-学习材料
-   |
-   v
-解析与切块 -> Hybrid Retrieval -> 生成练习 -> 用户作答 -> 批改
-                                                       |
-                                                       v
-                              下一步教学动作 <- 更新学习画像
-                                      |
-                                      +----> 下一轮
-```
-
-项目的重点不是技术名词数量，而是三个可检查的闭环：
-
-1. 检索结果进入题目生成与质量检查，而不是只建一个向量库。
-2. 工具执行结果以 observation 回到模型上下文，模型可以据此继续调用其他工具或结束。
-3. 批改结果写入 learner memory，并影响下一轮自适应动作。
-
-## 哪些部分是真正的 Agent
-
-使用 LangGraph 并不自动等于 Agent。仓库按实际控制权区分如下：
-
-| 模块 | 模型拥有的决策权 | 准确分类 |
-| --- | --- | --- |
-| `/agent/autonomous` | 每轮动态选择业务工具、`ask_user` 或 `finalize`；工具 observation 回灌后再决策；最多 8 轮 | Tool-using Agent |
-| `/agent/tutor/assist` | 使用同一工具循环，并通过 `interrupt` / `Command(resume=...)` 完成人机协作暂停恢复 | Tool-using Agent + HITL |
-| `/agent/adaptive/*` | 模型基于成绩、画像和轨迹选择结构化教学动作，代码执行预定义分支 | Agentic Workflow |
-| `/agent/run`、quiz/critic/reviser 图 | 节点顺序、阈值与回环由开发者预先编码 | LangGraph Workflow |
-| 文档检索、学习画像 | 不包含自主行动循环 | RAG / Application Memory |
-
-更完整的边界与状态流见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
-
-## 关键设计与边界
-
-### 1. 长文档不能直接塞进提示词
-
-上传文件先经过格式白名单、大小限制、解析和自适应切块，再进入 Chroma 向量索引与 BM25 语料。查询阶段使用向量检索与 BM25 的 RRF 融合；query rewrite、HyDE、multi-query 和 cross-encoder reranker 都是可选阶段，可独立关闭。
-
-公开仓库发布了一个有明确边界的英文 BM25 组件回归：同一 SciFact test split、相同 BM25 参数下，对比修复前字符切分与当前业务 tokenizer。它不证明 Hybrid、生成答案、中文检索或引用准确率；结果、逐查询指标和离线校验命令见 [evaluation/scifact_bm25](evaluation/scifact_bm25/) 与 [docs/EVALUATION.md](docs/EVALUATION.md)。
-
-### 2. 工具调用必须形成 observation 闭环
-
-`ToolRegistry` 集中注册检索、出题、批改、画像更新和学习路径工具，并记录 timeout、retry 与 audit 配置。`tool_loop` 将模型给出的 JSON 参数交给白名单工具执行，再把结果追加为 tool message，下一轮模型能够据此改变动作。
-
-当前 JSON schema 主要用于约束模型输出；它不是完整的服务端 Pydantic 参数校验。`ToolMetadata.permission` 也只是描述性元数据，不应被理解为已经实现的鉴权系统。
-
-### 3. 运行状态与学习记忆分开管理
-
-- LangGraph checkpointer 保存某个 `thread_id` 的图执行状态，用于 Tutor 路径的 `interrupt` / resume。
-- Store-compatible memory 保存跨会话的学习画像、掌握度、薄弱点、偏好和学习事件。
-- 未配置 PostgreSQL 时，学习记忆使用进程内 Store 与本地 JSON 快照；这只是单机 fallback。
-
-独立 `/agent/autonomous` 端点的暂停会话仍保存在进程内，服务重启后不能恢复。只有 Tutor interrupt/resume 路径接入 SQLite checkpointer。
-
-### 4. 失败必须有边界
-
-- Agent 循环使用明确的最大轮数和 `finalize` 停止工具。
-- 工具执行经过 allowlist、timeout、retry 和 audit。
-- 文档上传限制扩展名与体积；PDF/OCR 设置页数和解析边界。
-- prompt injection 与输出泄漏默认执行本地规则检测，可选启用额外模型检查。
-- live MCP、云端 tracing 和重型 reranker 在示例配置中默认关闭。
-
-这些措施是工程边界，不代表沙箱、完整权限系统或生产级安全保证。详情见 [SECURITY.md](SECURITY.md)。
-
-## 技术架构
-
-```text
-React + Vite
-      |
-      v
-FastAPI routers
-      |
-      +-- predefined LangGraph workflows
-      |      quiz / critic / reviser / grader / planner
-      |
-      +-- bounded tool-use loops
-      |      autonomous agent / tutor assistant
-      |
-      +-- adaptive learning workflow
-             grade observation -> next teaching action
-
-Shared services
-  retrieval: Chroma + BM25 + RRF + optional rewrite/reranker
-  tools:     ToolRegistry + timeout/retry/audit
-  memory:    InMemoryStore or PostgreSQL Store
-  state:     SQLite LangGraph checkpointer
-  models:    OpenAI-compatible chat / structured output / embeddings
-```
+- Python 3.11
+- Node.js 20.19+ 或 22.12+
+- Docker Compose v2（可选）
+- Poppler 与 Tesseract（本地解析扫描 PDF 或图片时需要）
 
 ## 快速开始
 
-### 1. 确定性 Agent Demo（不调用模型或外网）
-
-要求 Python 3.11。
+### Docker Compose
 
 ```bash
-python -m venv .venv
+cp .env.example .env
+# 编辑 .env，配置模型服务
+docker compose up --build -d
+```
+
+启动后访问：
+
+- Web：<http://localhost:4001>
+- API 文档：<http://localhost:8001/docs>
+
+停止服务：
+
+```bash
+docker compose down
+```
+
+### 本地开发
+
+启动后端：
+
+```bash
+python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt -r requirements-dev.txt
-python scripts/demo_react_tutor_agent.py
-```
-
-Demo 注入 scripted model policy 与 fake tool handlers，但走真实的 `assistant_agent -> tool_loop -> ToolRegistry` 控制链。它用于复现行动—观察—继续行动的轨迹，不代表真实模型任务成功率。
-
-### 2. Docker Compose
-
-```bash
 cp .env.example .env
-# 在本机编辑 .env 中的 provider 地址、模型名和 key
-docker compose up --build
-```
-
-启动后：
-
-- Web：`http://localhost:4001`
-- API / OpenAPI：`http://localhost:8001/docs`
-- PostgreSQL：`localhost:5434`
-
-`.env.example` 中的数据库口令只是本地开发占位值；在共享环境运行前必须替换。
-
-### 3. 本地开发
-
-```bash
-cp .env.example .env
+# 编辑 .env，配置模型服务
 python -m uvicorn main:app --reload --port 8001
 ```
 
-另一个终端：
+启动前端：
 
 ```bash
 cd frontend
@@ -145,57 +62,74 @@ npm ci
 npm run dev
 ```
 
-准备好有效 provider 配置后，可以上传仓库内的合成示例材料：
+前端默认运行在 <http://localhost:5173>。
+
+## 模型配置
+
+完整功能需要 OpenAI-compatible 的 Chat、Structured Output 和 Embeddings API。主要环境变量如下：
+
+| 用途 | 环境变量 |
+| --- | --- |
+| Chat / Tool Calling | `LLM_API_KEY`、`LLM_BASE_URL`、`LLM_MODEL` |
+| Structured Output | `STRUCTURED_API_KEY`、`STRUCTURED_BASE_URL`、`STRUCTURED_MODEL` |
+| Embeddings | `EMBEDDING_API_KEY`、`EMBEDDING_BASE_URL`、`LLM_EMBEDDING_MODEL` |
+
+Structured Output 和 Embeddings 未单独配置 key 或地址时会回退到 `LLM_*`。完整配置见 [`.env.example`](.env.example)。
+
+## 使用方法
+
+1. 在“文档管理”上传学习材料。
+2. 在“学习路径”中选择文档并生成计划。
+3. 在“答题练习”中完成题目并查看批改结果。
+4. 在“学习报告”中查看掌握度、薄弱点和历史记录。
+5. 按需使用 Autonomous Agent 或 Adaptive Learning。
+
+示例材料位于 [`examples/sample_document.md`](examples/sample_document.md)。
+
+支持 `.pdf`、`.docx`、`.txt`、`.md` 及常见图片格式，默认上传上限为 20 MB。
+
+## 测试
 
 ```bash
-curl -F "file=@examples/sample_document.md" http://localhost:8001/documents/upload
-```
-
-支持 PDF、DOCX、TXT、Markdown 和常见图片。扫描型 PDF 与图片 OCR 依赖 Poppler/Tesseract；Docker 镜像已安装英文和简体中文运行依赖。
-
-## 测试与验证
-
-```bash
+# 后端测试
 python -m pytest -q
 
-# 不需要数据集或模型；校验仓库内已发布的逐查询指标、聚合值、源码与 artifact hash
+# Agent 演示与 BM25 评测校验
+python scripts/demo_react_tutor_agent.py
 python evaluation/scifact_bm25/verify.py
 
+# 前端检查
 cd frontend
 npm run lint
 npm run build
+
+# 浏览器 E2E（首次运行先执行 npx playwright install chromium）
+npm run test:e2e
 ```
 
-GitHub Actions 会运行后端确定性测试、scripted Agent demo、公开 SciFact 指标 artifact 校验、前端 lint/build 和 Docker Compose 配置校验。测试默认使用不可访问的本地占位 provider，防止误调用收费接口。
+浏览器 E2E 使用本地 Vite 和 Mock API，不会调用真实模型服务。
 
-公开版本刻意移除了本地向量库、上传语料、模型评测日志、原始轨迹和来源不清晰的面试题数据。当前能够公开验证的是控制流、工程契约和有边界的英文 BM25 组件回归，不是模型质量指标；请勿把单元测试通过数写成 Agent 成功率。
-
-## 主要目录
+## 项目结构
 
 ```text
 study-loop/
-├── agents/                 LangGraph 节点、Tutor graph 与 assistant tool loop
-├── routers/                FastAPI 端点与 HTTP 会话边界
-├── services/               RAG、工具、记忆、checkpoint、guardrail、trace
-├── models/                 Pydantic 请求、响应与状态模型
-├── frontend/               React/Vite 前端
-├── scripts/                不依赖真实模型的确定性 Agent demo
-├── tests/                  mock/unit/control-flow tests
-├── evaluation/             可离线校验的公开组件评测证据
-├── docs/                   架构边界与公开评测政策
-├── examples/               可再分发的合成示例材料
-└── docker-compose.yml      PostgreSQL + backend + frontend
+├── agents/          LangGraph Agent 与工作流
+├── routers/         FastAPI 路由
+├── services/        检索、模型、记忆和工具服务
+├── models/          Pydantic 数据模型
+├── frontend/        React 前端
+├── tests/           后端测试
+├── evaluation/      检索评测
+├── examples/        示例材料
+└── docs/            项目文档
 ```
 
-## 已知限制
+## 文档
 
-- 真实模型表现取决于 provider、模型、提示词、知识库与数据质量，当前无公开端到端质量指标。
-- standalone autonomous session 是进程内状态，不支持服务重启恢复。
-- Tutor supervisor 默认关闭，并仍包含 experimental worker，不作为已完成主能力宣传。
-- 工具 schema 不等于完整服务端参数验证，工具 permission 元数据不等于鉴权。
-- reranker 默认模型体积较大，首次启用会下载模型；轻量首次运行建议保持关闭。
-- 这不是任意代码执行 Agent，也没有提供 OS shell、文件写入或浏览器控制工具。
+- [架构说明](docs/ARCHITECTURE.md)
+- [评测说明](docs/EVALUATION.md)
+- [安全说明](SECURITY.md)
 
 ## License
 
-Source available for portfolio review. Copyright (c) 2026 tx3457. All rights reserved. See [LICENSE](LICENSE).
+Copyright (c) 2026 tx3457. All rights reserved. See [LICENSE](LICENSE).

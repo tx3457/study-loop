@@ -1,14 +1,9 @@
 /* Adaptive Learning 页面样式（自包含，作用域 .adaptive-page）*/
 .adaptive-page {
   max-width: 860px;
-  margin: 0 auto;
-  padding: 8px 4px 48px;
+  padding: 0 0 48px;
   color: #1f2937;
 }
-
-.adaptive-page .page-header { margin-bottom: 18px; }
-.adaptive-page .page-header h2 { margin: 0 0 4px; font-size: 22px; }
-.adaptive-page .page-sub { margin: 0; color: #6b7280; font-size: 14px; }
 
 /* ── 表单 ───────────────────────────────────────────────────────── */
 .adaptive-page .adp-form {
@@ -23,6 +18,10 @@
 .adaptive-page .form-row-inline > div { flex: 1; display: flex; flex-direction: column; }
 .adaptive-page label { font-size: 13px; font-weight: 600; color: #374151; margin-bottom: 6px;
   display: flex; align-items: center; justify-content: space-between; }
+.adaptive-page .field-label-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 6px;
+}
+.adaptive-page .field-label-row label { margin-bottom: 0; }
 .adaptive-page textarea,
 .adaptive-page input {
   border: 1px solid #d1d5db; border-radius: 8px; padding: 8px 10px;
@@ -157,3 +156,20 @@
 .adaptive-page .fb-line { margin-bottom: 4px; }
 .adaptive-page .fb-ai { color: #1f2937; line-height: 1.5; }
 .adaptive-page .fb-gap { color: #b45309; margin-top: 4px; }
+
+@media (max-width: 768px) {
+  .adaptive-page .form-row-inline {
+    flex-direction: column;
+  }
+
+  .adaptive-page .adp-form,
+  .adaptive-page .quiz-section,
+  .adaptive-page .done-section,
+  .adaptive-page .traj-section {
+    padding: 16px;
+  }
+
+  .adaptive-page .traj-section {
+    overflow-x: auto;
+  }
+}
