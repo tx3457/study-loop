@@ -74,7 +74,23 @@ npm run dev
 | Structured Output | `STRUCTURED_API_KEY`、`STRUCTURED_BASE_URL`、`STRUCTURED_MODEL` |
 | Embeddings | `EMBEDDING_API_KEY`、`EMBEDDING_BASE_URL`、`LLM_EMBEDDING_MODEL` |
 
-Structured Output 和 Embeddings 未单独配置 key 或地址时会回退到 `LLM_*`。完整配置见 [`.env.example`](.env.example)。
+Structured Output 和 Embeddings 的专用 key 与地址必须成对配置；两者同时留空时才会整组回退到 `LLM_*`。完整配置见 [`.env.example`](.env.example)。
+
+`.env` 是本项目的本地配置，不会从其他项目自动复制，也不会提交到 Git。配置真实 Provider 时：
+
+1. 将 `.env.example` 复制为 `.env`。
+2. 把 `LLM_*` 替换为真实的 OpenAI-compatible Chat API 地址、密钥和模型名。
+3. 如果 Chat Provider 不支持 JSON Schema Structured Output，单独配置 `STRUCTURED_*`。
+4. 如果 Chat Provider 不提供 Embeddings，单独配置 `EMBEDDING_*` 和 `LLM_EMBEDDING_MODEL`。
+
+后端启动后可检查配置：
+
+```bash
+curl -i http://localhost:8001/health/live
+curl -i http://localhost:8001/health/providers
+```
+
+`/health/live` 只检查进程存活，不访问外部服务。`/health/providers` 调用 Provider 的 `models.list`，不会发起 Chat、Structured Output 或 Embedding 请求；结果默认缓存 30 秒。全部模型在目录中可见时返回 200，否则返回 503 和稳定的诊断码。目录可达只代表凭据、地址和模型可见性正常，不代表 Structured Output、Tool Calling 或 Embedding 能力已经实际验证。
 
 ## 使用方法
 

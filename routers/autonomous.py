@@ -27,16 +27,12 @@ Autonomous Agent 端点（Phase 8 P2 升级：Plan-and-Execute → 真 ReAct + H
 5. 复用 P1-2 的 ToolRegistry，dispatch_tool 自带超时 / 重试 / audit
 """
 import logging
-import os
 import time
 import uuid
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Optional
 
-from dotenv import load_dotenv
 from fastapi import APIRouter, HTTPException
-from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
 from models.citation import CitationView, GroundingStatus
@@ -46,7 +42,7 @@ from services.citations import (
     resolve_citations,
 )
 from services.injection import check_injection, check_output_leak
-from services.llm import llm_chat
+from services.llm import _client as _client, llm_chat
 from services.react_controls import (
     CONTROL_TOOL_NAMES,
     build_control_tools,
@@ -56,12 +52,8 @@ from services.react_controls import (
 from services.tools import allowed_tool_names, get_tool_definitions
 from services.tool_loop import run_tool_round
 
-load_dotenv(Path(__file__).parent.parent / ".env")
-
 router = APIRouter()
 logger = logging.getLogger(__name__)
-
-_client = AsyncOpenAI(api_key=os.getenv("LLM_API_KEY"), base_url=os.getenv("LLM_BASE_URL"))
 
 MAX_AUTONOMOUS_ROUNDS = 8
 PLAN_SKIP_QUERY_LEN = 80               # 短于此长度的 query 跳过 plan 阶段

@@ -1,5 +1,4 @@
 import chromadb
-from openai import AsyncOpenAI
 import logging
 import os
 import time
@@ -8,6 +7,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 import asyncio
 from chromadb.errors import NotFoundError
+from services.provider_config import build_async_openai, load_provider_configs
 from services.retry import with_retry
 from services.tracing import traceable
 from services.reranker import RerankerUnavailable, rerank_docs, reranker_enabled
@@ -24,17 +24,12 @@ from services.tokenization import BM25_TOKENIZER_ID
 logger = logging.getLogger(__name__)
 load_dotenv(Path(__file__).parent.parent / ".env")
 
-embedding_model = os.getenv("LLM_EMBEDDING_MODEL")
+_embedding_config = load_provider_configs()["embedding"]
+embedding_model = _embedding_config.model
 # embedding 供应商可与 chat 分离（DeepSeek 无 embedding 接口）：
 # EMBEDDING_* 未配置则跟随 LLM_*
 # connect 超时放宽：SiliconFlow 高峰期 TLS 建连超过 SDK 默认 5s（见 services/llm.py）
-from services.llm import PROVIDER_TIMEOUT
-
-client = AsyncOpenAI(
-    api_key=os.getenv("EMBEDDING_API_KEY") or os.getenv("LLM_API_KEY"),
-    base_url=os.getenv("EMBEDDING_BASE_URL") or os.getenv("LLM_BASE_URL"),
-    timeout=PROVIDER_TIMEOUT,
-)
+client = build_async_openai(_embedding_config)
 
 # 绝对路径,避免不同启动目录(systemd/docker/测试)各自指向不同的 ./chroma_db
 _CHROMA_DIR = os.getenv("CHROMA_DIR") or str(Path(__file__).parent.parent / "chroma_db")

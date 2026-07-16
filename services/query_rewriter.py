@@ -30,12 +30,10 @@ from typing import Optional
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
+from services.llm import _client, model as _model
 
 logger = logging.getLogger(__name__)
 load_dotenv(Path(__file__).parent.parent / ".env")
-
-_client = AsyncOpenAI(api_key=os.getenv("LLM_API_KEY"), base_url=os.getenv("LLM_BASE_URL"))
-_model = os.getenv("LLM_MODEL")
 
 
 # ── env 开关 ─────────────────────────────────────────────────────────────────

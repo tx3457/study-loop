@@ -1,27 +1,18 @@
 import logging
-import os
-from pathlib import Path
 
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
-from openai import AsyncOpenAI
-from dotenv import load_dotenv
 
 from models.chat import ChatRequest, ChatResponse, HistoryRequest, ToolChatRequest, ToolChatResponse
-from services.llm import chat, chat_structured, chat_stream, chat_history
+from services.llm import _client as _client, chat, chat_structured, chat_stream, chat_history
 from services.compression import compress_chat_history, COMPRESS_THRESHOLD
 from services.tools import get_tool_definitions
 from services.tool_loop import run_tool_round
 from services.injection import check_injection, check_output_leak
 
-load_dotenv(Path(__file__).parent.parent / ".env")
-
 conversations: dict[str, list] = {}
 router = APIRouter()
 logger = logging.getLogger(__name__)
-
-_client = AsyncOpenAI(api_key=os.getenv("LLM_API_KEY"), base_url=os.getenv("LLM_BASE_URL"))
-_model = os.getenv("LLM_MODEL")
 
 
 @router.post("/chat")
@@ -34,7 +25,8 @@ async def llm_service_structured(request:ChatRequest):
 
 @router.post("/chat/stream")
 async def llm_service_stream(request:ChatRequest):
-    return StreamingResponse(chat_stream(request.message), media_type="text/event-stream")
+    stream = await chat_stream(request.message)
+    return StreamingResponse(stream, media_type="text/event-stream")
 
 @router.post("/chat/history")
 async def llm_service_history(request:HistoryRequest):
