@@ -20,7 +20,7 @@ LLM 调用统一走 services.llm.llm_chat（带 retry 横切）。
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 from services.llm import llm_chat
 from services.tool_registry import EffectMode, SideEffectAmbiguousError, tool_registry
@@ -63,6 +63,7 @@ async def run_tool_round(
     tool_choice: Optional[str] = None,
     max_retries: int = 2,
     extra_call_messages: Optional[list] = None,
+    on_before_tool_calls: Callable[[], Awaitable[None]] | None = None,
     **llm_kwargs,
 ) -> ToolRoundResult:
     """跑单轮 tool-calling 并把结果回灌进 messages（原地 append）。
@@ -80,6 +81,8 @@ async def run_tool_round(
         tool_choice: 透传给 LLM（"auto" 等）。None 则不传。
         extra_call_messages: 仅用于本次 LLM 调用、不持久化进 messages 的临时消息
                        （如 autonomous 每轮注入的 [Current state] 摘要）。
+        on_before_tool_calls: provider 返回工具调用后、修改消息或执行工具前的
+                       持久化屏障。用于 interrupt 续跑路径记录不可重放进展。
         其余 llm_kwargs 透传给 llm_chat（temperature/max_tokens...）。
 
     Returns:
@@ -117,6 +120,9 @@ async def run_tool_round(
         return ToolRoundResult(
             assistant_message=msg, has_tool_calls=False, content=msg.content or "",
         )
+
+    if on_before_tool_calls is not None:
+        await on_before_tool_calls()
 
     # 追加 assistant 消息（含 tool_calls），保证 OpenAI 协议完整
     messages.append({

@@ -79,8 +79,10 @@ npm run dev
 | Embeddings | `EMBEDDING_API_KEY`、`EMBEDDING_BASE_URL`、`LLM_EMBEDDING_MODEL` |
 
 Autonomous Agent 会为同一次前端重试复用 `Idempotency-Key`。使用
-`DATABASE_URL` 时 receipt 保存在 PostgreSQL；本地无数据库时保存在
-`IDEMPOTENCY_DB_PATH` 指定的 SQLite 文件。
+`DATABASE_URL` 时，重试 receipt 和人工确认暂停快照保存在 PostgreSQL；本地
+无数据库时，两者默认共用 `IDEMPOTENCY_DB_PATH` 指定的 SQLite 文件。暂停快照
+支持进程重启和多 worker 原子续跑，默认保留 1 小时。相关容量和 TTL 配置见
+[`.env.example`](.env.example)。
 
 Structured Output 和 Embeddings 的专用 key 与地址必须成对配置；两者同时留空时才会整组回退到 `LLM_*`。完整配置见 [`.env.example`](.env.example)。
 
@@ -126,9 +128,11 @@ python scripts/check_provider_capabilities.py
 # 后端测试
 python -m pytest -q
 
-# 使用临时 PostgreSQL 时会额外执行持久幂等跨连接测试
+# 使用临时 PostgreSQL 时会额外执行 receipt 与暂停会话的跨连接测试
 TEST_DATABASE_URL=postgresql://user:password@127.0.0.1:5432/studyloop_test \
-  python -m pytest -q tests/test_idempotency_postgres.py
+  python -m pytest -q \
+    tests/test_idempotency_postgres.py \
+    tests/test_autonomous_sessions_postgres.py
 
 # Agent 演示与 BM25 评测校验
 python scripts/demo_react_tutor_agent.py

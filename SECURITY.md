@@ -33,8 +33,6 @@ example configuration.
   an independent Pydantic type-validation layer.
 - `ToolMetadata.permission` is descriptive metadata; it is not an authorization
   system.
-- The standalone autonomous endpoint keeps paused conversations in process
-  memory. Only the tutor interrupt/resume path uses a LangGraph checkpointer.
 - Read-only and idempotent tools may retry automatically. Unknown and
   non-idempotent tools do not. Autonomous and tool-chat clients may send an
   `Idempotency-Key`; completed responses are replayed from a persistent receipt,
@@ -44,8 +42,30 @@ example configuration.
 - Receipts currently have no automatic expiry. This preserves fail-closed retry
   behavior, but operators must monitor storage and manually investigate stale
   `pending` receipts; adding a simple TTL would weaken at-most-once protection.
-- The paused Autonomous HITL session store is still process-local. A restart or
-  request routed to another worker cannot resume that paused conversation.
+- Autonomous HITL pause snapshots use versioned JSON in PostgreSQL when
+  `DATABASE_URL` is set, or SQLite for local development. Resume uses an atomic
+  fencing-token claim, enforces expiry at claim time, and records progress
+  before any returned tool call can mutate messages or dispatch a handler.
+  An abandoned `in_flight` claim is deliberately never unlocked by timeout;
+  automatic takeover could run concurrently with the old worker and duplicate
+  a side effect. Operators must investigate stale claims and restart the user
+  flow.
+- Pause snapshots may contain user messages, tool arguments and results, and
+  retrieved evidence text. The default TTL is one hour and the default encoded
+  payload limit is 2 MiB. Database files, backups, and logs must be protected
+  according to the sensitivity of the uploaded learning material. Autonomous
+  queries and replies are capped at 8,000 characters; user, document, and
+  conversation identifiers also have bounded lengths before execution starts.
+- The standalone API currently has no trusted authentication subject. A
+  `conversation_id` is therefore a high-entropy bearer capability, not an
+  authorization boundary, and deployments must be treated as single-user or
+  placed behind authentication. The ID is no longer logged in full.
+- Session transitions and idempotency receipts share the configured database by
+  default; `AUTONOMOUS_SESSION_DB_PATH` may override the local session file.
+  They are still separate transactions. This is fail-closed at-most-once
+  protection, not exactly-once execution: a process crash between transitions
+  can leave a pending receipt or an abandoned claim that requires operator
+  cleanup. `Idempotency-Key` also remains optional.
 - A resumed LangGraph node may replay earlier code before an `interrupt`.
   The interrupt-capable assistant therefore exposes and dispatches only tools
   declared read-only or idempotent; unknown MCP tools and profile writes are
