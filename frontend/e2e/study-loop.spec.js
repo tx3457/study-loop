@@ -134,6 +134,67 @@ test('quiz setup exposes named controls and pressed states', async ({ page }) =>
   expect(problems).toEqual([])
 })
 
+test('learning flows replace unusable setup controls with an upload action', async ({ page }) => {
+  const problems = trackBrowserProblems(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: [] } }
+    }
+    return null
+  })
+
+  for (const { route, unavailableAction } of [
+    { route: '/learning-path', unavailableAction: '生成学习路径' },
+    { route: '/quiz', unavailableAction: '开始答题' },
+  ]) {
+    await page.goto(route)
+
+    await expect(page.getByRole('heading', { name: '先上传学习材料' })).toBeVisible()
+    await expect(page.getByRole('link', { name: '前往文档管理' })).toHaveAttribute(
+      'href',
+      '/documents'
+    )
+    await expect(page.getByRole('button', { name: unavailableAction })).toHaveCount(0)
+  }
+
+  const viewport = await page.evaluate(() => ({
+    width: window.innerWidth,
+    scrollWidth: document.documentElement.scrollWidth,
+  }))
+  expect(viewport.scrollWidth).toBe(viewport.width)
+
+  expect(unexpectedRequests).toEqual([])
+  expect(problems).toEqual([])
+})
+
+test('learning flow document failures stay recoverable and distinct from empty data', async ({ page }) => {
+  let failDocuments = true
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return failDocuments
+        ? { status: 503, body: { detail: '文档服务暂时不可用' } }
+        : { body: { documents: [] } }
+    }
+    return null
+  })
+
+  for (const route of ['/learning-path', '/quiz']) {
+    failDocuments = true
+    await page.goto(route)
+
+    await expect(page.getByRole('alert')).toContainText('无法加载文档列表')
+    await expect(page.getByRole('heading', { name: '先上传学习材料' })).toHaveCount(0)
+
+    failDocuments = false
+    await page.getByRole('button', { name: '重新加载文档' }).click()
+    await expect(page.getByRole('heading', { name: '先上传学习材料' })).toBeVisible()
+    await expect(page.getByRole('alert')).toHaveCount(0)
+  }
+
+  expect(unexpectedRequests).toEqual([])
+})
+
 test('document load failure is recoverable and never shown as an empty library', async ({ page }) => {
   let failDocuments = true
   let documentRequests = 0
@@ -397,4 +458,169 @@ test('Autonomous HITL dialog isolates the page and resumes with the reply', asyn
   })
   expect(unexpectedRequests).toEqual([])
   expect(problems).toEqual([])
+})
+
+test('Autonomous preserves the initial goal and focus when starting fails', async ({ page }) => {
+  const startRequests = []
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'POST' && path === '/agent/autonomous') {
+      startRequests.push(await request.postDataJSON())
+      if (startRequests.length === 1) {
+        return { status: 503, body: { detail: '模型服务暂时不可用' } }
+      }
+      return {
+        body: {
+          awaiting_user_input: false,
+          conversation_id: 'playwright-start-retry',
+          final_answer: '已在重试后开始执行。',
+          finalize_reason: '重试成功',
+          rounds_used: 1,
+          steps: [],
+          tools_called: ['finalize'],
+          truncated: false,
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/autonomous')
+  const goal = page.getByLabel('你的学习目标')
+  await goal.fill('帮我复习向量检索')
+  await page.getByRole('button', { name: '开始执行' }).click()
+
+  await expect(page.getByRole('alert')).toContainText('模型服务暂时不可用')
+  await expect(goal).toHaveValue('帮我复习向量检索')
+  const retry = page.getByRole('button', { name: '再次执行当前目标' })
+  await expect(retry).toBeFocused()
+  await retry.click()
+
+  await expect(page.getByText('已在重试后开始执行。')).toBeVisible()
+  expect(startRequests).toEqual([
+    { query: '帮我复习向量检索', user_id: 'default_user', document_id: null },
+    { query: '帮我复习向量检索', user_id: 'default_user', document_id: null },
+  ])
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('Autonomous preserves a HITL reply and retries after a continuation failure', async ({ page }) => {
+  const continueRequests = []
+  let releaseFirstContinue
+  let markFirstContinueStarted
+  const firstContinueGate = new Promise(resolve => { releaseFirstContinue = resolve })
+  const firstContinueStarted = new Promise(resolve => { markFirstContinueStarted = resolve })
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'POST' && path === '/agent/autonomous') {
+      return {
+        body: {
+          awaiting_user_input: true,
+          conversation_id: 'playwright-hitl-retry',
+          user_question: '你希望重点学习哪一章？',
+          rounds_used: 1,
+          steps: [],
+          tools_called: ['ask_user'],
+          truncated: false,
+        },
+      }
+    }
+
+    if (request.method() === 'POST' && path === '/agent/autonomous/continue') {
+      continueRequests.push(await request.postDataJSON())
+      if (continueRequests.length === 1) {
+        markFirstContinueStarted()
+        await firstContinueGate
+        return { status: 503, body: { detail: '模型服务暂时不可用' } }
+      }
+      return {
+        body: {
+          awaiting_user_input: false,
+          conversation_id: 'playwright-hitl-retry',
+          final_answer: '已在重试后生成学习建议。',
+          finalize_reason: '重试成功',
+          rounds_used: 2,
+          steps: [],
+          tools_called: ['ask_user', 'finalize'],
+          truncated: false,
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/autonomous')
+  await page.getByLabel('你的学习目标').fill('帮我制定学习计划')
+  await page.getByRole('button', { name: '开始执行' }).click()
+
+  const dialog = page.getByRole('dialog', { name: 'Agent 想问你' })
+  const reply = dialog.getByRole('textbox', { name: '你的回答' })
+  await reply.fill('重点学习第三章')
+  await dialog.getByRole('button', { name: /回答/ }).click()
+
+  await firstContinueStarted
+  await expect(dialog).toHaveAttribute('aria-busy', 'true')
+  await expect(reply).toHaveJSProperty('readOnly', true)
+  await expect(reply).toBeFocused()
+  releaseFirstContinue()
+
+  await expect(dialog).toBeVisible()
+  await expect(dialog).toHaveAttribute('aria-busy', 'false')
+  await expect(dialog.getByRole('alert')).toContainText('模型服务暂时不可用')
+  await expect(dialog.getByRole('alert')).toContainText('你的回答已保留')
+  await expect(reply).toHaveValue('重点学习第三章')
+  await expect(reply).toBeFocused()
+  await expect(page.locator('.autonomous-content')).toHaveJSProperty('inert', true)
+
+  await dialog.getByRole('button', { name: '重试回答' }).click()
+  await expect(dialog).toBeHidden()
+  await expect(page.getByText('已在重试后生成学习建议。')).toBeVisible()
+  expect(continueRequests).toEqual([
+    { conversation_id: 'playwright-hitl-retry', user_reply: '重点学习第三章' },
+    { conversation_id: 'playwright-hitl-retry', user_reply: '重点学习第三章' },
+  ])
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('Autonomous exits HITL retry mode when the continuation was consumed', async ({ page }) => {
+  let continueRequests = 0
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'POST' && path === '/agent/autonomous') {
+      return {
+        body: {
+          awaiting_user_input: true,
+          conversation_id: 'playwright-hitl-consumed',
+          user_question: '是否更新学习画像？',
+          rounds_used: 1,
+          steps: [],
+          tools_called: ['ask_user'],
+          truncated: false,
+        },
+      }
+    }
+    if (request.method() === 'POST' && path === '/agent/autonomous/continue') {
+      continueRequests += 1
+      return {
+        status: 410,
+        body: { detail: '续跑已执行部分操作，无法安全重试；请重新开始' },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/autonomous')
+  await page.getByLabel('你的学习目标').fill('更新我的学习建议')
+  await page.getByRole('button', { name: '开始执行' }).click()
+
+  const dialog = page.getByRole('dialog', { name: 'Agent 想问你' })
+  await dialog.getByRole('textbox', { name: '你的回答' }).fill('继续')
+  await dialog.getByRole('button', { name: /回答/ }).click()
+
+  await expect(dialog).toBeHidden()
+  await expect(page.getByRole('alert')).toContainText(
+    '续跑已执行部分操作，无法安全重试；请重新开始'
+  )
+  await expect(page.getByRole('button', { name: '重试回答' })).toHaveCount(0)
+  await expect(page.getByLabel('你的学习目标')).toHaveValue('更新我的学习建议')
+  await expect(page.getByRole('button', { name: '再次执行当前目标' })).toBeFocused()
+  expect(continueRequests).toBe(1)
+  expect(unexpectedRequests).toEqual([])
 })

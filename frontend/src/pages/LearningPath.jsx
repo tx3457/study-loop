@@ -1,4 +1,5 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
+import DocumentPrerequisite from '../components/DocumentPrerequisite'
 import { getDocuments, generateLearningPath } from '../api/client'
 import './LearningPath.css'
 
@@ -12,14 +13,25 @@ export default function LearningPath() {
   const [path, setPath] = useState(null)
   const [loading, setLoading] = useState(false)
   const [docsLoading, setDocsLoading] = useState(true)
+  const [docsError, setDocsError] = useState(null)
   const [error, setError] = useState(null)
 
-  useEffect(() => {
-    getDocuments()
-      .then(data => setDocuments(data.documents || []))
-      .catch(err => setError(err.message))
-      .finally(() => setDocsLoading(false))
+  const loadDocuments = useCallback(async () => {
+    setDocsLoading(true)
+    setDocsError(null)
+    try {
+      const data = await getDocuments()
+      const nextDocuments = data.documents || []
+      setDocuments(nextDocuments)
+      setSelectedDoc(current => nextDocuments.includes(current) ? current : '')
+    } catch (err) {
+      setDocsError(err.message)
+    } finally {
+      setDocsLoading(false)
+    }
   }, [])
+
+  useEffect(() => { loadDocuments() }, [loadDocuments])
 
   const handleGenerate = async () => {
     if (!selectedDoc) return
@@ -48,41 +60,55 @@ export default function LearningPath() {
       </header>
 
       {/* ── 文档选择 + 生成按钮 ────────────────────────────────────────── */}
-      <div className="lp-controls">
-        <select
-          className="lp-select"
-          value={selectedDoc}
-          onChange={e => setSelectedDoc(e.target.value)}
-          disabled={docsLoading || loading}
-        >
-          <option value="">
-            {docsLoading ? '加载文档列表...' : '-- 选择文档 --'}
-          </option>
-          {documents.map(doc => (
-            <option key={doc} value={doc}>{doc}</option>
-          ))}
-        </select>
+      {docsError ? (
+        <div className="load-error-state" role="alert">
+          <p className="state-title">无法加载文档列表</p>
+          <p className="state-desc">{docsError}</p>
+          <button type="button" className="state-action" onClick={loadDocuments}>
+            重新加载文档
+          </button>
+        </div>
+      ) : !docsLoading && documents.length === 0 ? (
+        <DocumentPrerequisite description="生成学习路径前，需要先上传一份已经完成解析的学习材料。" />
+      ) : (
+        <div className="lp-controls">
+          <select
+            className="lp-select"
+            aria-label="学习文档"
+            value={selectedDoc}
+            onChange={e => setSelectedDoc(e.target.value)}
+            disabled={docsLoading || loading}
+          >
+            <option value="">
+              {docsLoading ? '加载文档列表...' : '-- 选择文档 --'}
+            </option>
+            {documents.map(doc => (
+              <option key={doc} value={doc}>{doc}</option>
+            ))}
+          </select>
 
-        <button
-          className="lp-generate-btn"
-          onClick={handleGenerate}
-          disabled={!selectedDoc || loading}
-        >
-          {loading ? (
-            <>
-              <span className="btn-spinner" />
-              AI 分析中...
-            </>
-          ) : (
-            <>
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
-              </svg>
-              生成学习路径
-            </>
-          )}
-        </button>
-      </div>
+          <button
+            type="button"
+            className="lp-generate-btn"
+            onClick={handleGenerate}
+            disabled={!selectedDoc || loading}
+          >
+            {loading ? (
+              <>
+                <span className="btn-spinner" />
+                AI 分析中...
+              </>
+            ) : (
+              <>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+                </svg>
+                生成学习路径
+              </>
+            )}
+          </button>
+        </div>
+      )}
 
       {/* ── 错误 ──────────────────────────────────────────────────────── */}
       {error && (

@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import DocumentPrerequisite from '../components/DocumentPrerequisite'
 import { getDocuments, startSession, submitAnswer, getSessionResult, gradeSession, generateReport } from '../api/client'
 import './Quiz.css'
 
@@ -25,6 +26,7 @@ export default function Quiz() {
   const [phase, setPhase] = useState('setup') // setup | loading | answering | feedback | results | grading | report
   const [documents, setDocuments] = useState([])
   const [docsLoading, setDocsLoading] = useState(true)
+  const [docsError, setDocsError] = useState(null)
   const [error, setError] = useState(null)
 
   // AI 批改 + 学习报告
@@ -59,12 +61,24 @@ export default function Quiz() {
   const timerRef = useRef(null)
 
   /* ── 加载文档列表 ──────────────────────────────────────────────── */
-  useEffect(() => {
-    getDocuments()
-      .then(data => setDocuments(data.documents || []))
-      .catch(err => setError(err.message))
-      .finally(() => setDocsLoading(false))
+  const loadDocuments = useCallback(async () => {
+    setDocsLoading(true)
+    setDocsError(null)
+    try {
+      const data = await getDocuments()
+      const nextDocuments = data.documents || []
+      setDocuments(nextDocuments)
+      setConfig(current => nextDocuments.includes(current.document_id)
+        ? current
+        : { ...current, document_id: '' })
+    } catch (err) {
+      setDocsError(err.message)
+    } finally {
+      setDocsLoading(false)
+    }
   }, [])
+
+  useEffect(() => { loadDocuments() }, [loadDocuments])
 
   /* ── 计时器 ────────────────────────────────────────────────────── */
   const startTimer = useCallback(() => {
@@ -204,7 +218,21 @@ export default function Quiz() {
       )}
 
       {/* ══════════════ Setup Phase ══════════════ */}
-      {phase === 'setup' && (
+      {phase === 'setup' && docsError && (
+        <div className="load-error-state" role="alert">
+          <p className="state-title">无法加载文档列表</p>
+          <p className="state-desc">{docsError}</p>
+          <button type="button" className="state-action" onClick={loadDocuments}>
+            重新加载文档
+          </button>
+        </div>
+      )}
+
+      {phase === 'setup' && !docsError && !docsLoading && documents.length === 0 && (
+        <DocumentPrerequisite description="开始答题前，需要先上传一份学习材料供系统检索和出题。" />
+      )}
+
+      {phase === 'setup' && !docsError && (docsLoading || documents.length > 0) && (
         <div className="quiz-setup">
           {/* 文档选择 */}
           <div className="setup-field">
@@ -293,7 +321,7 @@ export default function Quiz() {
             type="button"
             className="start-btn"
             onClick={handleStart}
-            disabled={!config.document_id}
+            disabled={docsLoading || !config.document_id}
           >
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <polygon points="5 3 19 12 5 21 5 3"/>
