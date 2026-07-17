@@ -7,7 +7,7 @@
  *   - LLM 调 ask_user → 弹框让用户答 → 提交后调 /continue 续跑
  *
  * 状态机：
- *   idle → running → (awaiting → running)* → done | error
+ *   idle → running → (awaiting → continuing)* → done | error
  */
 import { useEffect, useState, useRef } from 'react'
 import {
@@ -18,7 +18,7 @@ import {
 import './Autonomous.css'
 
 const initialState = {
-  phase: 'idle',     // idle | running | awaiting | done | error
+  phase: 'idle',     // idle | running | awaiting | continuing | done | error
   request: { query: '', user_id: 'default_user', document_id: '' },
   response: null,
   error: null,
@@ -44,8 +44,12 @@ export default function Autonomous() {
   const lastConversationId = useRef(null)
   const modalRef = useRef(null)
   const modalInputRef = useRef(null)
+  const startButtonRef = useRef(null)
   const previousFocusRef = useRef(null)
-  const dialogOpen = state.phase === 'awaiting' && Boolean(state.response?.user_question)
+  const dialogOpen = (
+    state.phase === 'awaiting' || state.phase === 'continuing'
+  ) && Boolean(state.response?.user_question)
+  const formLocked = ['running', 'awaiting', 'continuing'].includes(state.phase)
 
   useEffect(() => {
     if (!dialogOpen) return undefined
@@ -87,14 +91,31 @@ export default function Autonomous() {
     }
   }, [dialogOpen])
 
+  useEffect(() => {
+    const shouldFocusReply = state.phase === 'continuing'
+      || (state.phase === 'awaiting' && state.error)
+    if (!shouldFocusReply) return undefined
+
+    const focusFrame = window.requestAnimationFrame(() => modalInputRef.current?.focus())
+    return () => window.cancelAnimationFrame(focusFrame)
+  }, [state.error, state.phase])
+
+  useEffect(() => {
+    if (state.phase !== 'error') return undefined
+
+    const focusFrame = window.requestAnimationFrame(() => startButtonRef.current?.focus())
+    return () => window.cancelAnimationFrame(focusFrame)
+  }, [state.phase])
+
   /** 处理 agent 响应：分发到对应状态 */
   function _handleResponse(resp) {
     if (resp.awaiting_user_input) {
       lastConversationId.current = resp.conversation_id
-      setState(s => ({ ...s, phase: 'awaiting', response: resp }))
+      setState(s => ({ ...s, phase: 'awaiting', response: resp, error: null }))
       setAskReply('')
     } else {
-      setState(s => ({ ...s, phase: 'done', response: resp }))
+      lastConversationId.current = null
+      setState(s => ({ ...s, phase: 'done', response: resp, error: null }))
     }
   }
 
@@ -117,16 +138,31 @@ export default function Autonomous() {
 
   /** 提交 ask_user 回答续跑 */
   async function handleContinue() {
-    if (!askReply.trim() || !lastConversationId.current) return
-    setState(s => ({ ...s, phase: 'running' }))
+    if (
+      state.phase === 'continuing'
+      || !askReply.trim()
+      || !lastConversationId.current
+    ) return
+    const conversationId = lastConversationId.current
+    const userReply = askReply.trim()
+    setState(s => ({ ...s, phase: 'continuing', error: null }))
     try {
       const resp = await continueAutonomous({
-        conversation_id: lastConversationId.current,
-        user_reply: askReply.trim(),
+        conversation_id: conversationId,
+        user_reply: userReply,
       })
       _handleResponse(resp)
     } catch (err) {
-      setState(s => ({ ...s, phase: 'error', error: err.message }))
+      if (err.status === 404 || err.status === 410) {
+        lastConversationId.current = null
+        setState(s => ({
+          ...s,
+          phase: 'error',
+          error: `回答提交失败：${err.message}`,
+        }))
+      } else {
+        setState(s => ({ ...s, phase: 'awaiting', error: err.message }))
+      }
     }
   }
 
@@ -172,7 +208,7 @@ export default function Autonomous() {
             value={state.request.query}
             onChange={e => setState(s => ({ ...s, request: { ...s.request, query: e.target.value } }))}
             placeholder="例如：帮我规划学习 RAG 的路径，然后出 3 道选择题"
-            disabled={state.phase === 'running' || state.phase === 'awaiting'}
+            disabled={formLocked}
           />
         </div>
 
@@ -183,7 +219,7 @@ export default function Autonomous() {
               id="autonomous-user"
               value={state.request.user_id}
               onChange={e => setState(s => ({ ...s, request: { ...s.request, user_id: e.target.value } }))}
-              disabled={state.phase === 'running' || state.phase === 'awaiting'}
+              disabled={formLocked}
             />
           </div>
           <div className="doc-input">
@@ -197,7 +233,7 @@ export default function Autonomous() {
               value={state.request.document_id}
               onChange={e => setState(s => ({ ...s, request: { ...s.request, document_id: e.target.value } }))}
               placeholder="留空让 Agent 主动询问"
-              disabled={state.phase === 'running' || state.phase === 'awaiting'}
+              disabled={formLocked}
             />
             <datalist id="doc-list">
               {documents.map(d => <option key={d} value={d} />)}
@@ -212,14 +248,17 @@ export default function Autonomous() {
 
         <div className="form-actions">
           <button
+            ref={startButtonRef}
             type="submit"
             className="btn-primary"
-            disabled={state.phase === 'running' || state.phase === 'awaiting' || !state.request.query.trim()}
+            disabled={formLocked || !state.request.query.trim()}
           >
-            {state.phase === 'running' ? '执行中...' : '开始执行'}
+            {state.phase === 'running'
+              ? '执行中...'
+              : state.phase === 'error' ? '再次执行当前目标' : '开始执行'}
           </button>
           {(state.phase === 'done' || state.phase === 'error') && (
-            <button type="button" className="btn-ghost" onClick={handleReset}>重新开始</button>
+            <button type="button" className="btn-ghost" onClick={handleReset}>清空并重新开始</button>
           )}
         </div>
       </form>
@@ -308,6 +347,7 @@ export default function Autonomous() {
             className="modal-card"
             role="dialog"
             aria-modal="true"
+            aria-busy={state.phase === 'continuing'}
             aria-labelledby="autonomous-dialog-title"
             aria-describedby="autonomous-dialog-question"
           >
@@ -321,19 +361,34 @@ export default function Autonomous() {
               onChange={e => setAskReply(e.target.value)}
               placeholder="输入你的回答..."
               aria-label="你的回答"
+              readOnly={state.phase === 'continuing'}
               onKeyDown={e => {
                 if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) handleContinue()
               }}
             />
+            {state.error && (
+              <div className="modal-error" role="alert">
+                回答提交失败：{state.error}。你的回答已保留，可以重试。
+              </div>
+            )}
             <div className="modal-actions">
-              <button type="button" className="btn-ghost" onClick={handleReset}>取消整个执行</button>
+              <button
+                type="button"
+                className="btn-ghost"
+                onClick={handleReset}
+                disabled={state.phase === 'continuing'}
+              >
+                取消整个执行
+              </button>
               <button
                 type="button"
                 className="btn-primary"
                 onClick={handleContinue}
-                disabled={!askReply.trim()}
+                disabled={state.phase === 'continuing' || !askReply.trim()}
               >
-                回答 ⏎ (Ctrl+Enter)
+                {state.phase === 'continuing'
+                  ? '提交中...'
+                  : state.error ? '重试回答' : '回答 ⏎ (Ctrl+Enter)'}
               </button>
             </div>
             <div className="modal-meta">

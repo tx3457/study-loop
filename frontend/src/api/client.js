@@ -15,7 +15,9 @@ async function request(path, options = {}) {
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
-    throw new Error(body.detail || body.error || `请求失败 (${res.status})`)
+    const error = new Error(body.detail || body.error || `请求失败 (${res.status})`)
+    error.status = res.status
+    throw error
   }
 
   return res.json()

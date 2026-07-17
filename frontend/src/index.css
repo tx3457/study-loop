@@ -213,6 +213,39 @@ button {
   background: #1d4ed8;
 }
 
+.prerequisite-state {
+  padding: 48px 24px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-lg);
+  background: var(--bg-card);
+  box-shadow: var(--shadow-sm);
+  text-align: center;
+  animation: fadeInUp 0.4s var(--ease-out);
+}
+
+.prerequisite-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 64px;
+  height: 64px;
+  margin-bottom: 16px;
+  border-radius: 50%;
+  background: var(--accent-blue-soft);
+  color: var(--accent-blue);
+}
+
+.prerequisite-title {
+  font-size: 22px;
+}
+
+.prerequisite-desc {
+  max-width: 480px;
+  margin: 8px auto 0;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
 /* ── Scrollbar ────────────────────────────────────────────────────── */
 
 ::-webkit-scrollbar {

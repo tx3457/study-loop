@@ -547,7 +547,7 @@ async def continue_autonomous(req: ContinueRequest) -> AutonomousResponse:
             evidence_registry=resume_evidence_registry,
             grounding_required=session.grounding_required,
         )
-    except BaseException:
+    except BaseException as exc:
         progressed = baseline != (
             len(resume_messages),
             len(resume_steps),
@@ -558,11 +558,17 @@ async def continue_autonomous(req: ContinueRequest) -> AutonomousResponse:
         # 重放可能带副作用的工具，因此保守地消费该会话。
         if not progressed:
             _sessions.setdefault(req.conversation_id, session)
-        else:
-            logger.warning(
-                "[autonomous] continuation failed after progress; session %s consumed",
-                req.conversation_id,
-            )
+            raise
+
+        logger.warning(
+            "[autonomous] continuation failed after progress; session %s consumed",
+            req.conversation_id,
+        )
+        if isinstance(exc, Exception):
+            raise HTTPException(
+                status_code=410,
+                detail="续跑已执行部分操作，无法安全重试；请重新开始",
+            ) from exc
         raise
     finally:
         _sessions_in_flight.discard(req.conversation_id)

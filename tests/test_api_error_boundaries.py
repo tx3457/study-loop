@@ -20,6 +20,22 @@ from services.retry import RetryExhausted
 from services.vectorstore import DocumentAlreadyExistsError
 
 
+def _paused_autonomous_session(conversation_id: str):
+    return autonomous_router.AutonomousSession(
+        conversation_id=conversation_id,
+        messages=[],
+        plan=[],
+        steps=[],
+        tools_called=[],
+        rounds_used=1,
+        user_id="default_user",
+        document_id=None,
+        evidence_registry={},
+        grounding_required=False,
+        pending_ask_call_id="ask-1",
+    )
+
+
 class TestApiErrorBoundaries(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -105,6 +121,82 @@ class TestApiErrorBoundaries(unittest.TestCase):
         self.assertNotEqual(response.json().get("finalize_reason"), "max_rounds_truncated")
         self.assertEqual(response.headers.get("access-control-allow-origin"), origin)
         finish.assert_not_awaited()
+
+    def test_autonomous_continue_provider_failure_before_progress_stays_retryable(self):
+        origin = "http://127.0.0.1:5173"
+        conversation_id = "retryable-provider-failure"
+        session = _paused_autonomous_session(conversation_id)
+        autonomous_router._sessions[conversation_id] = session
+
+        try:
+            with patch.object(
+                autonomous_router,
+                "check_injection",
+                AsyncMock(return_value=(False, "")),
+            ), patch.object(
+                autonomous_router,
+                "_run_react_loop",
+                AsyncMock(side_effect=RetryExhausted("provider down")),
+            ):
+                response = self.client.post(
+                    "/agent/autonomous/continue",
+                    headers={"Origin": origin},
+                    json={"conversation_id": conversation_id, "user_reply": "第三章"},
+                )
+
+            self.assertEqual(response.status_code, 503)
+            self.assertEqual(
+                response.json(),
+                {"error": "服务暂时不可用", "detail": "模型服务请求失败"},
+            )
+            self.assertIs(autonomous_router._sessions[conversation_id], session)
+            self.assertEqual(response.headers.get("access-control-allow-origin"), origin)
+        finally:
+            autonomous_router._sessions.pop(conversation_id, None)
+            autonomous_router._sessions_in_flight.discard(conversation_id)
+
+    def test_autonomous_continue_failure_after_progress_returns_gone(self):
+        origin = "http://127.0.0.1:5173"
+        conversation_id = "consumed-provider-failure"
+        autonomous_router._sessions[conversation_id] = _paused_autonomous_session(
+            conversation_id
+        )
+
+        async def fail_after_progress(**kwargs):
+            kwargs["steps"].append(
+                autonomous_router.StepRecord(
+                    round_index=1,
+                    tool_name="update_learning_profile",
+                )
+            )
+            raise RetryExhausted("provider down after write")
+
+        try:
+            with patch.object(
+                autonomous_router,
+                "check_injection",
+                AsyncMock(return_value=(False, "")),
+            ), patch.object(
+                autonomous_router,
+                "_run_react_loop",
+                AsyncMock(side_effect=fail_after_progress),
+            ):
+                response = self.client.post(
+                    "/agent/autonomous/continue",
+                    headers={"Origin": origin},
+                    json={"conversation_id": conversation_id, "user_reply": "继续"},
+                )
+
+            self.assertEqual(response.status_code, 410)
+            self.assertEqual(
+                response.json(),
+                {"detail": "续跑已执行部分操作，无法安全重试；请重新开始"},
+            )
+            self.assertNotIn(conversation_id, autonomous_router._sessions)
+            self.assertEqual(response.headers.get("access-control-allow-origin"), origin)
+        finally:
+            autonomous_router._sessions.pop(conversation_id, None)
+            autonomous_router._sessions_in_flight.discard(conversation_id)
 
     def test_upload_provider_failure_and_duplicate_have_explicit_statuses(self):
         origin = "http://127.0.0.1:5173"

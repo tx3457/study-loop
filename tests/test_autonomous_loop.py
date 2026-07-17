@@ -23,6 +23,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from fastapi import HTTPException
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import routers.autonomous as au
@@ -299,12 +301,17 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
                  completed_tool_round,
                  RetryExhausted("provider down after write"),
              ])):
-            with self.assertRaises(RetryExhausted):
+            with self.assertRaises(HTTPException) as raised:
                 await au.continue_autonomous(ContinueRequest(
                     conversation_id=first.conversation_id,
                     user_reply="继续",
                 ))
 
+        self.assertEqual(raised.exception.status_code, 410)
+        self.assertEqual(
+            raised.exception.detail,
+            "续跑已执行部分操作，无法安全重试；请重新开始",
+        )
         self.assertNotIn(first.conversation_id, au._sessions)
         self.assertNotIn(first.conversation_id, au._sessions_in_flight)
 
