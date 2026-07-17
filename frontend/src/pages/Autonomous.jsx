@@ -22,6 +22,38 @@ const initialState = {
   request: { query: '', user_id: 'default_user', document_id: '' },
   response: null,
   error: null,
+  retryBlocked: false,
+}
+
+function createIdempotencyKey() {
+  const cryptoApi = globalThis.crypto
+  if (typeof cryptoApi?.randomUUID === 'function') {
+    return cryptoApi.randomUUID()
+  }
+  if (typeof cryptoApi?.getRandomValues !== 'function') {
+    throw new Error('当前浏览器无法生成安全请求标识，请升级浏览器后重试')
+  }
+
+  const bytes = cryptoApi.getRandomValues(new Uint8Array(16))
+  bytes[6] = (bytes[6] & 0x0f) | 0x40
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0'))
+  return [
+    hex.slice(0, 4).join(''),
+    hex.slice(4, 6).join(''),
+    hex.slice(6, 8).join(''),
+    hex.slice(8, 10).join(''),
+    hex.slice(10, 16).join(''),
+  ].join('-')
+}
+
+function isTerminalExecutionError(error) {
+  return error.status === 410
+    || error.code === 'side_effect_ambiguous'
+    || (
+      error.code === 'idempotency_conflict'
+      && error.reason !== 'in_progress'
+    )
 }
 
 function FormattedAnswer({ text }) {
@@ -42,9 +74,12 @@ export default function Autonomous() {
   const [documents, setDocuments] = useState([])
   const [documentsError, setDocumentsError] = useState(null)
   const lastConversationId = useRef(null)
+  const startIdempotencyKey = useRef(null)
+  const continueIdempotencyKey = useRef(null)
   const modalRef = useRef(null)
   const modalInputRef = useRef(null)
   const startButtonRef = useRef(null)
+  const resetButtonRef = useRef(null)
   const previousFocusRef = useRef(null)
   const dialogOpen = (
     state.phase === 'awaiting' || state.phase === 'continuing'
@@ -103,19 +138,37 @@ export default function Autonomous() {
   useEffect(() => {
     if (state.phase !== 'error') return undefined
 
-    const focusFrame = window.requestAnimationFrame(() => startButtonRef.current?.focus())
+    const focusFrame = window.requestAnimationFrame(() => {
+      const target = state.retryBlocked
+        ? resetButtonRef.current
+        : startButtonRef.current
+      target?.focus()
+    })
     return () => window.cancelAnimationFrame(focusFrame)
-  }, [state.phase])
+  }, [state.phase, state.retryBlocked])
 
   /** 处理 agent 响应：分发到对应状态 */
   function _handleResponse(resp) {
+    continueIdempotencyKey.current = null
     if (resp.awaiting_user_input) {
       lastConversationId.current = resp.conversation_id
-      setState(s => ({ ...s, phase: 'awaiting', response: resp, error: null }))
+      setState(s => ({
+        ...s,
+        phase: 'awaiting',
+        response: resp,
+        error: null,
+        retryBlocked: false,
+      }))
       setAskReply('')
     } else {
       lastConversationId.current = null
-      setState(s => ({ ...s, phase: 'done', response: resp, error: null }))
+      setState(s => ({
+        ...s,
+        phase: 'done',
+        response: resp,
+        error: null,
+        retryBlocked: false,
+      }))
     }
   }
 
@@ -123,16 +176,33 @@ export default function Autonomous() {
   async function handleStart(e) {
     e.preventDefault()
     if (!state.request.query.trim()) return
-    setState(s => ({ ...s, phase: 'running', response: null, error: null }))
     try {
+      const idempotencyKey = startIdempotencyKey.current || createIdempotencyKey()
+      startIdempotencyKey.current = idempotencyKey
+      setState(s => ({
+        ...s,
+        phase: 'running',
+        response: null,
+        error: null,
+        retryBlocked: false,
+      }))
       const resp = await runAutonomous({
         query: state.request.query,
         user_id: state.request.user_id || 'default_user',
         document_id: state.request.document_id || null,
+        idempotency_key: idempotencyKey,
       })
+      startIdempotencyKey.current = null
       _handleResponse(resp)
     } catch (err) {
-      setState(s => ({ ...s, phase: 'error', error: err.message }))
+      const retryBlocked = isTerminalExecutionError(err)
+      if (retryBlocked) startIdempotencyKey.current = null
+      setState(s => ({
+        ...s,
+        phase: 'error',
+        error: err.message,
+        retryBlocked,
+      }))
     }
   }
 
@@ -145,23 +215,33 @@ export default function Autonomous() {
     ) return
     const conversationId = lastConversationId.current
     const userReply = askReply.trim()
-    setState(s => ({ ...s, phase: 'continuing', error: null }))
     try {
+      const idempotencyKey = continueIdempotencyKey.current || createIdempotencyKey()
+      continueIdempotencyKey.current = idempotencyKey
+      setState(s => ({ ...s, phase: 'continuing', error: null }))
       const resp = await continueAutonomous({
         conversation_id: conversationId,
         user_reply: userReply,
+        idempotency_key: idempotencyKey,
       })
       _handleResponse(resp)
     } catch (err) {
-      if (err.status === 404 || err.status === 410) {
+      if (err.status === 404 || isTerminalExecutionError(err)) {
+        continueIdempotencyKey.current = null
         lastConversationId.current = null
         setState(s => ({
           ...s,
           phase: 'error',
           error: `回答提交失败：${err.message}`,
+          retryBlocked: true,
         }))
       } else {
-        setState(s => ({ ...s, phase: 'awaiting', error: err.message }))
+        setState(s => ({
+          ...s,
+          phase: 'awaiting',
+          error: err.message,
+          retryBlocked: false,
+        }))
       }
     }
   }
@@ -170,6 +250,8 @@ export default function Autonomous() {
     setState(initialState)
     setAskReply('')
     lastConversationId.current = null
+    startIdempotencyKey.current = null
+    continueIdempotencyKey.current = null
   }
 
   async function loadDocs() {
@@ -206,7 +288,10 @@ export default function Autonomous() {
             id="autonomous-goal"
             rows={3}
             value={state.request.query}
-            onChange={e => setState(s => ({ ...s, request: { ...s.request, query: e.target.value } }))}
+            onChange={e => {
+              startIdempotencyKey.current = null
+              setState(s => ({ ...s, request: { ...s.request, query: e.target.value } }))
+            }}
             placeholder="例如：帮我规划学习 RAG 的路径，然后出 3 道选择题"
             disabled={formLocked}
           />
@@ -218,7 +303,10 @@ export default function Autonomous() {
             <input
               id="autonomous-user"
               value={state.request.user_id}
-              onChange={e => setState(s => ({ ...s, request: { ...s.request, user_id: e.target.value } }))}
+              onChange={e => {
+                startIdempotencyKey.current = null
+                setState(s => ({ ...s, request: { ...s.request, user_id: e.target.value } }))
+              }}
               disabled={formLocked}
             />
           </div>
@@ -231,7 +319,10 @@ export default function Autonomous() {
               id="autonomous-document"
               list="doc-list"
               value={state.request.document_id}
-              onChange={e => setState(s => ({ ...s, request: { ...s.request, document_id: e.target.value } }))}
+              onChange={e => {
+                startIdempotencyKey.current = null
+                setState(s => ({ ...s, request: { ...s.request, document_id: e.target.value } }))
+              }}
               placeholder="留空让 Agent 主动询问"
               disabled={formLocked}
             />
@@ -247,18 +338,27 @@ export default function Autonomous() {
         </div>
 
         <div className="form-actions">
-          <button
-            ref={startButtonRef}
-            type="submit"
-            className="btn-primary"
-            disabled={formLocked || !state.request.query.trim()}
-          >
-            {state.phase === 'running'
-              ? '执行中...'
-              : state.phase === 'error' ? '再次执行当前目标' : '开始执行'}
-          </button>
+          {!state.retryBlocked && (
+            <button
+              ref={startButtonRef}
+              type="submit"
+              className="btn-primary"
+              disabled={formLocked || !state.request.query.trim()}
+            >
+              {state.phase === 'running'
+                ? '执行中...'
+                : state.phase === 'error' ? '再次执行当前目标' : '开始执行'}
+            </button>
+          )}
           {(state.phase === 'done' || state.phase === 'error') && (
-            <button type="button" className="btn-ghost" onClick={handleReset}>清空并重新开始</button>
+            <button
+              ref={resetButtonRef}
+              type="button"
+              className="btn-ghost"
+              onClick={handleReset}
+            >
+              清空并重新开始
+            </button>
           )}
         </div>
       </form>
@@ -358,7 +458,10 @@ export default function Autonomous() {
               className="modal-input"
               rows={3}
               value={askReply}
-              onChange={e => setAskReply(e.target.value)}
+              onChange={e => {
+                continueIdempotencyKey.current = null
+                setAskReply(e.target.value)
+              }}
               placeholder="输入你的回答..."
               aria-label="你的回答"
               readOnly={state.phase === 'continuing'}

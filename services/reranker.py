@@ -32,7 +32,7 @@ class RerankerUnavailable(Exception):
 
 def reranker_enabled() -> bool:
     """env 控制开关,ablation 实验时设 false"""
-    return os.getenv("RERANKER_ENABLED", "true").lower() in ("1", "true", "yes")
+    return os.getenv("RERANKER_ENABLED", "false").lower() in ("1", "true", "yes")
 
 
 def _reranker_model_name() -> str:

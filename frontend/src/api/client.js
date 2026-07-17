@@ -17,6 +17,8 @@ async function request(path, options = {}) {
     const body = await res.json().catch(() => ({}))
     const error = new Error(body.detail || body.error || `请求失败 (${res.status})`)
     error.status = res.status
+    error.code = body.code
+    error.reason = body.reason
     throw error
   }
 
@@ -122,19 +124,34 @@ export async function generateReport(sessionId) {
    ═══════════════════════════════════════════════════════════════════ */
 
 /** 启动 autonomous agent（首次提问） */
-export async function runAutonomous({ query, user_id = 'default_user', document_id = null }) {
+export async function runAutonomous({
+  query,
+  user_id = 'default_user',
+  document_id = null,
+  idempotency_key,
+}) {
   return request('/agent/autonomous', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(idempotency_key ? { 'Idempotency-Key': idempotency_key } : {}),
+    },
     body: JSON.stringify({ query, user_id, document_id }),
   })
 }
 
 /** 续跑 autonomous agent（ask_user 后用户回答） */
-export async function continueAutonomous({ conversation_id, user_reply }) {
+export async function continueAutonomous({
+  conversation_id,
+  user_reply,
+  idempotency_key,
+}) {
   return request('/agent/autonomous/continue', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(idempotency_key ? { 'Idempotency-Key': idempotency_key } : {}),
+    },
     body: JSON.stringify({ conversation_id, user_reply }),
   })
 }

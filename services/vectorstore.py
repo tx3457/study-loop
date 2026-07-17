@@ -262,7 +262,7 @@ async def hybrid_query_document(
       精排阶段:CrossEncoder 真正读 (query, doc) 对打分,取 top n_results
 
     enable_rerank:
-      None  → 用 RERANKER_ENABLED 环境变量(默认 true)
+      None  → 用 RERANKER_ENABLED 环境变量(默认 false)
       True  → 强制开启(评测对照组用)
       False → 强制关闭(评测对照组用)
     """

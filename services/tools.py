@@ -432,10 +432,17 @@ async def dispatch_tool(
     *,
     run_id: Optional[str] = None,
     user_id: Optional[str] = None,
+    idempotency_key: Optional[str] = None,
 ) -> str:
     """根据 tool_call 名字调用工具，返回 JSON 字符串。
 
     新增可选 run_id / user_id 用于 audit 关联；旧调用方不传也能跑（向后兼容）。
     """
     logger.info(f"[tools] dispatch: {name}({arguments}) run_id={run_id}")
-    return await tool_registry.invoke(name, arguments, run_id=run_id, user_id=user_id)
+    return await tool_registry.invoke(
+        name,
+        arguments,
+        run_id=run_id,
+        user_id=user_id,
+        idempotency_key=idempotency_key,
+    )

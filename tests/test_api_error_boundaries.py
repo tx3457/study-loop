@@ -362,7 +362,11 @@ class TestApiErrorBoundaries(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(
             response.json(),
-            {"detail": "工具执行结果不确定，请勿自动重试；请刷新学习状态后重新开始"},
+            {
+                "detail": "工具执行结果不确定，请勿自动重试；请刷新学习状态后重新开始",
+                "code": "side_effect_ambiguous",
+                "reason": "ambiguous",
+            },
         )
         self.assertNotIn("update_learning_profile", response.text)
         self.assertEqual(response.headers.get("access-control-allow-origin"), origin)
@@ -439,7 +443,11 @@ class TestApiErrorBoundaries(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(
             response.json(),
-            {"detail": "工具执行结果不确定，请勿自动重试；请刷新学习状态后重新开始"},
+            {
+                "detail": "工具执行结果不确定，请勿自动重试；请刷新学习状态后重新开始",
+                "code": "side_effect_ambiguous",
+                "reason": "ambiguous",
+            },
         )
         self.assertNotIn("update_learning_profile", response.text)
         self.assertEqual(response.headers.get("access-control-allow-origin"), origin)

@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 
 const API_PREFIX = '/api'
+const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
 test.beforeEach(async ({ page }) => {
   await page.route('https://fonts.googleapis.com/**', route => route.fulfill({
@@ -393,10 +394,13 @@ test('Autonomous HITL dialog isolates the page and resumes with the reply', asyn
   const problems = trackBrowserProblems(page)
   let startRequest
   let continueRequest
+  let startKey
+  let continueKey
 
   const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
     if (request.method() === 'POST' && path === '/agent/autonomous') {
       startRequest = await request.postDataJSON()
+      startKey = await request.headerValue('idempotency-key')
       return {
         body: {
           awaiting_user_input: true,
@@ -412,6 +416,7 @@ test('Autonomous HITL dialog isolates the page and resumes with the reply', asyn
 
     if (request.method() === 'POST' && path === '/agent/autonomous/continue') {
       continueRequest = await request.postDataJSON()
+      continueKey = await request.headerValue('idempotency-key')
       return {
         body: {
           awaiting_user_input: false,
@@ -456,15 +461,20 @@ test('Autonomous HITL dialog isolates the page and resumes with the reply', asyn
     conversation_id: 'playwright-hitl-check',
     user_reply: '重点学习第三章',
   })
+  expect(startKey).toMatch(UUID_V4_PATTERN)
+  expect(continueKey).toMatch(UUID_V4_PATTERN)
+  expect(continueKey).not.toBe(startKey)
   expect(unexpectedRequests).toEqual([])
   expect(problems).toEqual([])
 })
 
 test('Autonomous preserves the initial goal and focus when starting fails', async ({ page }) => {
   const startRequests = []
+  const startKeys = []
   const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
     if (request.method() === 'POST' && path === '/agent/autonomous') {
       startRequests.push(await request.postDataJSON())
+      startKeys.push(await request.headerValue('idempotency-key'))
       if (startRequests.length === 1) {
         return { status: 503, body: { detail: '模型服务暂时不可用' } }
       }
@@ -500,11 +510,82 @@ test('Autonomous preserves the initial goal and focus when starting fails', asyn
     { query: '帮我复习向量检索', user_id: 'default_user', document_id: null },
     { query: '帮我复习向量检索', user_id: 'default_user', document_id: null },
   ])
+  expect(startKeys[0]).toMatch(UUID_V4_PATTERN)
+  expect(startKeys[1]).toBe(startKeys[0])
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('Autonomous rotates a failed start key after edits or reset', async ({ page }) => {
+  const attempts = []
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'POST' && path === '/agent/autonomous') {
+      attempts.push({
+        body: await request.postDataJSON(),
+        key: await request.headerValue('idempotency-key'),
+      })
+      if (attempts.length % 2 === 1) {
+        return { status: 503, body: { detail: '模型服务暂时不可用' } }
+      }
+      return {
+        body: {
+          awaiting_user_input: false,
+          final_answer: '新请求已执行。',
+          finalize_reason: '测试完成',
+          rounds_used: 1,
+          steps: [],
+          tools_called: ['finalize'],
+          truncated: false,
+        },
+      }
+    }
+    return null
+  })
+
+  const scenarios = [
+    {
+      name: 'goal',
+      mutate: async () => page.getByLabel('你的学习目标').fill('修改后的目标'),
+    },
+    {
+      name: 'user',
+      mutate: async () => page.getByLabel('用户 ID').fill('edited-user'),
+    },
+    {
+      name: 'document',
+      mutate: async () => page.getByLabel('文档 ID（可选）').fill('edited.md'),
+    },
+    {
+      name: 'reset',
+      mutate: async () => {
+        await page.getByRole('button', { name: '清空并重新开始' }).click()
+        await page.getByLabel('你的学习目标').fill('重置后的目标')
+      },
+    },
+  ]
+
+  for (const scenario of scenarios) {
+    await test.step(scenario.name, async () => {
+      await page.goto('/autonomous')
+      await page.getByLabel('你的学习目标').fill('原始目标')
+      const offset = attempts.length
+      await page.getByRole('button', { name: '开始执行' }).click()
+      await expect(page.getByRole('alert')).toContainText('模型服务暂时不可用')
+
+      await scenario.mutate()
+      await page.getByRole('button', { name: /执行/ }).click()
+      await expect(page.getByText('新请求已执行。')).toBeVisible()
+
+      expect(attempts[offset].key).toMatch(UUID_V4_PATTERN)
+      expect(attempts[offset + 1].key).toMatch(UUID_V4_PATTERN)
+      expect(attempts[offset + 1].key).not.toBe(attempts[offset].key)
+    })
+  }
   expect(unexpectedRequests).toEqual([])
 })
 
 test('Autonomous preserves a HITL reply and retries after a continuation failure', async ({ page }) => {
   const continueRequests = []
+  const continueKeys = []
   let releaseFirstContinue
   let markFirstContinueStarted
   const firstContinueGate = new Promise(resolve => { releaseFirstContinue = resolve })
@@ -526,6 +607,7 @@ test('Autonomous preserves a HITL reply and retries after a continuation failure
 
     if (request.method() === 'POST' && path === '/agent/autonomous/continue') {
       continueRequests.push(await request.postDataJSON())
+      continueKeys.push(await request.headerValue('idempotency-key'))
       if (continueRequests.length === 1) {
         markFirstContinueStarted()
         await firstContinueGate
@@ -577,6 +659,68 @@ test('Autonomous preserves a HITL reply and retries after a continuation failure
     { conversation_id: 'playwright-hitl-retry', user_reply: '重点学习第三章' },
     { conversation_id: 'playwright-hitl-retry', user_reply: '重点学习第三章' },
   ])
+  expect(continueKeys[0]).toMatch(UUID_V4_PATTERN)
+  expect(continueKeys[1]).toBe(continueKeys[0])
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('Autonomous rotates a failed continuation key after editing the reply', async ({ page }) => {
+  const continueAttempts = []
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'POST' && path === '/agent/autonomous') {
+      return {
+        body: {
+          awaiting_user_input: true,
+          conversation_id: 'playwright-hitl-edit',
+          user_question: '你希望重点学习哪一章？',
+          rounds_used: 1,
+          steps: [],
+          tools_called: ['ask_user'],
+          truncated: false,
+        },
+      }
+    }
+    if (request.method() === 'POST' && path === '/agent/autonomous/continue') {
+      continueAttempts.push({
+        body: await request.postDataJSON(),
+        key: await request.headerValue('idempotency-key'),
+      })
+      if (continueAttempts.length === 1) {
+        return { status: 503, body: { detail: '模型服务暂时不可用' } }
+      }
+      return {
+        body: {
+          awaiting_user_input: false,
+          final_answer: '修改后的回答已提交。',
+          finalize_reason: '测试完成',
+          rounds_used: 2,
+          steps: [],
+          tools_called: ['ask_user', 'finalize'],
+          truncated: false,
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/autonomous')
+  await page.getByLabel('你的学习目标').fill('制定计划')
+  await page.getByRole('button', { name: '开始执行' }).click()
+  const dialog = page.getByRole('dialog', { name: 'Agent 想问你' })
+  const reply = dialog.getByRole('textbox', { name: '你的回答' })
+  await reply.fill('第三章')
+  await dialog.getByRole('button', { name: /回答/ }).click()
+  await expect(dialog.getByRole('alert')).toContainText('模型服务暂时不可用')
+
+  await reply.fill('第四章')
+  await dialog.getByRole('button', { name: '重试回答' }).click()
+  await expect(page.getByText('修改后的回答已提交。')).toBeVisible()
+
+  expect(continueAttempts[0].body.user_reply).toBe('第三章')
+  expect(continueAttempts[1].body.user_reply).toBe('第四章')
+  expect(continueAttempts[0].key).toMatch(UUID_V4_PATTERN)
+  expect(continueAttempts[1].key).toMatch(UUID_V4_PATTERN)
+  expect(continueAttempts[1].key).not.toBe(continueAttempts[0].key)
   expect(unexpectedRequests).toEqual([])
 })
 
@@ -620,7 +764,70 @@ test('Autonomous exits HITL retry mode when the continuation was consumed', asyn
   )
   await expect(page.getByRole('button', { name: '重试回答' })).toHaveCount(0)
   await expect(page.getByLabel('你的学习目标')).toHaveValue('更新我的学习建议')
-  await expect(page.getByRole('button', { name: '再次执行当前目标' })).toBeFocused()
+  await expect(page.getByRole('button', { name: '再次执行当前目标' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '清空并重新开始' })).toBeFocused()
   expect(continueRequests).toBe(1)
   expect(unexpectedRequests).toEqual([])
+})
+
+test('Autonomous blocks blind retry after an ambiguous receipt', async ({ page }) => {
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'POST' && path === '/agent/autonomous') {
+      return {
+        status: 409,
+        body: {
+          detail: '此前请求可能已执行写操作，请刷新学习状态后重新开始',
+          code: 'idempotency_conflict',
+          reason: 'ambiguous',
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/autonomous')
+  await page.getByLabel('你的学习目标').fill('更新我的学习画像')
+  await page.getByRole('button', { name: '开始执行' }).click()
+
+  await expect(page.getByRole('alert')).toContainText('此前请求可能已执行写操作')
+  await expect(page.getByRole('button', { name: '再次执行当前目标' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: '清空并重新开始' })).toBeFocused()
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('Autonomous generates a request key without crypto.randomUUID', async ({ page }) => {
+  const problems = trackBrowserProblems(page)
+  let requestKey
+  await page.addInitScript(() => {
+    Object.defineProperty(globalThis.crypto, 'randomUUID', {
+      configurable: true,
+      value: undefined,
+    })
+  })
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'POST' && path === '/agent/autonomous') {
+      requestKey = await request.headerValue('idempotency-key')
+      return {
+        body: {
+          awaiting_user_input: false,
+          final_answer: '兼容模式提交成功。',
+          finalize_reason: '测试完成',
+          rounds_used: 1,
+          steps: [],
+          tools_called: ['finalize'],
+          truncated: false,
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/autonomous')
+  await page.getByLabel('你的学习目标').fill('测试非安全上下文')
+  await page.getByRole('button', { name: '开始执行' }).click()
+
+  await expect(page.getByText('兼容模式提交成功。')).toBeVisible()
+  expect(requestKey).toMatch(UUID_V4_PATTERN)
+  expect(unexpectedRequests).toEqual([])
+  expect(problems).toEqual([])
 })

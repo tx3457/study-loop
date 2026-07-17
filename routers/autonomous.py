@@ -32,7 +32,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from models.citation import CitationView, GroundingStatus
@@ -42,6 +42,7 @@ from services.citations import (
     resolve_citations,
 )
 from services.injection import check_injection, check_output_leak
+from services.idempotency import normalize_idempotency_key, request_idempotency
 from services.llm import _client as _client, llm_chat
 from services.react_controls import (
     CONTROL_TOOL_NAMES,
@@ -249,6 +250,7 @@ async def _run_react_loop(
     run_id: str,
     evidence_registry: EvidenceRegistry,
     grounding_required: bool,
+    idempotency_key: Optional[str] = None,
 ) -> AutonomousResponse:
     """从 starting_round 开始跑 ReAct 循环。命中 finalize / ask_user / max_rounds 时返回。"""
     truncated = False
@@ -272,6 +274,7 @@ async def _run_react_loop(
             control_tools=CONTROL_TOOL_NAMES,
             run_id=run_id,
             user_id=user_id,
+            idempotency_key=idempotency_key,
             tool_choice="auto",
             extra_call_messages=state_msg,
         )
@@ -442,8 +445,12 @@ def _build_response(
 # ═══════════════════════════════════════════════════════════════════════════
 # 主入口
 # ═══════════════════════════════════════════════════════════════════════════
-@router.post("/agent/autonomous", response_model=AutonomousResponse)
-async def autonomous_agent(req: AutonomousRequest) -> AutonomousResponse:
+async def _execute_autonomous(
+    req: AutonomousRequest,
+    *,
+    run_id: str,
+    idempotency_key: Optional[str],
+) -> AutonomousResponse:
     """Autonomous ReAct Agent 端点（P2 升级版）。
 
     范式：真 ReAct（LLM 全权决策）
@@ -485,20 +492,49 @@ async def autonomous_agent(req: AutonomousRequest) -> AutonomousResponse:
             "content": f"参考 plan（hint，非强制）：\n{plan_summary}",
         })
 
-    run_id = f"auto_{uuid.uuid4().hex[:12]}"        # 关联 audit log
+    return await _run_react_loop(
+        messages=messages, plan=plan, steps=[], tools_called=[],
+        user_id=req.user_id, document_id=req.document_id,
+        starting_round=0, run_id=run_id,
+        evidence_registry={}, grounding_required=req.grounding_required,
+        idempotency_key=idempotency_key,
+    )
 
-    try:
-        return await _run_react_loop(
-            messages=messages, plan=plan, steps=[], tools_called=[],
-            user_id=req.user_id, document_id=req.document_id,
-            starting_round=0, run_id=run_id,
-            evidence_registry={}, grounding_required=req.grounding_required,
+
+@router.post("/agent/autonomous", response_model=AutonomousResponse)
+async def autonomous_agent(
+    req: AutonomousRequest,
+    idempotency_key: Optional[str] = Header(
+        default=None, alias="Idempotency-Key"
+    ),
+) -> AutonomousResponse:
+    """Run one request with an optional durable replay receipt."""
+    key = normalize_idempotency_key(idempotency_key)
+    if key:
+        decision = await request_idempotency.begin(
+            key, "agent.autonomous", req.model_dump(mode="json")
         )
-    except Exception as exc:
-        # 写工具成功后，下一轮 provider 仍可能失败。此时整个请求也不可作为
-        # 普通 503 自动重试，否则新 run_id 会再次执行已经提交的副作用。
+        if decision.replayed:
+            return AutonomousResponse.model_validate(decision.response)
+
+    run_id = f"auto_{uuid.uuid4().hex[:12]}"
+    try:
+        response = await _execute_autonomous(
+            req, run_id=run_id, idempotency_key=key
+        )
+        if key:
+            await request_idempotency.complete(
+                key, response.model_dump(mode="json")
+            )
+        return response
+    except BaseException as exc:
+        durable_effect = await request_idempotency.abort(key) if key else False
+        # 写工具成功后，下一轮 provider 仍可能失败。此时整个请求不可作为
+        # 普通 503 自动重试；持久 receipt 不依赖可淘汰的进程内 audit。
+        effect_attempted = durable_effect or tool_registry.has_effect_attempt(run_id)
         if (
-            tool_registry.has_effect_attempt(run_id)
+            isinstance(exc, Exception)
+            and effect_attempted
             and not isinstance(exc, SideEffectAmbiguousError)
         ):
             raise SideEffectAmbiguousError("autonomous_request") from exc
@@ -506,28 +542,56 @@ async def autonomous_agent(req: AutonomousRequest) -> AutonomousResponse:
 
 
 @router.post("/agent/autonomous/continue", response_model=AutonomousResponse)
-async def continue_autonomous(req: ContinueRequest) -> AutonomousResponse:
+async def continue_autonomous(
+    req: ContinueRequest,
+    idempotency_key: Optional[str] = Header(
+        default=None, alias="Idempotency-Key"
+    ),
+) -> AutonomousResponse:
     """ask_user 后用户回答的续跑端点。
 
     协议：把 user_reply 作为 ask_user 的 tool response 填回 messages，从下一轮继续 ReAct。
     """
+    key = normalize_idempotency_key(idempotency_key)
+    if key:
+        decision = await request_idempotency.begin(
+            key, "agent.autonomous.continue", req.model_dump(mode="json")
+        )
+        if decision.replayed:
+            return AutonomousResponse.model_validate(decision.response)
+
     session = _sessions.get(req.conversation_id)
     if not session:
+        if key:
+            await request_idempotency.abort(key)
         if req.conversation_id in _sessions_in_flight:
             raise HTTPException(status_code=409, detail="conversation 正在续跑，请稍后重试")
         raise HTTPException(status_code=404, detail="conversation 不存在或已过期")
 
-    # 注入检测
-    is_injection, reason = await check_injection(req.user_reply)
+    # 注入检测尚未改变 session 或执行工具；分类器失败时释放
+    # receipt，让客户端可以用同一个 key 安全重试。
+    try:
+        is_injection, reason = await check_injection(req.user_reply)
+    except BaseException:
+        if key:
+            await request_idempotency.abort(key)
+        raise
     if is_injection:
-        return AutonomousResponse(
+        response = AutonomousResponse(
             final_answer=f"用户回答安全检查未通过：{reason}",
             conversation_id=req.conversation_id,
         )
+        if key:
+            await request_idempotency.complete(
+                key, response.model_dump(mode="json")
+            )
+        return response
 
     # 原子认领 session，避免同一 conversation 的并发续跑重复执行工具。
     session = _sessions.pop(req.conversation_id, None)
     if session is None:
+        if key:
+            await request_idempotency.abort(key)
         raise HTTPException(status_code=409, detail="conversation 正在续跑，请稍后重试")
     _sessions_in_flight.add(req.conversation_id)
 
@@ -550,14 +614,20 @@ async def continue_autonomous(req: ContinueRequest) -> AutonomousResponse:
         len(resume_evidence_registry),
     )
     try:
-        return await _run_react_loop(
+        response = await _run_react_loop(
             messages=resume_messages, plan=session.plan,
             steps=resume_steps, tools_called=resume_tools_called,
             user_id=session.user_id, document_id=session.document_id,
             starting_round=session.rounds_used, run_id=run_id,
             evidence_registry=resume_evidence_registry,
             grounding_required=session.grounding_required,
+            idempotency_key=key,
         )
+        if key:
+            await request_idempotency.complete(
+                key, response.model_dump(mode="json")
+            )
+        return response
     except BaseException as exc:
         trajectory_progressed = baseline != (
             len(resume_messages),
@@ -567,7 +637,10 @@ async def continue_autonomous(req: ContinueRequest) -> AutonomousResponse:
         )
         # Registry 在非幂等/未知 handler 前写 started marker。即使工具已开始而
         # trajectory 尚未来得及 append，也必须 fail closed，避免重放副作用。
-        effect_attempted = tool_registry.has_effect_attempt(run_id)
+        durable_effect = await request_idempotency.abort(key) if key else False
+        effect_attempted = (
+            durable_effect or tool_registry.has_effect_attempt(run_id)
+        )
         progressed = trajectory_progressed or effect_attempted
         # 仅在尚未执行/记录任何新动作时恢复。若已有工具轨迹，恢复原状态会
         # 重放可能带副作用的工具，因此保守地消费该会话。

@@ -1,7 +1,7 @@
 import logging
 import uuid
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Header
 from fastapi.responses import StreamingResponse
 
 from models.chat import ChatRequest, ChatResponse, HistoryRequest, ToolChatRequest, ToolChatResponse
@@ -11,6 +11,7 @@ from services.tools import get_tool_definitions
 from services.tool_loop import run_tool_round
 from services.tool_registry import SideEffectAmbiguousError, tool_registry
 from services.injection import check_injection, check_output_leak
+from services.idempotency import normalize_idempotency_key, request_idempotency
 
 conversations: dict[str, list] = {}
 router = APIRouter()
@@ -71,8 +72,12 @@ MAX_TOOL_ROUNDS = 3  # 防止无限 tool calling 循环
 # run_tool_round 内部也用 allowed_tool_names()，端点侧无需再各维护一份。
 
 
-@router.post("/chat/tools", response_model=ToolChatResponse)
-async def chat_with_tools(req: ToolChatRequest):
+async def _execute_chat_with_tools(
+    req: ToolChatRequest,
+    *,
+    run_id: str,
+    idempotency_key: str | None,
+) -> ToolChatResponse:
     """Function Calling 聊天端点。
 
     LLM 根据用户自然语言自主决定调用哪些工具，执行后生成最终回复。
@@ -99,28 +104,17 @@ async def chat_with_tools(req: ToolChatRequest):
     ]
 
     tools_called: list[str] = []
-    run_id = f"chat_tools_{uuid.uuid4().hex[:12]}"
-
     for _ in range(MAX_TOOL_ROUNDS):
         # 复用 run_tool_round（D4）：单轮 LLM→tool_calls→dispatch→回灌。
         # 传 client=_client 保留测试注入；白名单从 registry 派生。
-        try:
-            round_result = await run_tool_round(
-                messages,
-                tools=get_tool_definitions(),
-                client=_client,
-                run_id=run_id,
-                user_id=req.user_id,
-            )
-        except Exception as exc:
-            # 本请求此前若已启动未知/非幂等工具，后续 provider 失败不能再作为
-            # 可重试 503 暴露，否则客户端重放整个请求会重复副作用。
-            if (
-                tool_registry.has_effect_attempt(run_id)
-                and not isinstance(exc, SideEffectAmbiguousError)
-            ):
-                raise SideEffectAmbiguousError("chat_tools_request") from exc
-            raise
+        round_result = await run_tool_round(
+            messages,
+            tools=get_tool_definitions(),
+            client=_client,
+            run_id=run_id,
+            user_id=req.user_id,
+            idempotency_key=idempotency_key,
+        )
 
         # 无 tool_calls → LLM 直接回复，执行第 4 层输出检查后返回
         if not round_result.has_tool_calls:
@@ -143,3 +137,41 @@ async def chat_with_tools(req: ToolChatRequest):
         "处理轮次超限，请简化请求后重试。",
     )
     return ToolChatResponse(response=last_content, tools_called=tools_called)
+
+
+@router.post("/chat/tools", response_model=ToolChatResponse)
+async def chat_with_tools(
+    req: ToolChatRequest,
+    idempotency_key: str | None = Header(
+        default=None, alias="Idempotency-Key"
+    ),
+) -> ToolChatResponse:
+    """Run tool chat with an optional durable replay receipt."""
+    key = normalize_idempotency_key(idempotency_key)
+    if key:
+        decision = await request_idempotency.begin(
+            key, "chat.tools", req.model_dump(mode="json")
+        )
+        if decision.replayed:
+            return ToolChatResponse.model_validate(decision.response)
+
+    run_id = f"chat_tools_{uuid.uuid4().hex[:12]}"
+    try:
+        response = await _execute_chat_with_tools(
+            req, run_id=run_id, idempotency_key=key
+        )
+        if key:
+            await request_idempotency.complete(
+                key, response.model_dump(mode="json")
+            )
+        return response
+    except BaseException as exc:
+        durable_effect = await request_idempotency.abort(key) if key else False
+        effect_attempted = durable_effect or tool_registry.has_effect_attempt(run_id)
+        if (
+            isinstance(exc, Exception)
+            and effect_attempted
+            and not isinstance(exc, SideEffectAmbiguousError)
+        ):
+            raise SideEffectAmbiguousError("chat_tools_request") from exc
+        raise

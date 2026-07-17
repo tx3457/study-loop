@@ -59,6 +59,7 @@ class TestManagedProviderClient(unittest.IsolatedAsyncioTestCase):
         first_chat_resource = client.chat
         self.assertTrue(client.is_initialized)
         self.assertEqual(len(factory.clients), 1)
+        self.assertEqual(factory.calls[0]["max_retries"], 0)
 
         await client.close()
         self.assertTrue(factory.clients[0].closed)

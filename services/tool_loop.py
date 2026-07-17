@@ -59,6 +59,7 @@ async def run_tool_round(
     business_tool_allowlist: Optional[set[str]] = None,
     run_id: Optional[str] = None,
     user_id: Optional[str] = None,
+    idempotency_key: Optional[str] = None,
     tool_choice: Optional[str] = None,
     max_retries: int = 2,
     extra_call_messages: Optional[list] = None,
@@ -227,7 +228,13 @@ async def run_tool_round(
         # 业务工具：dispatch（自带超时/重试/audit）并回灌
         logger.info(f"[tool_loop] dispatch {name}({args})")
         try:
-            result = await dispatch_tool(name, args, run_id=run_id, user_id=user_id)
+            result = await dispatch_tool(
+                name,
+                args,
+                run_id=run_id,
+                user_id=user_id,
+                idempotency_key=idempotency_key,
+            )
             blocked_reason = None
         except SideEffectAmbiguousError:
             logger.exception(f"[tool_loop] side effect result ambiguous for {name}")

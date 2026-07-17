@@ -54,6 +54,10 @@ cp .env.example .env
 python -m uvicorn main:app --reload --port 8001
 ```
 
+如需启用本地 Cross-Encoder 精排，改用
+`pip install -r requirements-reranker.txt -r requirements-dev.txt`，再设置
+`RERANKER_ENABLED=true`。默认安装和 Docker 镜像不包含大型模型运行时。
+
 启动前端：
 
 ```bash
@@ -73,6 +77,10 @@ npm run dev
 | Chat / Tool Calling | `LLM_API_KEY`、`LLM_BASE_URL`、`LLM_MODEL` |
 | Structured Output | `STRUCTURED_API_KEY`、`STRUCTURED_BASE_URL`、`STRUCTURED_MODEL` |
 | Embeddings | `EMBEDDING_API_KEY`、`EMBEDDING_BASE_URL`、`LLM_EMBEDDING_MODEL` |
+
+Autonomous Agent 会为同一次前端重试复用 `Idempotency-Key`。使用
+`DATABASE_URL` 时 receipt 保存在 PostgreSQL；本地无数据库时保存在
+`IDEMPOTENCY_DB_PATH` 指定的 SQLite 文件。
 
 Structured Output 和 Embeddings 的专用 key 与地址必须成对配置；两者同时留空时才会整组回退到 `LLM_*`。完整配置见 [`.env.example`](.env.example)。
 
