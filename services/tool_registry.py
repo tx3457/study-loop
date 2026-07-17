@@ -17,6 +17,8 @@ Tool Registry + Audit Trail（Phase 8 P1-2 升级）
      fail closed，避免在同一进程内静默重放副作用
 """
 import asyncio
+import inspect
+import json
 import logging
 import time
 import uuid
@@ -25,6 +27,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Awaitable, Callable, Optional
 
+from services.idempotency import IdempotencyConflictError, request_idempotency
 from services.retry import RetryExhausted, with_retry
 
 logger = logging.getLogger(__name__)
@@ -70,6 +73,10 @@ class Tool:
     parameters_schema: dict         # OpenAI Function Calling JSON Schema
     handler: Callable[..., Awaitable[str]]   # async callable, 返回 JSON 字符串
     metadata: ToolMetadata = field(default_factory=ToolMetadata)
+    _handler_signature: inspect.Signature = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        self._handler_signature = inspect.signature(self.handler)
 
     def to_openai_schema(self) -> dict:
         """转 OpenAI tools 参数格式"""
@@ -160,6 +167,7 @@ class ToolRegistry:
         *,
         run_id: Optional[str] = None,
         user_id: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
     ) -> str:
         """调用工具：带 per-tool timeout、retry、audit。
 
@@ -181,8 +189,72 @@ class ToolRegistry:
             return f'{{"error": "{err}"}}'
 
         tool_call_id = uuid.uuid4().hex
-        start = time.monotonic()
         effect_mode = tool.metadata.effect_mode
+
+        required = tool.parameters_schema.get("required", [])
+        missing = [field for field in required if field not in arguments]
+        declared = set(tool.parameters_schema.get("properties", {}))
+        closed_schema = (
+            tool.parameters_schema.get("additionalProperties") is False
+        )
+        unknown = (
+            [field for field in arguments if field not in declared]
+            if closed_schema
+            else []
+        )
+        binding_error = None
+        if missing:
+            binding_error = f"缺少必填参数: {', '.join(missing)}"
+        elif unknown:
+            binding_error = f"未知参数: {', '.join(unknown)}"
+        else:
+            try:
+                tool._handler_signature.bind(**arguments)
+            except TypeError as exc:
+                binding_error = str(exc)
+
+        if binding_error:
+            message = f"工具 {name} 参数无效"
+            self._record(ToolCallRecord(
+                tool_call_id=tool_call_id,
+                tool_name=name,
+                arguments=arguments,
+                status="error",
+                duration_ms=0.0,
+                timestamp=datetime.now().isoformat(),
+                effect_mode=effect_mode.value,
+                run_id=run_id,
+                user_id=user_id,
+                error_message=binding_error,
+                retry_attempts=0,
+            ))
+            return json.dumps(
+                {"error": message, "reason": "invalid_tool_arguments"},
+                ensure_ascii=False,
+            )
+
+        if idempotency_key and effect_mode in _NON_REPLAYABLE_EFFECTS:
+            try:
+                await request_idempotency.mark_effect_started(
+                    idempotency_key, name
+                )
+            except IdempotencyConflictError as exc:
+                self._record(ToolCallRecord(
+                    tool_call_id=tool_call_id,
+                    tool_name=name,
+                    arguments=arguments,
+                    status="error",
+                    duration_ms=0.0,
+                    timestamp=datetime.now().isoformat(),
+                    effect_mode=effect_mode.value,
+                    run_id=run_id,
+                    user_id=user_id,
+                    error_message=exc.reason,
+                    retry_attempts=0,
+                ))
+                raise SideEffectAmbiguousError(name) from exc
+
+        start = time.monotonic()
         replay_safe = effect_mode in _REPLAY_SAFE_EFFECTS
         effective_retries = tool.metadata.max_retries if replay_safe else 0
         if not replay_safe and tool.metadata.max_retries:
@@ -296,6 +368,7 @@ class ToolRegistry:
         """Whether a non-replayable tool started during this in-process run."""
         return any(
             record.run_id == run_id
+            and record.status in {"started", "ok", "ambiguous"}
             and record.effect_mode in {
                 EffectMode.NON_IDEMPOTENT.value,
                 EffectMode.UNKNOWN.value,

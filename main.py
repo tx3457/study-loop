@@ -22,6 +22,7 @@ from routers.audit import router as audit_router
 from routers.tutor import router as tutor_router
 from routers.health import router as health_router
 from services.memory_persist import load_snapshot
+from services.idempotency import IdempotencyConflictError
 from services.provider_config import (
     ProviderConfigurationError,
     close_managed_provider_clients,
@@ -132,7 +133,28 @@ async def side_effect_ambiguous_handler(
     return JSONResponse(
         status_code=409,
         content={
-            "detail": "工具执行结果不确定，请勿自动重试；请刷新学习状态后重新开始"
+            "detail": "工具执行结果不确定，请勿自动重试；请刷新学习状态后重新开始",
+            "code": "side_effect_ambiguous",
+            "reason": "ambiguous",
+        },
+    )
+
+
+@app.exception_handler(IdempotencyConflictError)
+async def idempotency_conflict_handler(
+    request: Request, exc: IdempotencyConflictError
+):
+    details = {
+        "payload_mismatch": "该 Idempotency-Key 已用于不同请求，请生成新 key",
+        "in_progress": "相同请求正在处理中，请勿并发重复提交",
+        "ambiguous": "此前请求可能已执行写操作，请刷新学习状态后重新开始",
+    }
+    return JSONResponse(
+        status_code=409,
+        content={
+            "detail": details.get(exc.reason, "请求无法安全重复执行"),
+            "code": "idempotency_conflict",
+            "reason": exc.reason,
         },
     )
 

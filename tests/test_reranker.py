@@ -75,11 +75,11 @@ class TestRerankDocs(unittest.IsolatedAsyncioTestCase):
 class TestRerankerEnabledFlag(unittest.TestCase):
     """env 开关契约"""
 
-    def test_default_enabled(self):
+    def test_default_disabled_when_optional_runtime_is_not_installed(self):
         from services import reranker
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("RERANKER_ENABLED", None)
-            self.assertTrue(reranker.reranker_enabled())
+            self.assertFalse(reranker.reranker_enabled())
 
     def test_disabled_when_env_false(self):
         from services import reranker

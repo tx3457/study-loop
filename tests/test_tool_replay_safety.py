@@ -149,6 +149,73 @@ class TestToolReplaySafety(unittest.IsolatedAsyncioTestCase):
         finally:
             tool_registry._audit_log[:] = original_audit
 
+    async def test_invalid_profile_arguments_fail_before_effect_is_started(self):
+        tool = tool_registry.get("update_learning_profile")
+        self.assertIsNotNone(tool)
+        handler = AsyncMock(return_value='{"status":"unexpected"}')
+        original_audit = list(tool_registry._audit_log)
+
+        try:
+            with patch.object(tool, "handler", new=handler):
+                result = await tool_registry.invoke(
+                    "update_learning_profile",
+                    {"user_id": "u", "document_id": "d"},
+                    run_id="invalid-profile-args",
+                )
+
+            self.assertIn("参数无效", result)
+            handler.assert_not_awaited()
+            records = tool_registry._audit_log[len(original_audit):]
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0].status, "error")
+            self.assertEqual(records[0].retry_attempts, 0)
+            self.assertFalse(
+                tool_registry.has_effect_attempt("invalid-profile-args")
+            )
+        finally:
+            tool_registry._audit_log[:] = original_audit
+
+    async def test_closed_schema_rejects_unknown_args_for_kwargs_handler(self):
+        calls = []
+
+        async def kwargs_handler(**kwargs):
+            calls.append(kwargs)
+            return '{"status":"unexpected"}'
+
+        tool = Tool(
+            name="closed_schema_kwargs_tool",
+            description="MCP-style handler with a closed input schema",
+            parameters_schema={
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+            handler=kwargs_handler,
+            metadata=ToolMetadata(
+                max_retries=0,
+                effect_mode=EffectMode.UNKNOWN,
+            ),
+        )
+        original_audit = list(tool_registry._audit_log)
+        tool_registry.register(tool)
+
+        try:
+            result = await tool_registry.invoke(
+                tool.name,
+                {"query": "q", "unexpected": "blocked"},
+                run_id="closed-schema-invalid-args",
+            )
+
+            self.assertIn("参数无效", result)
+            self.assertEqual(calls, [])
+            self.assertFalse(
+                tool_registry.has_effect_attempt("closed-schema-invalid-args")
+            )
+        finally:
+            tool_registry.unregister(tool.name, expected_tool=tool)
+            tool_registry._audit_log[:] = original_audit
+
     async def test_cancelled_profile_update_is_never_audited_as_success(self):
         tool = tool_registry.get("update_learning_profile")
         self.assertIsNotNone(tool)

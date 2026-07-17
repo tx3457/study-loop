@@ -155,7 +155,7 @@ class ManagedProviderClient:
         config: ProviderConfig,
         *,
         timeout: float | httpx.Timeout = PROVIDER_TIMEOUT,
-        max_retries: int = 2,
+        max_retries: int = 0,
         client_factory=AsyncOpenAI,
     ) -> None:
         self._config = config
@@ -203,10 +203,10 @@ def build_managed_async_openai(
     config: ProviderConfig,
     *,
     timeout: float | httpx.Timeout = PROVIDER_TIMEOUT,
-    max_retries: int = 2,
+    max_retries: int = 0,
     client_factory=AsyncOpenAI,
 ) -> ManagedProviderClient:
-    """Create and register a stable process-wide provider client proxy."""
+    """Create a shared client; service-level with_retry owns retry policy."""
 
     client = ManagedProviderClient(
         config,
