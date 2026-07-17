@@ -4,7 +4,8 @@
   "benchmark": "BEIR SciFact full-test StudyLoop business BM25",
   "scope": "english_retrieval_component_only",
   "studyloop_source": {
-    "commit": "b0e4cc24892e4fceaaa8917b846df825b3483fe8",
+    "evaluation_commit": "b0e4cc24892e4fceaaa8917b846df825b3483fe8",
+    "source_binding_commit": "7346a2bc8429af56b9f569dc18987e2ba39012ba",
     "tokenizer_id": "nfkc_casefold_ascii_words_cjk_unigram_bigram_v1",
     "files": {
       "tokenizer": {
@@ -17,8 +18,8 @@
       },
       "vectorstore": {
         "path": "services/vectorstore.py",
-        "sha256": "141d4a361886f693a06fe6fa075fe5decb547fa7b4144a96dca194b29422b204",
-        "hash_refresh_note": "Refreshed after document-ingestion lifecycle changes outside the evaluated BM25 retrieval path."
+        "sha256": "8eb431a62144339617ee453a920d83f60aa6c9cb07979436e2a8f1eaddb57b97",
+        "hash_refresh_note": "Refreshed after provider-client lifecycle and reranker-default documentation changes outside the evaluated BM25 ranking path."
       }
     }
   },

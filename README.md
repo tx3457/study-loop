@@ -100,6 +100,14 @@ curl -i http://localhost:8001/health/providers
 
 `/health/live` 只检查进程存活，不访问外部服务。`/health/providers` 调用 Provider 的 `models.list`，不会发起 Chat、Structured Output 或 Embedding 请求；结果默认缓存 30 秒。全部模型在目录中可见时返回 200，否则返回 503 和稳定的诊断码。目录可达只代表凭据、地址和模型可见性正常，不代表 Structured Output、Tool Calling 或 Embedding 能力已经实际验证。
 
+首次接入真实 Provider 时，再显式运行一次能力检查：
+
+```bash
+python scripts/check_provider_capabilities.py
+```
+
+该命令会发送少量真实请求，验证普通 Chat、JSON Mode、生产所用的自动工具选择行为、Structured Output 和 Embedding，并可能产生少量费用。输出不会包含密钥、Provider 地址、响应正文或原始异常；全部通过时退出码为 0。它不会作为公开 HTTP 接口或默认 CI 步骤运行。
+
 ## 使用方法
 
 1. 在“文档管理”上传学习材料。
@@ -117,6 +125,10 @@ curl -i http://localhost:8001/health/providers
 ```bash
 # 后端测试
 python -m pytest -q
+
+# 使用临时 PostgreSQL 时会额外执行持久幂等跨连接测试
+TEST_DATABASE_URL=postgresql://user:password@127.0.0.1:5432/studyloop_test \
+  python -m pytest -q tests/test_idempotency_postgres.py
 
 # Agent 演示与 BM25 评测校验
 python scripts/demo_react_tutor_agent.py

@@ -12,6 +12,20 @@ jobs:
   backend:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: studyloop_ci
+          POSTGRES_PASSWORD: ci-password
+          POSTGRES_DB: studyloop_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U studyloop_ci -d studyloop_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
       LLM_API_KEY: ci-placeholder
       LLM_BASE_URL: http://127.0.0.1:9/v1
@@ -31,6 +45,7 @@ jobs:
       RERANKER_ENABLED: "false"
       MCP_LIVE_ENABLED: "false"
       LANGCHAIN_TRACING_V2: "false"
+      TEST_DATABASE_URL: postgresql://studyloop_ci:ci-password@127.0.0.1:5432/studyloop_ci
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v6
