@@ -1,22 +1,31 @@
 """HTTP boundaries for provider failures, local CORS, and first-user state."""
 
+import asyncio
+import sys
 import unittest
-from unittest.mock import AsyncMock, patch
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from fastapi.testclient import TestClient
 from chromadb.errors import InternalError, NotFoundError
 from openai import APIConnectionError
 
 import routers.autonomous as autonomous_router
+import routers.chat as chat_router
 import routers.documents as documents_router
 import routers.learning_path as learning_path_router
 import routers.user as user_router
 import services.learning_path as learning_path_service
+import services.tools as tool_module
 from main import app
 from models.learning_path import CompressedReport, PathBrief
 from services.retry import RetryExhausted
+from services.tool_registry import SideEffectAmbiguousError, tool_registry
 from services.vectorstore import DocumentAlreadyExistsError
 
 
@@ -197,6 +206,304 @@ class TestApiErrorBoundaries(unittest.TestCase):
         finally:
             autonomous_router._sessions.pop(conversation_id, None)
             autonomous_router._sessions_in_flight.discard(conversation_id)
+
+    def test_autonomous_continue_dispatched_tool_without_trajectory_returns_gone(self):
+        origin = "http://127.0.0.1:5173"
+        conversation_id = "audited-provider-failure"
+        autonomous_router._sessions[conversation_id] = _paused_autonomous_session(
+            conversation_id
+        )
+        tool = tool_registry.get("update_learning_profile")
+        self.assertIsNotNone(tool)
+        original_audit = list(tool_registry._audit_log)
+        writes = []
+        captured_run_id = []
+
+        async def fake_write(**kwargs):
+            writes.append(kwargs)
+            return '{"status":"updated"}'
+
+        async def fail_after_committed_write(**kwargs):
+            captured_run_id.append(kwargs["run_id"])
+            await tool_module.dispatch_tool(
+                "update_learning_profile",
+                {
+                    "user_id": "default_user",
+                    "document_id": "notes.md",
+                    "grade_result": {"score": 1.0},
+                },
+                run_id=kwargs["run_id"],
+                user_id="default_user",
+            )
+            raise RetryExhausted("provider down after committed write")
+
+        try:
+            with patch.object(tool, "handler", new=fake_write), patch.object(
+                autonomous_router,
+                "check_injection",
+                AsyncMock(return_value=(False, "")),
+            ), patch.object(
+                autonomous_router,
+                "_run_react_loop",
+                AsyncMock(side_effect=fail_after_committed_write),
+            ):
+                response = self.client.post(
+                    "/agent/autonomous/continue",
+                    headers={"Origin": origin},
+                    json={"conversation_id": conversation_id, "user_reply": "继续"},
+                )
+
+            self.assertEqual(response.status_code, 410)
+            self.assertEqual(
+                response.json(),
+                {"detail": "续跑已执行部分操作，无法安全重试；请重新开始"},
+            )
+            self.assertEqual(len(writes), 1)
+            records = tool_registry.get_audit(run_id=captured_run_id[0])
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0].tool_name, "update_learning_profile")
+            self.assertEqual(records[0].status, "ok")
+            self.assertNotIn(conversation_id, autonomous_router._sessions)
+            self.assertNotIn(conversation_id, autonomous_router._sessions_in_flight)
+
+            second = self.client.post(
+                "/agent/autonomous/continue",
+                headers={"Origin": origin},
+                json={"conversation_id": conversation_id, "user_reply": "继续"},
+            )
+            self.assertEqual(second.status_code, 404)
+            self.assertEqual(len(writes), 1)
+            self.assertEqual(response.headers.get("access-control-allow-origin"), origin)
+        finally:
+            tool_registry._audit_log[:] = original_audit
+            autonomous_router._sessions.pop(conversation_id, None)
+            autonomous_router._sessions_in_flight.discard(conversation_id)
+
+    def test_autonomous_continue_ambiguous_side_effect_returns_gone(self):
+        origin = "http://127.0.0.1:5173"
+        conversation_id = "ambiguous-side-effect"
+        autonomous_router._sessions[conversation_id] = _paused_autonomous_session(
+            conversation_id
+        )
+        tool = tool_registry.get("update_learning_profile")
+        self.assertIsNotNone(tool)
+        original_audit = list(tool_registry._audit_log)
+
+        tool_call = SimpleNamespace(
+            id="update-1",
+            function=SimpleNamespace(
+                name="update_learning_profile",
+                arguments=(
+                    '{"user_id":"default_user","document_id":"notes.md",'
+                    '"grade_result":{"score":1.0}}'
+                ),
+            ),
+        )
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(return_value=SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(
+                content=None,
+                tool_calls=[tool_call],
+            ))]
+        ))
+        handler = AsyncMock(side_effect=asyncio.TimeoutError)
+
+        try:
+            with patch.object(tool, "handler", new=handler), patch.object(
+                autonomous_router, "_client", client
+            ), patch.object(
+                autonomous_router,
+                "check_injection",
+                AsyncMock(return_value=(False, "")),
+            ):
+                response = self.client.post(
+                    "/agent/autonomous/continue",
+                    headers={"Origin": origin},
+                    json={"conversation_id": conversation_id, "user_reply": "继续"},
+                )
+
+            self.assertEqual(response.status_code, 410)
+            self.assertEqual(
+                response.json(),
+                {"detail": "续跑已执行部分操作，无法安全重试；请重新开始"},
+            )
+            self.assertEqual(handler.await_count, 1)
+            records = tool_registry._audit_log[len(original_audit):]
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0].tool_name, "update_learning_profile")
+            self.assertEqual(records[0].status, "ambiguous")
+            self.assertNotIn(conversation_id, autonomous_router._sessions)
+            self.assertNotIn(conversation_id, autonomous_router._sessions_in_flight)
+            self.assertEqual(response.headers.get("access-control-allow-origin"), origin)
+        finally:
+            tool_registry._audit_log[:] = original_audit
+            autonomous_router._sessions.pop(conversation_id, None)
+            autonomous_router._sessions_in_flight.discard(conversation_id)
+
+    def test_initial_ambiguous_side_effect_is_non_retryable_conflict(self):
+        origin = "http://127.0.0.1:5173"
+        with patch.object(
+            autonomous_router,
+            "check_injection",
+            AsyncMock(return_value=(False, "")),
+        ), patch.object(
+            autonomous_router,
+            "_run_react_loop",
+            AsyncMock(side_effect=SideEffectAmbiguousError(
+                "update_learning_profile"
+            )),
+        ):
+            response = self.client.post(
+                "/agent/autonomous",
+                headers={"Origin": origin},
+                json={"query": "学RAG", "user_id": "default_user"},
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json(),
+            {"detail": "工具执行结果不确定，请勿自动重试；请刷新学习状态后重新开始"},
+        )
+        self.assertNotIn("update_learning_profile", response.text)
+        self.assertEqual(response.headers.get("access-control-allow-origin"), origin)
+
+    def test_initial_provider_failure_after_committed_write_is_conflict(self):
+        origin = "http://127.0.0.1:5173"
+        tool = tool_registry.get("update_learning_profile")
+        self.assertIsNotNone(tool)
+        original_audit = list(tool_registry._audit_log)
+        writes = []
+
+        async def fake_write(**kwargs):
+            writes.append(kwargs)
+            return '{"status":"updated"}'
+
+        async def fail_after_write(**kwargs):
+            await tool_module.dispatch_tool(
+                "update_learning_profile",
+                {
+                    "user_id": "default_user",
+                    "document_id": "notes.md",
+                    "grade_result": {"score": 1.0},
+                },
+                run_id=kwargs["run_id"],
+                user_id="default_user",
+            )
+            raise RetryExhausted("provider down after committed write")
+
+        try:
+            with patch.object(tool, "handler", new=fake_write), patch.object(
+                autonomous_router,
+                "check_injection",
+                AsyncMock(return_value=(False, "")),
+            ), patch.object(
+                autonomous_router,
+                "_run_react_loop",
+                AsyncMock(side_effect=fail_after_write),
+            ):
+                response = self.client.post(
+                    "/agent/autonomous",
+                    headers={"Origin": origin},
+                    json={"query": "学RAG", "user_id": "default_user"},
+                )
+
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(len(writes), 1)
+            records = tool_registry._audit_log[len(original_audit):]
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0].status, "ok")
+            self.assertNotIn("update_learning_profile", response.text)
+            self.assertEqual(response.headers.get("access-control-allow-origin"), origin)
+        finally:
+            tool_registry._audit_log[:] = original_audit
+
+    def test_tool_chat_ambiguous_side_effect_is_non_retryable_conflict(self):
+        origin = "http://127.0.0.1:5173"
+        with patch.object(
+            chat_router,
+            "check_injection",
+            AsyncMock(return_value=(False, "")),
+        ), patch.object(
+            chat_router,
+            "run_tool_round",
+            AsyncMock(side_effect=SideEffectAmbiguousError(
+                "update_learning_profile"
+            )),
+        ):
+            response = self.client.post(
+                "/chat/tools",
+                headers={"Origin": origin},
+                json={"message": "更新画像", "user_id": "default_user"},
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.json(),
+            {"detail": "工具执行结果不确定，请勿自动重试；请刷新学习状态后重新开始"},
+        )
+        self.assertNotIn("update_learning_profile", response.text)
+        self.assertEqual(response.headers.get("access-control-allow-origin"), origin)
+
+    def test_tool_chat_provider_failure_after_committed_write_is_conflict(self):
+        origin = "http://127.0.0.1:5173"
+        tool = tool_registry.get("update_learning_profile")
+        self.assertIsNotNone(tool)
+        original_audit = list(tool_registry._audit_log)
+        writes = []
+        rounds = 0
+
+        async def fake_write(**kwargs):
+            writes.append(kwargs)
+            return '{"status":"updated"}'
+
+        async def write_then_fail(*args, **kwargs):
+            nonlocal rounds
+            rounds += 1
+            if rounds == 1:
+                await tool_module.dispatch_tool(
+                    "update_learning_profile",
+                    {
+                        "user_id": "default_user",
+                        "document_id": "notes.md",
+                        "grade_result": {"score": 1.0},
+                    },
+                    run_id=kwargs["run_id"],
+                    user_id="default_user",
+                )
+                return SimpleNamespace(
+                    has_tool_calls=True,
+                    outcomes=[SimpleNamespace(
+                        kind="dispatched",
+                        name="update_learning_profile",
+                    )],
+                )
+            raise RetryExhausted("provider down after committed write")
+
+        try:
+            with patch.object(tool, "handler", new=fake_write), patch.object(
+                chat_router,
+                "check_injection",
+                AsyncMock(return_value=(False, "")),
+            ), patch.object(
+                chat_router,
+                "run_tool_round",
+                AsyncMock(side_effect=write_then_fail),
+            ):
+                response = self.client.post(
+                    "/chat/tools",
+                    headers={"Origin": origin},
+                    json={"message": "更新画像", "user_id": "default_user"},
+                )
+
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(len(writes), 1)
+            records = tool_registry._audit_log[len(original_audit):]
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0].status, "ok")
+            self.assertNotIn("update_learning_profile", response.text)
+            self.assertEqual(response.headers.get("access-control-allow-origin"), origin)
+        finally:
+            tool_registry._audit_log[:] = original_audit
 
     def test_upload_provider_failure_and_duplicate_have_explicit_statuses(self):
         origin = "http://127.0.0.1:5173"

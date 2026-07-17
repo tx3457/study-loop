@@ -31,6 +31,13 @@ example configuration.
   system.
 - The standalone autonomous endpoint keeps paused conversations in process
   memory. Only the tutor interrupt/resume path uses a LangGraph checkpointer.
-- A resumed LangGraph node may replay code before an `interrupt`; tools with
-  side effects need idempotency safeguards before this is used with untrusted
-  workloads.
+- Read-only and idempotent tools may retry automatically. Unknown and
+  non-idempotent tools do not; an ambiguous result returns a non-retryable
+  conflict, and an in-process autonomous continuation is consumed instead of
+  replayed. The audit marker and paused-session store are still process-local,
+  so they are not an exactly-once guarantee across crashes or multiple workers.
+- A resumed LangGraph node may replay earlier code before an `interrupt`.
+  The interrupt-capable assistant therefore exposes and dispatches only tools
+  declared read-only or idempotent; unknown MCP tools and profile writes are
+  excluded. Future side-effectful tools need durable handler-level idempotency
+  before they can enter that path.

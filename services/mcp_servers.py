@@ -6,12 +6,13 @@ Live MCP server 接入（灰度）——把「MCP 只做了 echo 测试、没接
   - search        ：DuckDuckGo 联网搜索
   - fetch_content ：抓取指定 URL 的正文
 经 services.mcp_client.register_mcp_tools_to_registry 批量注册进全局 ToolRegistry，
-工具名形如 mcp_ddg_search / mcp_ddg_fetch_content。注册后 assistant 自由问答 worker
-自动可见（get_tool_definitions() 与白名单都从 registry 派生），无需改 assistant 调用逻辑。
+工具名形如 mcp_ddg_search / mcp_ddg_fetch_content。注册后 standalone autonomous 与
+chat/tools 可动态发现；interrupt-capable assistant 仅开放声明为可重放的工具，因此
+unknown MCP 默认不会进入该路径。
 
 灰度：MCP_LIVE_ENABLED=true 才连（默认 false）；连不上 fail-soft 不阻断启动（降级回无联网）。
-守底线：联网工具只供 assistant 自由问答用；出题（quiz_agent）走 search_document 检索本地
-       文档库，不碰这些联网工具 → 出题证据仍只来自已建库材料，Faithfulness 卖点不受污染。
+守底线：出题（quiz_agent）走 search_document 检索本地文档库，不碰这些联网工具；
+       出题证据仍只来自已建库材料，Faithfulness 卖点不受污染。
 
 依赖：本机需 uv（uvx）。首次连接时 uvx 自动从 PyPI 拉 duckduckgo-mcp-server。
      UVX_PATH 可指定 uvx 绝对路径（systemd/docker 下 PATH 可能不含 ~/.local/bin）。

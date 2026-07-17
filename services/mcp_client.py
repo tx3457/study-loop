@@ -23,7 +23,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from services.tool_registry import Tool, ToolMetadata, tool_registry
+from services.tool_registry import EffectMode, Tool, ToolMetadata, tool_registry
 
 logger = logging.getLogger(__name__)
 
@@ -110,11 +110,13 @@ async def register_mcp_tools_to_registry(
     client: MCPClient,
     *,
     timeout_sec: float = 30.0,
-    max_retries: int = 1,
+    max_retries: int = 0,
 ) -> list[str]:
     """把一个 MCP server 暴露的所有工具批量注册到全局 ToolRegistry。
 
     Tool name 规则:`mcp_{server_name}_{tool_name}`,避免与原生工具撞名。
+    MCP annotations 只是非可信提示，无法证明远端副作用可安全重放；因此默认
+    effect_mode=unknown 且不自动重试。
 
     Returns:
         注册成功的 tool name 列表
@@ -137,7 +139,11 @@ async def register_mcp_tools_to_registry(
             description=getattr(mt, "description", "") or f"MCP tool {mt.name} from {server_name}",
             parameters_schema=params_schema,
             handler=_handler,
-            metadata=ToolMetadata(timeout_sec=timeout_sec, max_retries=max_retries),
+            metadata=ToolMetadata(
+                timeout_sec=timeout_sec,
+                max_retries=max_retries,
+                effect_mode=EffectMode.UNKNOWN,
+            ),
         )
         client._registered_tools[full_name] = tool
         tool_registry.register(tool)

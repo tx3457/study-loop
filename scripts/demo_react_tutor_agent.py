@@ -118,24 +118,6 @@ async def _fake_generate_quiz(
     )
 
 
-async def _fake_update_learning_profile(
-    user_id: str,
-    document_id: str,
-    grade_result: dict,
-) -> str:
-    return json.dumps(
-        {
-            "user_id": user_id,
-            "document_id": document_id,
-            "score": grade_result.get("score", 0.0),
-            "mastery": 0.74,
-            "weak_points_added": [],
-            "mode": "fake_profile_update",
-        },
-        ensure_ascii=False,
-    )
-
-
 async def _fake_plan_next_step(profile: dict, last_result: dict) -> str:
     return json.dumps(
         {
@@ -153,7 +135,6 @@ def _patched_demo_tools():
     replacements = {
         "search_document": _fake_search_document,
         "generate_quiz": _fake_generate_quiz,
-        "update_learning_profile": _fake_update_learning_profile,
         "plan_next_step": _fake_plan_next_step,
     }
     originals = {}
@@ -183,7 +164,7 @@ async def main() -> None:
         "feedback": "回答正确，可以进入下一步。",
         "knowledge_gap": None,
     }
-    profile_update = {
+    profile_snapshot = {
         "user_id": "demo_user",
         "document_id": "demo_doc",
         "score": 1.0,
@@ -210,21 +191,16 @@ async def main() -> None:
             "explanation": "链式法则用于复合函数求导。",
             "question_type": "short_answer",
         })]),
-        _assistant_message(tool_calls=[_tool_call("c4", "update_learning_profile", {
-            "user_id": "demo_user",
-            "document_id": "demo_doc",
-            "grade_result": grade_result,
-        })]),
-        _assistant_message(tool_calls=[_tool_call("c5", "plan_next_step", {
-            "profile": profile_update,
+        _assistant_message(tool_calls=[_tool_call("c4", "plan_next_step", {
+            "profile": profile_snapshot,
             "last_result": grade_result,
         })]),
-        _assistant_message(tool_calls=[_tool_call("c6", "finalize", {
+        _assistant_message(tool_calls=[_tool_call("c5", "finalize", {
             "final_answer": (
                 "已基于课程材料生成 1 道反向传播复习题，批改结果为正确；"
                 "建议下一步练习多层复合函数的梯度推导。"
             ),
-            "reason": "复习题、批改和下一步计划均已完成",
+            "reason": "检索、复习题、批改和下一步计划均已完成",
         })]),
     ]
 
@@ -249,7 +225,7 @@ async def main() -> None:
         print(f"{index}. action=tool tool={record.tool_name} status={record.status}")
         print(f"   args={json.dumps(record.arguments, ensure_ascii=False)}")
         print(f"   observation={record.output_preview}")
-    print("6. action=finalize tool=finalize status=ok")
+    print(f"{len(records) + 1}. action=finalize tool=finalize status=ok")
     print(f"   final_answer={result.get('final_answer')}")
     print(f"tools_called={result.get('tools_called')}")
 

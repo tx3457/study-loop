@@ -6,7 +6,7 @@ Function Calling 工具定义与分发（Phase 8 P1-2 升级：接入 ToolRegist
 
 向后兼容：
   - TOOL_DEFINITIONS 仍然导出（legacy import-time snapshot）
-  - get_tool_definitions() 从 registry 动态生成，运行时注册的 MCP/live tool 自动出现
+  - get_tool_definitions() 从 registry 动态生成；interrupt 节点另用 replay-safe 子集
   - dispatch_tool 签名扩展了可选 run_id/user_id，旧调用方不传也能跑
 
 面试讲点：
@@ -22,7 +22,7 @@ from typing import Any, Optional
 from services.learning_path import generate_learning_path
 from services.memory import append_weak_points, get_user_profile, update_mastery
 from services.rag import generate_question
-from services.tool_registry import Tool, ToolMetadata, tool_registry
+from services.tool_registry import EffectMode, Tool, ToolMetadata, tool_registry
 from services.vectorstore import retrieve_with_rewrite
 
 logger = logging.getLogger(__name__)
@@ -215,7 +215,11 @@ def _register_all() -> None:
         },
         handler=_search_document,
         # 检索：embed + ChromaDB + BM25，应该快。给 20s 应付偶发慢
-        metadata=ToolMetadata(timeout_sec=20.0, max_retries=2),
+        metadata=ToolMetadata(
+            timeout_sec=20.0,
+            max_retries=2,
+            effect_mode=EffectMode.READ_ONLY,
+        ),
     ))
 
     tool_registry.register(Tool(
@@ -244,7 +248,11 @@ def _register_all() -> None:
         },
         handler=_generate_quiz,
         # 生成涉及 LLM thinking + 结构化输出，慢；重试一次防止累积成本
-        metadata=ToolMetadata(timeout_sec=60.0, max_retries=1),
+        metadata=ToolMetadata(
+            timeout_sec=60.0,
+            max_retries=1,
+            effect_mode=EffectMode.READ_ONLY,
+        ),
     ))
 
     tool_registry.register(Tool(
@@ -258,8 +266,12 @@ def _register_all() -> None:
             "required": ["user_id"],
         },
         handler=_get_user_profile,
-        # 只读 Store / PG，应该极快
-        metadata=ToolMetadata(timeout_sec=5.0, max_retries=2),
+        # 首次读取可能迁移多个 legacy bank；部分迁移后的失败不满足安全重试条件。
+        metadata=ToolMetadata(
+            timeout_sec=5.0,
+            max_retries=0,
+            effect_mode=EffectMode.UNKNOWN,
+        ),
     ))
 
     tool_registry.register(Tool(
@@ -274,7 +286,11 @@ def _register_all() -> None:
         },
         handler=_get_learning_path,
         # 全文 LLM 规划，最慢
-        metadata=ToolMetadata(timeout_sec=90.0, max_retries=1),
+        metadata=ToolMetadata(
+            timeout_sec=90.0,
+            max_retries=1,
+            effect_mode=EffectMode.READ_ONLY,
+        ),
     ))
 
     tool_registry.register(Tool(
@@ -301,7 +317,11 @@ def _register_all() -> None:
             "required": ["question", "answer", "correct_answer"],
         },
         handler=_grade_answer,
-        metadata=ToolMetadata(timeout_sec=5.0, max_retries=0),
+        metadata=ToolMetadata(
+            timeout_sec=5.0,
+            max_retries=0,
+            effect_mode=EffectMode.READ_ONLY,
+        ),
     ))
 
     tool_registry.register(Tool(
@@ -321,7 +341,12 @@ def _register_all() -> None:
             "required": ["user_id", "document_id", "grade_result"],
         },
         handler=_update_learning_profile,
-        metadata=ToolMetadata(timeout_sec=5.0, max_retries=1),
+        # EMA 写入不是幂等操作；提交后的超时无法判断是否已生效，禁止自动重放。
+        metadata=ToolMetadata(
+            timeout_sec=5.0,
+            max_retries=0,
+            effect_mode=EffectMode.NON_IDEMPOTENT,
+        ),
     ))
 
     tool_registry.register(Tool(
@@ -344,7 +369,11 @@ def _register_all() -> None:
             "required": ["profile", "last_result"],
         },
         handler=_plan_next_step,
-        metadata=ToolMetadata(timeout_sec=5.0, max_retries=0),
+        metadata=ToolMetadata(
+            timeout_sec=5.0,
+            max_retries=0,
+            effect_mode=EffectMode.READ_ONLY,
+        ),
     ))
 
 
@@ -356,8 +385,8 @@ _register_all()
 # ═══════════════════════════════════════════════════════════════════════════
 
 # 旧代码可能 import TOOL_DEFINITIONS；保留为向后兼容快照。
-# 新的 agent/chat 调用点必须使用 get_tool_definitions()，否则运行时注册的 MCP/live tool
-# 只会进入白名单，不会进入 LLM 可见的 tools schema。
+# 允许未知工具的 standalone agent/chat 使用 get_tool_definitions() 动态发现 MCP；
+# interrupt-capable 节点必须使用下面的 replay-safe schema + allowlist 双重约束。
 TOOL_DEFINITIONS = tool_registry.get_openai_schemas()
 
 
@@ -373,6 +402,28 @@ def allowed_tool_names() -> set[str]:
     控制工具（finalize / ask_user）不在 registry，由 autonomous 端点自行处理。
     """
     return set(tool_registry.list_tools())
+
+
+def replay_safe_tool_names() -> set[str]:
+    """Return tools safe to re-run when an interrupt-capable node restarts."""
+    safe_modes = {EffectMode.READ_ONLY, EffectMode.IDEMPOTENT}
+    return {
+        name
+        for name in tool_registry.list_tools()
+        if (tool := tool_registry.get(name))
+        and tool.metadata.effect_mode in safe_modes
+    }
+
+
+def get_replay_safe_tool_definitions() -> list[dict]:
+    """Return schemas for tools whose declared effects are replay-safe."""
+    safe_names = replay_safe_tool_names()
+    return [
+        tool.to_openai_schema()
+        for name in tool_registry.list_tools()
+        if name in safe_names
+        and (tool := tool_registry.get(name)) is not None
+    ]
 
 
 async def dispatch_tool(

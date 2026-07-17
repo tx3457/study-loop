@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import agents.assistant_agent as aa
 import services.tools as tool_module
 from agents.assistant_agent import MAX_ASSIST_ROUNDS, assistant_agent
-from services.tool_registry import Tool, ToolMetadata, tool_registry
+from services.tool_registry import EffectMode, Tool, ToolMetadata, tool_registry
 
 
 def _tool_call(call_id: str, name: str, args: dict):
@@ -109,14 +109,6 @@ async def _fake_generate_quiz(**kwargs) -> str:
     }, ensure_ascii=False)
 
 
-async def _fake_update_learning_profile(**kwargs) -> str:
-    return json.dumps({
-        "mastery": 0.74,
-        "weak_points_added": [],
-        "mode": "fake_profile_update",
-    }, ensure_ascii=False)
-
-
 async def _fake_plan_next_step(**kwargs) -> str:
     return json.dumps({
         "action": "advance",
@@ -134,7 +126,7 @@ async def _temporary_runtime_tool() -> str:
 
 
 class TestReactTutorAgentDemo(unittest.IsolatedAsyncioTestCase):
-    async def test_normal_review_loop_calls_retrieve_quiz_grade_profile_plan_finalize(self):
+    async def test_normal_review_loop_uses_only_replay_safe_tools(self):
         grade_result = {
             "question": "反向传播依赖什么规则？",
             "user_answer": "链式法则",
@@ -155,13 +147,10 @@ class TestReactTutorAgentDemo(unittest.IsolatedAsyncioTestCase):
                 "correct_answer": grade_result["correct_answer"],
                 "question_type": "short_answer",
             })]),
-            _assistant_message(tool_calls=[_tool_call("c4", "update_learning_profile", {
-                "user_id": "u1", "document_id": "doc1", "grade_result": grade_result,
-            })]),
-            _assistant_message(tool_calls=[_tool_call("c5", "plan_next_step", {
+            _assistant_message(tool_calls=[_tool_call("c4", "plan_next_step", {
                 "profile": {"weak_points": []}, "last_result": grade_result,
             })]),
-            _assistant_message(tool_calls=[_tool_call("c6", "finalize", {
+            _assistant_message(tool_calls=[_tool_call("c5", "finalize", {
                 "final_answer": "复习题已生成并批改，下一步继续练链式法则。",
                 "reason": "闭环完成",
             })]),
@@ -169,7 +158,6 @@ class TestReactTutorAgentDemo(unittest.IsolatedAsyncioTestCase):
         with _patched_handlers({
             "search_document": _fake_search_document,
             "generate_quiz": _fake_generate_quiz,
-            "update_learning_profile": _fake_update_learning_profile,
             "plan_next_step": _fake_plan_next_step,
         }):
             out = await assistant_agent({
@@ -185,7 +173,6 @@ class TestReactTutorAgentDemo(unittest.IsolatedAsyncioTestCase):
             "search_document",
             "generate_quiz",
             "grade_answer",
-            "update_learning_profile",
             "plan_next_step",
         ])
 
@@ -268,7 +255,7 @@ class TestReactTutorAgentDemo(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out["final_answer"], "达到轮次上限后的总结")
         self.assertEqual(out["tools_called"], ["search_document"])
 
-    async def test_runtime_registered_tools_are_visible_to_assistant_llm_call(self):
+    async def test_only_replay_safe_runtime_tools_are_visible_to_assistant(self):
         captured_tool_names: list[str] = []
 
         class CapturingCompletions:
@@ -285,8 +272,19 @@ class TestReactTutorAgentDemo(unittest.IsolatedAsyncioTestCase):
             chat=SimpleNamespace(completions=SimpleNamespace(create=CapturingCompletions().create))
         )
         tool_registry.register(Tool(
-            name="runtime_demo_tool",
-            description="Tool registered after services.tools import.",
+            name="runtime_safe_tool",
+            description="Read-only tool registered after services.tools import.",
+            parameters_schema={"type": "object", "properties": {}},
+            handler=_temporary_runtime_tool,
+            metadata=ToolMetadata(
+                timeout_sec=1.0,
+                max_retries=0,
+                effect_mode=EffectMode.READ_ONLY,
+            ),
+        ))
+        tool_registry.register(Tool(
+            name="runtime_unknown_tool",
+            description="Runtime tool without a trusted effect declaration.",
             parameters_schema={"type": "object", "properties": {}},
             handler=_temporary_runtime_tool,
             metadata=ToolMetadata(timeout_sec=1.0, max_retries=0),
@@ -299,10 +297,12 @@ class TestReactTutorAgentDemo(unittest.IsolatedAsyncioTestCase):
                 "_client": client,
             })
         finally:
-            tool_registry._tools.pop("runtime_demo_tool", None)
+            tool_registry._tools.pop("runtime_safe_tool", None)
+            tool_registry._tools.pop("runtime_unknown_tool", None)
 
         self.assertEqual(out["final_answer"], "done")
-        self.assertIn("runtime_demo_tool", captured_tool_names)
+        self.assertIn("runtime_safe_tool", captured_tool_names)
+        self.assertNotIn("runtime_unknown_tool", captured_tool_names)
 
 
 class TestReactTutorAgentDemoScript(unittest.TestCase):
@@ -320,7 +320,7 @@ class TestReactTutorAgentDemoScript(unittest.TestCase):
         self.assertIn("tool=search_document", completed.stdout)
         self.assertIn("tool=generate_quiz", completed.stdout)
         self.assertIn("tool=grade_answer", completed.stdout)
-        self.assertIn("tool=update_learning_profile", completed.stdout)
+        self.assertNotIn("tool=update_learning_profile", completed.stdout)
         self.assertIn("tool=plan_next_step", completed.stdout)
         self.assertIn("action=finalize", completed.stdout)
 

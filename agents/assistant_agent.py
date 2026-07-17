@@ -19,7 +19,9 @@ interrupt 重放语义（langgraph：节点从头重跑，已解决的 interrupt
   messages 持久化进 TutorState；节点每次进入从 state["messages"] 重建循环。
   ask_user 命中 → interrupt({"question"})；resume 时 interrupt 返回 user_reply，
   作为该 ask_user tool_call 的 tool response 回灌 messages 后续跑。
-  业务工具是只读检索/生成（dispatch_tool 自带 audit），重放安全。
+  该节点只向模型暴露 READ_ONLY/IDEMPOTENT 工具，并把同一集合传给 dispatch
+  allowlist；未知 MCP 与画像写入不会进入可重放的 interrupt 路径。若未来开放
+  副作用工具，仍需先提供持久幂等键，不能只依赖进程内 audit。
 """
 import logging
 import os
@@ -37,7 +39,11 @@ from services.react_controls import (
     build_react_system_prompt,
 )
 from services.tool_loop import run_tool_round
-from services.tools import allowed_tool_names, get_tool_definitions
+from services.tool_registry import SideEffectAmbiguousError
+from services.tools import (
+    get_replay_safe_tool_definitions,
+    replay_safe_tool_names,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +52,10 @@ MAX_ASSIST_ROUNDS = 8
 
 
 _CONTROL_TOOLS = build_control_tools(ask_user_resume_hint="调用后循环会暂停，等用户回答后续跑。")
-_ASSIST_SYSTEM = build_react_system_prompt(include_live_mcp=True, include_review_loop=True)
+_ASSIST_SYSTEM = build_react_system_prompt(
+    include_review_loop=True,
+    replay_safe_only=True,
+)
 
 
 def _client_of(state: TutorState):
@@ -57,7 +66,7 @@ def _client_of(state: TutorState):
 def _build_state_summary(tools_called: list[str], round_idx: int) -> str:
     """浓缩当前进度，让 LLM 一眼看清（对齐 autonomous._build_state_summary 思想）。"""
     used = list(dict.fromkeys(tools_called))
-    remaining = [t for t in (allowed_tool_names() - set(used))]
+    remaining = [t for t in (replay_safe_tool_names() - set(used))]
     return (
         f"轮次：{round_idx + 1}/{MAX_ASSIST_ROUNDS}\n"
         f"已调用工具（按顺序）：{used or '无'}\n"
@@ -95,6 +104,9 @@ async def assistant_agent(state: TutorState) -> dict:
             block = build_memory_context_block(await build_profile_card(state.get("user_id", "")))
             if block:
                 messages.insert(1, {"role": "system", "content": block})
+        except SideEffectAmbiguousError:
+            logger.exception("[assistant_agent] side-effect result is ambiguous")
+            raise
         except Exception as e:
             logger.warning(f"[assistant_agent] 注入画像卡失败（忽略）: {e}")
 
@@ -111,14 +123,18 @@ async def assistant_agent(state: TutorState) -> dict:
         try:
             rr = await run_tool_round(
                 messages,
-                tools=get_tool_definitions() + _CONTROL_TOOLS,
+                tools=get_replay_safe_tool_definitions() + _CONTROL_TOOLS,
                 client=client,
                 control_tools=CONTROL_TOOL_NAMES,
+                business_tool_allowlist=replay_safe_tool_names(),
                 run_id=run_id,
                 user_id=state.get("user_id"),
                 tool_choice="auto",
                 extra_call_messages=state_msg,
             )
+        except SideEffectAmbiguousError:
+            logger.exception("[assistant_agent] side-effect result is ambiguous")
+            raise
         except Exception as e:
             logger.exception(f"[assistant_agent] LLM call failed round {round_idx}: {e}")
             return {
@@ -144,7 +160,7 @@ async def assistant_agent(state: TutorState) -> dict:
             fn_name, fn_args = oc.name, oc.arguments
 
             # 控制工具：finalize → 写 final_answer 回 state，收尾
-            if fn_name == "finalize":
+            if oc.kind == "control" and fn_name == "finalize":
                 final_answer = fn_args.get("final_answer", "")
                 is_leak, reason = check_output_leak(final_answer)
                 if is_leak:
@@ -159,7 +175,7 @@ async def assistant_agent(state: TutorState) -> dict:
                 }
 
             # 控制工具：ask_user → interrupt 暂停，resume 注入 user_reply 续跑
-            if fn_name == "ask_user":
+            if oc.kind == "control" and fn_name == "ask_user":
                 question = fn_args.get("question", "请提供更多信息。")
                 logger.info(f"[assistant_agent] ask_user interrupt: {question[:50]}")
                 # interrupt 暂停：把问题暴露给前端；resume 时返回 Command(resume=user_reply)
@@ -186,9 +202,16 @@ async def assistant_agent(state: TutorState) -> dict:
     })
     try:
         rr = await run_tool_round(
-            messages, tools=get_tool_definitions(), client=client, run_id=run_id,
+            messages,
+            tools=get_replay_safe_tool_definitions(),
+            client=client,
+            business_tool_allowlist=replay_safe_tool_names(),
+            run_id=run_id,
         )
         final_answer = rr.content or "执行被截断。"
+    except SideEffectAmbiguousError:
+        logger.exception("[assistant_agent] truncated finish has ambiguous side effect")
+        raise
     except Exception as e:
         logger.exception(f"[assistant_agent] finish call failed: {e}")
         final_answer = f"执行被截断（{MAX_ASSIST_ROUNDS} 轮）"

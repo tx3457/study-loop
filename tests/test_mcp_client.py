@@ -119,6 +119,16 @@ class TestRegisterMCPToolsToRegistry(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(names), {"mcp_fs_read", "mcp_fs_write"})
         self.assertTrue(tool_registry.has("mcp_fs_read"))
         self.assertTrue(tool_registry.has("mcp_fs_write"))
+        self.assertEqual(tool_registry.get("mcp_fs_read").metadata.max_retries, 0)
+        self.assertEqual(tool_registry.get("mcp_fs_write").metadata.max_retries, 0)
+        self.assertEqual(
+            tool_registry.get("mcp_fs_read").metadata.effect_mode.value,
+            "unknown",
+        )
+        self.assertEqual(
+            tool_registry.get("mcp_fs_write").metadata.effect_mode.value,
+            "unknown",
+        )
 
     async def test_closure_routes_to_correct_mcp_tool_name(self):
         """关键:多 tool 注册后,各自 handler 调对应 MCP name 而不是最后一个"""

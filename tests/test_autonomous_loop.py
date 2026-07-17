@@ -29,8 +29,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import routers.autonomous as au
 import services.tool_loop as tool_loop
+import services.tools as tool_module
 from routers.autonomous import AutonomousRequest, ContinueRequest
 from services.retry import RetryExhausted
+from services.tool_registry import tool_registry
 
 
 def _tool_call(call_id, name, args_json):
@@ -78,6 +80,125 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(out.truncated)
         self.assertEqual(out.tools_called, ["search_document"])
         disp.assert_awaited_once()
+
+    async def test_finalize_mixed_with_business_tool_rejects_entire_batch(self):
+        responses = [
+            _assistant_msg(tool_calls=[
+                _tool_call(
+                    "c1",
+                    "finalize",
+                    '{"final_answer": "完成", "reason": "无需再写入"}',
+                ),
+                _tool_call(
+                    "c2",
+                    "update_learning_profile",
+                    '{"user_id": "u", "document_id": "d", "grade_result": {"score": 1}}',
+                ),
+            ]),
+            _assistant_msg(tool_calls=[
+                _tool_call(
+                    "c3",
+                    "finalize",
+                    '{"final_answer": "完成", "reason": "已改为单独结束"}',
+                ),
+            ]),
+        ]
+        with patch.object(au, "_client", _mock_client(responses)), patch.object(
+            au, "check_injection", AsyncMock(return_value=(False, ""))
+        ), patch.object(tool_loop, "dispatch_tool", AsyncMock()) as dispatch:
+            out = await au.autonomous_agent(
+                AutonomousRequest(query=SHORT_Q, user_id="u")
+            )
+
+        self.assertEqual(out.final_answer, "完成")
+        dispatch.assert_not_awaited()
+        self.assertEqual(
+            [step.blocked_reason for step in out.steps[:2]],
+            ["mixed_control_batch_rejected", "mixed_control_batch_rejected"],
+        )
+
+    async def test_ask_user_mixed_with_business_tool_rejects_entire_batch(self):
+        responses = [
+            _assistant_msg(tool_calls=[
+                _tool_call("c1", "ask_user", '{"question": "是否写入画像？"}'),
+                _tool_call(
+                    "c2",
+                    "update_learning_profile",
+                    '{"user_id": "u", "document_id": "d", "grade_result": {"score": 1}}',
+                ),
+            ]),
+            _assistant_msg(tool_calls=[
+                _tool_call("c3", "ask_user", '{"question": "请先确认是否写入？"}'),
+            ]),
+        ]
+        client = _mock_client(responses)
+        with patch.object(au, "_client", client), patch.object(
+            au, "check_injection", AsyncMock(return_value=(False, ""))
+        ), patch.object(tool_loop, "dispatch_tool", AsyncMock()) as dispatch:
+            out = await au.autonomous_agent(
+                AutonomousRequest(query=SHORT_Q, user_id="u")
+            )
+
+        self.assertTrue(out.awaiting_user_input)
+        self.assertEqual(out.user_question, "请先确认是否写入？")
+        self.assertEqual(client.chat.completions.create.await_count, 2)
+        dispatch.assert_not_awaited()
+        session = au._sessions[out.conversation_id]
+        rejected = [
+            message
+            for message in session.messages
+            if message.get("role") == "tool"
+            and message.get("tool_call_id") in {"c1", "c2"}
+        ]
+        self.assertEqual(len(rejected), 2)
+        self.assertTrue(all(
+            "mixed_control_batch_rejected" in message["content"]
+            for message in rejected
+        ))
+
+    async def test_business_tool_before_finalize_is_also_rejected(self):
+        responses = [
+            _assistant_msg(tool_calls=[
+                _tool_call(
+                    "c1",
+                    "update_learning_profile",
+                    '{"user_id": "u", "document_id": "d", "grade_result": {"score": 1}}',
+                ),
+                _tool_call(
+                    "c2",
+                    "finalize",
+                    '{"final_answer": "已更新", "reason": "写入完成"}',
+                ),
+            ]),
+            _assistant_msg(tool_calls=[
+                _tool_call(
+                    "c3",
+                    "finalize",
+                    '{"final_answer": "未写入", "reason": "已改为单独结束"}',
+                ),
+            ]),
+        ]
+        with patch.object(au, "_client", _mock_client(responses)), patch.object(
+            au, "check_injection", AsyncMock(return_value=(False, ""))
+        ), patch.object(
+            tool_loop,
+            "dispatch_tool",
+            AsyncMock(return_value='{"status":"updated"}'),
+        ) as dispatch:
+            out = await au.autonomous_agent(
+                AutonomousRequest(query=SHORT_Q, user_id="u")
+            )
+
+        dispatch.assert_not_awaited()
+        self.assertEqual(out.tools_called, [])
+        self.assertEqual(
+            [step.tool_name for step in out.steps],
+            ["update_learning_profile", "finalize", "finalize"],
+        )
+        self.assertEqual(
+            [step.blocked_reason for step in out.steps[:2]],
+            ["mixed_control_batch_rejected", "mixed_control_batch_rejected"],
+        )
 
     async def test_grounding_filters_unretrieved_citation_ids(self):
         responses = [
@@ -334,6 +455,66 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
 
         self.assertIs(au._sessions[first.conversation_id], original)
         self.assertNotIn(first.conversation_id, au._sessions_in_flight)
+
+    async def test_cancelled_continue_after_audited_dispatch_consumes_session(self):
+        ask_responses = [
+            _assistant_msg(tool_calls=[
+                _tool_call("c1", "ask_user", '{"question": "继续?"}')
+            ]),
+        ]
+        with patch.object(au, "_client", _mock_client(ask_responses)), patch.object(
+            au, "check_injection", AsyncMock(return_value=(False, ""))
+        ):
+            first = await au.autonomous_agent(
+                AutonomousRequest(query=SHORT_Q, user_id="u")
+            )
+
+        tool = tool_registry.get("update_learning_profile")
+        self.assertIsNotNone(tool)
+        original_audit = list(tool_registry._audit_log)
+        writes = []
+        captured_run_id = []
+
+        async def fake_write(**kwargs):
+            writes.append(kwargs)
+            return '{"status":"updated"}'
+
+        async def cancel_after_committed_write(**kwargs):
+            captured_run_id.append(kwargs["run_id"])
+            await tool_module.dispatch_tool(
+                "update_learning_profile",
+                {
+                    "user_id": "u",
+                    "document_id": "d",
+                    "grade_result": {"score": 1.0},
+                },
+                run_id=kwargs["run_id"],
+                user_id="u",
+            )
+            raise asyncio.CancelledError
+
+        try:
+            with patch.object(tool, "handler", new=fake_write), patch.object(
+                au, "check_injection", AsyncMock(return_value=(False, ""))
+            ), patch.object(
+                au,
+                "_run_react_loop",
+                AsyncMock(side_effect=cancel_after_committed_write),
+            ):
+                with self.assertRaises(asyncio.CancelledError):
+                    await au.continue_autonomous(ContinueRequest(
+                        conversation_id=first.conversation_id,
+                        user_reply="继续",
+                    ))
+
+            self.assertEqual(len(writes), 1)
+            records = tool_registry.get_audit(run_id=captured_run_id[0])
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0].status, "ok")
+            self.assertNotIn(first.conversation_id, au._sessions)
+            self.assertNotIn(first.conversation_id, au._sessions_in_flight)
+        finally:
+            tool_registry._audit_log[:] = original_audit
 
     async def test_injection_short_circuits(self):
         with patch.object(au, "check_injection", AsyncMock(return_value=(True, "注入"))), \
