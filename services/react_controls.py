@@ -79,13 +79,21 @@ def build_react_system_prompt(
     *,
     include_live_mcp: bool = False,
     include_review_loop: bool = False,
+    replay_safe_only: bool = False,
 ) -> str:
     """Build the shared ReAct tutor prompt with endpoint-specific hints."""
-    tool_lines = [
-        "业务工具：search_document / generate_quiz / grade_answer / update_learning_profile / "
-        "plan_next_step / get_user_profile / get_learning_path",
-    ]
-    if include_live_mcp:
+    if replay_safe_only:
+        tool_lines = [
+            "业务工具：search_document / generate_quiz / grade_answer / "
+            "plan_next_step / get_learning_path",
+        ]
+    else:
+        tool_lines = [
+            "业务工具：search_document / generate_quiz / grade_answer / "
+            "update_learning_profile / plan_next_step / get_user_profile / "
+            "get_learning_path",
+        ]
+    if include_live_mcp and not replay_safe_only:
         tool_lines.append(
             "联网工具（若已接入）：mcp_ddg_search（联网搜索）/ "
             "mcp_ddg_fetch_content（抓取网页正文）——"
@@ -100,10 +108,16 @@ def build_react_system_prompt(
         "若缺关键信息（如未指定文档 ID），调用 ask_user 求助而不是瞎猜",
     ]
     if include_review_loop:
-        principles.append(
-            "复习闭环优先顺序：search_document → generate_quiz → grade_answer → "
-            "update_learning_profile → plan_next_step → finalize"
-        )
+        if replay_safe_only:
+            principles.append(
+                "复习闭环优先顺序：search_document → generate_quiz → grade_answer → "
+                "plan_next_step → finalize；画像写入由循环外的安全节点处理"
+            )
+        else:
+            principles.append(
+                "复习闭环优先顺序：search_document → generate_quiz → grade_answer → "
+                "update_learning_profile → plan_next_step → finalize"
+            )
     principles.extend([
         "如果使用 search_document 的内容回答，finalize 时必须把实际 observation 中的 chunk_ids 放入 citation_ids；不得编造 ID",
         "简单概念问题（如『什么是 RAG』）如果你知道答案，直接 finalize 给答案，不需要调工具",

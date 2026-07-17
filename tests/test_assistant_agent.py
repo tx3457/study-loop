@@ -27,6 +27,7 @@ import agents.tutor_graph as tg
 from agents.assistant_agent import assistant_agent
 from agents.supervisor import _assist_next, teaching_supervisor
 from services.tool_loop import ToolCallOutcome, ToolRoundResult
+from services.tool_registry import SideEffectAmbiguousError
 
 
 def _round_finalize(final_answer="这是答案", reason="已能回答"):
@@ -74,6 +75,49 @@ class TestAssistantReAct(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(out["assistant_done"])
         self.assertIn("search_document", out["tools_called"])
 
+    async def test_rejected_control_outcome_does_not_finalize(self):
+        rejected = ToolRoundResult(
+            assistant_message=object(),
+            has_tool_calls=True,
+            outcomes=[ToolCallOutcome(
+                call_id="c1",
+                name="finalize",
+                arguments={"final_answer": "不应采用"},
+                kind="blocked",
+                blocked_reason="mixed_control_batch_rejected",
+            )],
+        )
+        run_round = AsyncMock(side_effect=[rejected, _round_finalize("重新决策后的答案")])
+        with patch.object(aa, "run_tool_round", run_round):
+            out = await assistant_agent({"goal": "什么是 RAG", "user_id": "u1"})
+
+        self.assertEqual(out["final_answer"], "重新决策后的答案")
+        self.assertEqual(run_round.await_count, 2)
+
+    async def test_interrupt_capable_assistant_exposes_only_replay_safe_tools(self):
+        captured = {}
+
+        async def capture_round(*args, **kwargs):
+            captured.update(kwargs)
+            return _round_finalize("安全工具集")
+
+        with patch.object(aa, "run_tool_round", side_effect=capture_round):
+            out = await assistant_agent({"goal": "复习 RAG", "user_id": "u1"})
+
+        tool_names = {
+            item["function"]["name"]
+            for item in captured["tools"]
+        }
+        self.assertEqual(out["final_answer"], "安全工具集")
+        self.assertIn("search_document", tool_names)
+        self.assertNotIn("update_learning_profile", tool_names)
+        self.assertNotIn("get_user_profile", tool_names)
+        self.assertNotIn("update_learning_profile", aa._ASSIST_SYSTEM)
+        self.assertEqual(
+            captured["business_tool_allowlist"],
+            aa.replay_safe_tool_names(),
+        )
+
     async def test_implicit_finalize_no_tool_calls(self):
         with patch.object(aa, "run_tool_round", AsyncMock(return_value=_round_text("直接回答"))):
             out = await assistant_agent({"goal": "什么是向量检索", "user_id": "u1"})
@@ -92,6 +136,24 @@ class TestAssistantReAct(unittest.IsolatedAsyncioTestCase):
             out = await assistant_agent({"goal": "x", "user_id": "u1"})
         self.assertTrue(out["assistant_done"])
         self.assertIn("失败", out["final_answer"])
+
+    async def test_ambiguous_side_effect_is_never_downgraded_to_done(self):
+        with patch.object(
+            aa,
+            "run_tool_round",
+            AsyncMock(side_effect=SideEffectAmbiguousError("unsafe_tool")),
+        ):
+            with self.assertRaises(SideEffectAmbiguousError):
+                await assistant_agent({"goal": "x", "user_id": "u1"})
+
+    async def test_truncation_does_not_swallow_ambiguous_side_effect(self):
+        rounds = [
+            _round_tool()
+            for _ in range(aa.MAX_ASSIST_ROUNDS)
+        ] + [SideEffectAmbiguousError("unsafe_tool")]
+        with patch.object(aa, "run_tool_round", AsyncMock(side_effect=rounds)):
+            with self.assertRaises(SideEffectAmbiguousError):
+                await assistant_agent({"goal": "x", "user_id": "u1"})
 
 
 # ═══════════════════════════════════════════════════════════════════════════

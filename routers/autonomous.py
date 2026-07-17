@@ -50,6 +50,7 @@ from services.react_controls import (
     build_react_system_prompt,
 )
 from services.tools import allowed_tool_names, get_tool_definitions
+from services.tool_registry import SideEffectAmbiguousError, tool_registry
 from services.tool_loop import run_tool_round
 
 router = APIRouter()
@@ -299,7 +300,7 @@ async def _run_react_loop(
             fn_name, fn_args = oc.name, oc.arguments
 
             # ── 控制工具：finalize ──
-            if fn_name == "finalize":
+            if oc.kind == "control" and fn_name == "finalize":
                 final_answer = fn_args.get("final_answer", "")
                 finalize_reason = fn_args.get("reason", "explicit_finalize")
                 citation_ids = fn_args.get("citation_ids", [])
@@ -326,7 +327,7 @@ async def _run_react_loop(
                 )
 
             # ── 控制工具：ask_user → 保存 session 并返回 ──
-            if fn_name == "ask_user":
+            if oc.kind == "control" and fn_name == "ask_user":
                 question = fn_args.get("question", "请提供更多信息。")
                 conversation_id = f"conv_{uuid.uuid4().hex[:16]}"
                 # 注意：messages 已含 assistant message（含 ask_user 的 tool_call）
@@ -486,12 +487,22 @@ async def autonomous_agent(req: AutonomousRequest) -> AutonomousResponse:
 
     run_id = f"auto_{uuid.uuid4().hex[:12]}"        # 关联 audit log
 
-    return await _run_react_loop(
-        messages=messages, plan=plan, steps=[], tools_called=[],
-        user_id=req.user_id, document_id=req.document_id,
-        starting_round=0, run_id=run_id,
-        evidence_registry={}, grounding_required=req.grounding_required,
-    )
+    try:
+        return await _run_react_loop(
+            messages=messages, plan=plan, steps=[], tools_called=[],
+            user_id=req.user_id, document_id=req.document_id,
+            starting_round=0, run_id=run_id,
+            evidence_registry={}, grounding_required=req.grounding_required,
+        )
+    except Exception as exc:
+        # 写工具成功后，下一轮 provider 仍可能失败。此时整个请求也不可作为
+        # 普通 503 自动重试，否则新 run_id 会再次执行已经提交的副作用。
+        if (
+            tool_registry.has_effect_attempt(run_id)
+            and not isinstance(exc, SideEffectAmbiguousError)
+        ):
+            raise SideEffectAmbiguousError("autonomous_request") from exc
+        raise
 
 
 @router.post("/agent/autonomous/continue", response_model=AutonomousResponse)
@@ -548,12 +559,16 @@ async def continue_autonomous(req: ContinueRequest) -> AutonomousResponse:
             grounding_required=session.grounding_required,
         )
     except BaseException as exc:
-        progressed = baseline != (
+        trajectory_progressed = baseline != (
             len(resume_messages),
             len(resume_steps),
             len(resume_tools_called),
             len(resume_evidence_registry),
         )
+        # Registry 在非幂等/未知 handler 前写 started marker。即使工具已开始而
+        # trajectory 尚未来得及 append，也必须 fail closed，避免重放副作用。
+        effect_attempted = tool_registry.has_effect_attempt(run_id)
+        progressed = trajectory_progressed or effect_attempted
         # 仅在尚未执行/记录任何新动作时恢复。若已有工具轨迹，恢复原状态会
         # 重放可能带副作用的工具，因此保守地消费该会话。
         if not progressed:

@@ -27,6 +27,7 @@ from services.provider_config import (
     close_managed_provider_clients,
 )
 from services.retry import RetryExhausted
+from services.tool_registry import SideEffectAmbiguousError
 
 
 async def _load_memory_snapshot():
@@ -118,6 +119,23 @@ async def root():
 @app.exception_handler(ValueError)
 async def deal(request: Request, exc: ValueError):
     return JSONResponse(status_code=400, content={"error": "参数错误", "detail": str(exc)})
+
+
+@app.exception_handler(SideEffectAmbiguousError)
+async def side_effect_ambiguous_handler(
+    request: Request, exc: SideEffectAmbiguousError
+):
+    logging.getLogger(__name__).error(
+        "tool result ambiguous; automatic retry forbidden: %s",
+        exc.tool_name,
+    )
+    return JSONResponse(
+        status_code=409,
+        content={
+            "detail": "工具执行结果不确定，请勿自动重试；请刷新学习状态后重新开始"
+        },
+    )
+
 
 @app.exception_handler(RetryExhausted)
 async def retry_exhausted_handler(request: Request, exc: RetryExhausted):
