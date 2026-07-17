@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import services.tools  # 注册内置工具，确保本文件可独立运行
+import services.tools  # noqa: F401  # 注册内置工具，确保本文件可独立运行
 from services.tool_loop import run_tool_round
 from services.tool_registry import (
     EffectMode,
@@ -108,6 +108,39 @@ class TestToolReplaySafety(unittest.IsolatedAsyncioTestCase):
         dispatch.assert_not_awaited()
         self.assertEqual(result.outcomes[0].kind, "blocked")
         self.assertEqual(result.outcomes[0].blocked_reason, "not_in_whitelist")
+
+    async def test_progress_barrier_runs_before_message_mutation_or_dispatch(self):
+        tool_call = SimpleNamespace(
+            id="search-barrier",
+            function=SimpleNamespace(
+                name="search_document",
+                arguments='{"document_id":"d","query":"q"}',
+            ),
+        )
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(return_value=SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(
+                content=None,
+                tool_calls=[tool_call],
+            ))]
+        ))
+        messages = []
+
+        async def fail_barrier():
+            self.assertEqual(messages, [])
+            raise RuntimeError("durable marker unavailable")
+
+        with patch("services.tool_loop.dispatch_tool", AsyncMock()) as dispatch:
+            with self.assertRaisesRegex(RuntimeError, "durable marker unavailable"):
+                await run_tool_round(
+                    messages,
+                    tools=[],
+                    client=client,
+                    on_before_tool_calls=fail_barrier,
+                )
+
+        self.assertEqual(messages, [])
+        dispatch.assert_not_awaited()
 
     def test_profile_read_with_legacy_migration_is_not_replay_safe(self):
         tool = tool_registry.get("get_user_profile")

@@ -18,6 +18,7 @@ routers/autonomous.py 的 ~8 轮 ReAct 循环此前零单测。
 import json
 import asyncio
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -31,6 +32,8 @@ import routers.autonomous as au
 import services.tool_loop as tool_loop
 import services.tools as tool_module
 from routers.autonomous import AutonomousRequest, ContinueRequest
+from services.autonomous_sessions import AutonomousSessionStore
+from services.citations import EvidenceChunk
 from services.retry import RetryExhausted
 from services.tool_registry import tool_registry
 
@@ -61,8 +64,27 @@ SHORT_Q = "学RAG"
 class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
-        au._sessions.clear()
-        au._sessions_in_flight.clear()
+        self.temp_dir = tempfile.TemporaryDirectory(dir="/tmp")
+        self.original_session_store = au.autonomous_sessions
+        self.session_db_path = str(
+            Path(self.temp_dir.name) / "sessions.sqlite3"
+        )
+        self.session_store = AutonomousSessionStore(
+            sqlite_path=self.session_db_path
+        )
+        au.autonomous_sessions = self.session_store
+
+    def tearDown(self):
+        au.autonomous_sessions = self.original_session_store
+        self.temp_dir.cleanup()
+
+    async def _inspection(self, conversation_id):
+        return await self.session_store.inspect(conversation_id)
+
+    async def _session(self, conversation_id):
+        inspection = await self._inspection(conversation_id)
+        self.assertIsNotNone(inspection)
+        return au._session_from_payload(conversation_id, inspection.payload)
 
     async def test_business_tool_then_finalize(self):
         responses = [
@@ -143,7 +165,7 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out.user_question, "请先确认是否写入？")
         self.assertEqual(client.chat.completions.create.await_count, 2)
         dispatch.assert_not_awaited()
-        session = au._sessions[out.conversation_id]
+        session = await self._session(out.conversation_id)
         rejected = [
             message
             for message in session.messages
@@ -269,7 +291,88 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(out.awaiting_user_input)
         self.assertEqual(out.user_question, "请给文档ID")
         self.assertIsNotNone(out.conversation_id)
-        self.assertIn(out.conversation_id, au._sessions)
+        self.assertEqual(len(out.conversation_id), 37)
+        reopened = AutonomousSessionStore(sqlite_path=self.session_db_path)
+        inspection = await reopened.inspect(out.conversation_id)
+        self.assertIsNotNone(inspection)
+        self.assertEqual(inspection.payload["steps"][-1]["tool_name"], "ask_user")
+        assistant = inspection.payload["messages"][-1]
+        self.assertEqual(assistant["role"], "assistant")
+        self.assertEqual(assistant["tool_calls"][0]["id"], "c1")
+        self.assertEqual(inspection.payload["pending_ask_call_id"], "c1")
+
+    async def test_session_codec_rebuilds_steps_messages_and_evidence(self):
+        session = au.AutonomousSession(
+            conversation_id="conv-codec",
+            messages=[
+                {"role": "system", "content": "test"},
+                {"role": "user", "content": "第三章"},
+                {"role": "assistant", "content": None, "tool_calls": [{
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "search_document",
+                        "arguments": '{"query":"第三章"}',
+                    },
+                }]},
+                {"role": "tool", "tool_call_id": "call-1", "content": "证据"},
+                {"role": "assistant", "content": None, "tool_calls": [{
+                    "id": "ask-2",
+                    "type": "function",
+                    "function": {
+                        "name": "ask_user",
+                        "arguments": '{"question":"继续吗？"}',
+                    },
+                }]},
+            ],
+            plan=["检索第三章"],
+            steps=[
+                au.StepRecord(
+                    round_index=0,
+                    tool_name="search_document",
+                    tool_args={"query": "第三章"},
+                    observation_preview="证据",
+                ),
+                au.StepRecord(
+                    round_index=1,
+                    tool_name="ask_user",
+                    tool_args={"question": "继续吗？"},
+                ),
+            ],
+            tools_called=["search_document"],
+            rounds_used=2,
+            user_id="user-1",
+            document_id="notes.md",
+            evidence_registry={
+                "notes_chunk_1": EvidenceChunk(
+                    chunk_id="notes_chunk_1",
+                    document_id="notes.md",
+                    text="持久化证据",
+                    rank=1,
+                )
+            },
+            grounding_required=True,
+            pending_ask_call_id="ask-2",
+        )
+
+        await self.session_store.save(
+            session.conversation_id, au._session_to_payload(session)
+        )
+        inspection = await AutonomousSessionStore(
+            sqlite_path=self.session_db_path
+        ).inspect(session.conversation_id)
+        restored = au._session_from_payload(
+            session.conversation_id, inspection.payload
+        )
+
+        self.assertIsInstance(restored.steps[0], au.StepRecord)
+        self.assertIsInstance(
+            restored.evidence_registry["notes_chunk_1"], EvidenceChunk
+        )
+        self.assertEqual(restored.messages, session.messages)
+        self.assertEqual(restored.plan, session.plan)
+        self.assertEqual(restored.tools_called, session.tools_called)
+        self.assertEqual(restored.pending_ask_call_id, "ask-2")
 
     async def test_continue_resumes_to_finalize(self):
         # 第一段：ask_user 暂停
@@ -280,6 +383,10 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
              patch.object(au, "check_injection", AsyncMock(return_value=(False, ""))):
             first = await au.autonomous_agent(AutonomousRequest(query=SHORT_Q, user_id="u"))
         cid = first.conversation_id
+        self.session_store = AutonomousSessionStore(
+            sqlite_path=self.session_db_path
+        )
+        au.autonomous_sessions = self.session_store
         # 第二段：用户回答后续跑 → finalize
         cont_responses = [
             _assistant_msg(tool_calls=[_tool_call("c2", "finalize",
@@ -289,7 +396,108 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
              patch.object(au, "check_injection", AsyncMock(return_value=(False, ""))):
             out = await au.continue_autonomous(ContinueRequest(conversation_id=cid, user_reply="doc123"))
         self.assertEqual(out.final_answer, "好的，用 doc123")
-        self.assertNotIn(cid, au._sessions)        # session 用完销毁
+        self.assertIsNone(await self._inspection(cid))  # session 用完销毁
+
+    async def test_continue_can_pause_again_without_leaving_old_session(self):
+        self.session_store = AutonomousSessionStore(
+            sqlite_path=self.session_db_path,
+            max_count=1,
+        )
+        au.autonomous_sessions = self.session_store
+        with patch.object(
+            au,
+            "_client",
+            _mock_client([
+                _assistant_msg(tool_calls=[
+                    _tool_call("c1", "ask_user", '{"question": "文档?"}')
+                ])
+            ]),
+        ), patch.object(
+            au, "check_injection", AsyncMock(return_value=(False, ""))
+        ):
+            first = await au.autonomous_agent(
+                AutonomousRequest(query=SHORT_Q, user_id="u")
+            )
+
+        with patch.object(
+            au,
+            "_client",
+            _mock_client([
+                _assistant_msg(tool_calls=[
+                    _tool_call("c2", "ask_user", '{"question": "章节?"}')
+                ])
+            ]),
+        ), patch.object(
+            au, "check_injection", AsyncMock(return_value=(False, ""))
+        ):
+            second = await au.continue_autonomous(ContinueRequest(
+                conversation_id=first.conversation_id,
+                user_reply="notes.md",
+            ))
+
+        self.assertTrue(second.awaiting_user_input)
+        self.assertNotEqual(second.conversation_id, first.conversation_id)
+        self.assertIsNone(await self._inspection(first.conversation_id))
+        persisted = await self._session(second.conversation_id)
+        self.assertEqual(
+            [step.tool_name for step in persisted.steps],
+            ["ask_user", "ask_user"],
+        )
+        self.assertEqual(persisted.pending_ask_call_id, "c2")
+        self.assertTrue(any(
+            message.get("role") == "tool"
+            and message.get("tool_call_id") == "c1"
+            and "notes.md" in message.get("content", "")
+            for message in persisted.messages
+        ))
+
+    async def test_concurrent_continue_runs_the_loop_only_once(self):
+        with patch.object(
+            au,
+            "_client",
+            _mock_client([
+                _assistant_msg(tool_calls=[
+                    _tool_call("c1", "ask_user", '{"question": "继续?"}')
+                ])
+            ]),
+        ), patch.object(
+            au, "check_injection", AsyncMock(return_value=(False, ""))
+        ):
+            first = await au.autonomous_agent(
+                AutonomousRequest(query=SHORT_Q, user_id="u")
+            )
+
+        entered = asyncio.Event()
+        finish = asyncio.Event()
+        loop_calls = 0
+
+        async def slow_loop(**kwargs):
+            nonlocal loop_calls
+            loop_calls += 1
+            entered.set()
+            await finish.wait()
+            return au.AutonomousResponse(final_answer="done", rounds_used=2)
+
+        with patch.object(
+            au, "check_injection", AsyncMock(return_value=(False, ""))
+        ), patch.object(au, "_run_react_loop", side_effect=slow_loop):
+            owner = asyncio.create_task(au.continue_autonomous(ContinueRequest(
+                conversation_id=first.conversation_id,
+                user_reply="继续",
+            )))
+            await entered.wait()
+            with self.assertRaises(HTTPException) as raised:
+                await au.continue_autonomous(ContinueRequest(
+                    conversation_id=first.conversation_id,
+                    user_reply="并发继续",
+                ))
+            finish.set()
+            response = await owner
+
+        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual(response.final_answer, "done")
+        self.assertEqual(loop_calls, 1)
+        self.assertIsNone(await self._inspection(first.conversation_id))
 
     async def test_continue_preserves_citation_evidence_registry(self):
         first_responses = [
@@ -380,9 +588,7 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
             first = await au.autonomous_agent(AutonomousRequest(query=SHORT_Q, user_id="u"))
 
         cid = first.conversation_id
-        original = au._sessions[cid]
-        original_message_count = len(original.messages)
-        original_step_count = len(original.steps)
+        original = await self._inspection(cid)
 
         with patch.object(au, "check_injection", AsyncMock(return_value=(False, ""))), \
              patch.object(au, "run_tool_round", AsyncMock(
@@ -393,10 +599,11 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
                     ContinueRequest(conversation_id=cid, user_reply="doc123")
                 )
 
-        self.assertIn(cid, au._sessions)
-        self.assertIs(au._sessions[cid], original)
-        self.assertEqual(len(original.messages), original_message_count)
-        self.assertEqual(len(original.steps), original_step_count)
+        restored = await AutonomousSessionStore(
+            sqlite_path=self.session_db_path
+        ).inspect(cid)
+        self.assertIsNotNone(restored)
+        self.assertEqual(restored.payload, original.payload)
 
     async def test_continue_failure_after_tool_progress_does_not_replay_session(self):
         ask_responses = [
@@ -433,8 +640,8 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
             raised.exception.detail,
             "续跑已执行部分操作，无法安全重试；请重新开始",
         )
-        self.assertNotIn(first.conversation_id, au._sessions)
-        self.assertNotIn(first.conversation_id, au._sessions_in_flight)
+        reopened = AutonomousSessionStore(sqlite_path=self.session_db_path)
+        self.assertIsNone(await reopened.inspect(first.conversation_id))
 
     async def test_cancelled_continue_restores_unmodified_session(self):
         ask_responses = [
@@ -444,7 +651,7 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
              patch.object(au, "check_injection", AsyncMock(return_value=(False, ""))):
             first = await au.autonomous_agent(AutonomousRequest(query=SHORT_Q, user_id="u"))
 
-        original = au._sessions[first.conversation_id]
+        original = await self._inspection(first.conversation_id)
         with patch.object(au, "check_injection", AsyncMock(return_value=(False, ""))), \
              patch.object(au, "run_tool_round", AsyncMock(side_effect=asyncio.CancelledError)):
             with self.assertRaises(asyncio.CancelledError):
@@ -453,8 +660,8 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
                     user_reply="继续",
                 ))
 
-        self.assertIs(au._sessions[first.conversation_id], original)
-        self.assertNotIn(first.conversation_id, au._sessions_in_flight)
+        restored = await self._inspection(first.conversation_id)
+        self.assertEqual(restored.payload, original.payload)
 
     async def test_cancelled_continue_after_audited_dispatch_consumes_session(self):
         ask_responses = [
@@ -511,8 +718,7 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
             records = tool_registry.get_audit(run_id=captured_run_id[0])
             self.assertEqual(len(records), 1)
             self.assertEqual(records[0].status, "ok")
-            self.assertNotIn(first.conversation_id, au._sessions)
-            self.assertNotIn(first.conversation_id, au._sessions_in_flight)
+            self.assertIsNone(await self._inspection(first.conversation_id))
         finally:
             tool_registry._audit_log[:] = original_audit
 

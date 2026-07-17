@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 import routers.autonomous as autonomous_router
 import services.tool_registry as registry_module
 from main import app
+from services.autonomous_sessions import AutonomousSessionStore
 from services.idempotency import (
     IdempotencyConflictError,
     IdempotencyStore,
@@ -203,12 +204,55 @@ class TestAutonomousIdempotencyBoundary(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
+        self.database_path = str(Path(self.tmp.name) / "api-state.sqlite3")
         self.store = IdempotencyStore(
-            sqlite_path=str(Path(self.tmp.name) / "api-receipts.sqlite3")
+            sqlite_path=self.database_path
+        )
+        self.session_store = AutonomousSessionStore(
+            sqlite_path=self.database_path
         )
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def _seed_session(self, conversation_id: str):
+        session = autonomous_router.AutonomousSession(
+            conversation_id=conversation_id,
+            messages=[
+                {"role": "system", "content": "test"},
+                {"role": "user", "content": "learn"},
+                {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [{
+                        "id": "ask-1",
+                        "type": "function",
+                        "function": {
+                            "name": "ask_user",
+                            "arguments": '{"question":"continue?"}',
+                        },
+                    }],
+                },
+            ],
+            plan=[],
+            steps=[autonomous_router.StepRecord(
+                round_index=0,
+                tool_name="ask_user",
+                tool_args={"question": "continue?"},
+            )],
+            tools_called=[],
+            rounds_used=1,
+            user_id="u",
+            document_id=None,
+            evidence_registry={},
+            grounding_required=False,
+            pending_ask_call_id="ask-1",
+        )
+        asyncio.run(self.session_store.save(
+            conversation_id,
+            autonomous_router._session_to_payload(session),
+        ))
+        return session
 
     def test_completed_request_is_replayed_without_rerunning_agent(self):
         result = autonomous_router.AutonomousResponse(
@@ -283,57 +327,113 @@ class TestAutonomousIdempotencyBoundary(unittest.TestCase):
 
     def test_continue_injection_check_failure_releases_receipt_for_retry(self):
         conversation_id = "injection-check-retry"
-        autonomous_router._sessions[conversation_id] = (
-            autonomous_router.AutonomousSession(
-                conversation_id=conversation_id,
-                messages=[],
-                plan=[],
-                steps=[],
-                tools_called=[],
-                rounds_used=1,
-                user_id="u",
-                document_id=None,
-                evidence_registry={},
-                grounding_required=False,
-                pending_ask_call_id="ask-1",
-            )
-        )
+        self._seed_session(conversation_id)
         payload = {
             "conversation_id": conversation_id,
             "user_reply": "第三章",
         }
         headers = {"Idempotency-Key": "browser-continue-retry-1"}
 
-        try:
-            with patch.object(
-                autonomous_router, "request_idempotency", self.store
-            ), patch.object(
-                autonomous_router,
-                "check_injection",
-                AsyncMock(
-                    side_effect=[
-                        RuntimeError("classifier unavailable"),
-                        (True, "blocked"),
-                    ]
-                ),
-            ):
-                first = self.client.post(
-                    "/agent/autonomous/continue",
-                    headers=headers,
-                    json=payload,
-                )
-                retry = self.client.post(
-                    "/agent/autonomous/continue",
-                    headers=headers,
-                    json=payload,
-                )
+        with patch.object(
+            autonomous_router, "request_idempotency", self.store
+        ), patch.object(
+            autonomous_router, "autonomous_sessions", self.session_store
+        ), patch.object(
+            autonomous_router,
+            "check_injection",
+            AsyncMock(
+                side_effect=[
+                    RuntimeError("classifier unavailable"),
+                    (True, "blocked"),
+                ]
+            ),
+        ):
+            first = self.client.post(
+                "/agent/autonomous/continue",
+                headers=headers,
+                json=payload,
+            )
+            retry = self.client.post(
+                "/agent/autonomous/continue",
+                headers=headers,
+                json=payload,
+            )
 
-            self.assertEqual(first.status_code, 500)
-            self.assertEqual(retry.status_code, 200)
-            self.assertIn("安全检查未通过", retry.json()["final_answer"])
-        finally:
-            autonomous_router._sessions.pop(conversation_id, None)
-            autonomous_router._sessions_in_flight.discard(conversation_id)
+        self.assertEqual(first.status_code, 500)
+        self.assertEqual(retry.status_code, 200)
+        self.assertIn("安全检查未通过", retry.json()["final_answer"])
+
+    def test_completed_continue_replays_after_session_is_consumed(self):
+        conversation_id = "continue-replay-session"
+        self._seed_session(conversation_id)
+        result = autonomous_router.AutonomousResponse(
+            final_answer="continued",
+            rounds_used=2,
+            finalize_reason="explicit_finalize",
+        )
+        run_loop = AsyncMock(return_value=result)
+        payload = {"conversation_id": conversation_id, "user_reply": "继续"}
+        headers = {"Idempotency-Key": "browser-continue-replay-1"}
+
+        with patch.object(
+            autonomous_router, "request_idempotency", self.store
+        ), patch.object(
+            autonomous_router, "autonomous_sessions", self.session_store
+        ), patch.object(
+            autonomous_router, "check_injection", AsyncMock(return_value=(False, ""))
+        ), patch.object(autonomous_router, "_run_react_loop", run_loop):
+            first = self.client.post(
+                "/agent/autonomous/continue", headers=headers, json=payload
+            )
+
+        reopened_receipts = IdempotencyStore(sqlite_path=self.database_path)
+        reopened_sessions = AutonomousSessionStore(
+            sqlite_path=self.database_path
+        )
+        with patch.object(
+            autonomous_router, "request_idempotency", reopened_receipts
+        ), patch.object(
+            autonomous_router, "autonomous_sessions", reopened_sessions
+        ), patch.object(autonomous_router, "_run_react_loop", run_loop):
+            second = self.client.post(
+                "/agent/autonomous/continue", headers=headers, json=payload
+            )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.json(), first.json())
+        self.assertEqual(run_loop.await_count, 1)
+        self.assertIsNone(asyncio.run(reopened_sessions.inspect(conversation_id)))
+
+    def test_replayed_pause_response_fails_when_snapshot_is_gone(self):
+        request = autonomous_router.AutonomousRequest(query="学RAG", user_id="u")
+        key = "browser-expired-pause-1"
+        asyncio.run(self.store.begin(
+            key,
+            "agent.autonomous",
+            request.model_dump(mode="json"),
+        ))
+        asyncio.run(self.store.complete(key, autonomous_router.AutonomousResponse(
+            awaiting_user_input=True,
+            user_question="继续吗？",
+            conversation_id="missing-pause-session",
+        ).model_dump(mode="json")))
+        run_loop = AsyncMock()
+
+        with patch.object(
+            autonomous_router, "request_idempotency", self.store
+        ), patch.object(
+            autonomous_router, "autonomous_sessions", self.session_store
+        ), patch.object(autonomous_router, "_run_react_loop", run_loop):
+            response = self.client.post(
+                "/agent/autonomous",
+                headers={"Idempotency-Key": key},
+                json={"query": "学RAG", "user_id": "u"},
+            )
+
+        self.assertEqual(response.status_code, 410)
+        self.assertIn("暂停会话已过期", response.json()["detail"])
+        run_loop.assert_not_awaited()
 
 
 if __name__ == "__main__":

@@ -22,24 +22,29 @@ Autonomous Agent 端点（Phase 8 P2 升级：Plan-and-Execute → 真 ReAct + H
 ── 面试讲点 ────────────────────────────────────────────────────────────────
 1. 范式升级：Plan-and-Execute → 真 ReAct（参考 Yao et al. 2022）
 2. Explicit > implicit：finalize 工具取代"无 tool_calls 即结束"的脆弱信号
-3. Web HITL：两段式 HTTP 协议（无状态可扩展），替代 NovelClaw 的文件 IPC
+3. Web HITL：共享数据库保存暂停点，支持重启与多 worker，替代文件 IPC
 4. State summary injection：context engineering 让 LLM 不健忘
 5. 复用 P1-2 的 ToolRegistry，dispatch_tool 自带超时 / 重试 / audit
 """
 import logging
-import time
 import uuid
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
+from typing import Awaitable, Callable, Literal, Optional
 
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from models.citation import CitationView, GroundingStatus
 from services.citations import (
+    EvidenceChunk,
     EvidenceRegistry,
     collect_search_evidence,
     resolve_citations,
+)
+from services.autonomous_sessions import (
+    AutonomousSessionStore,
+    SessionCapacityError,
+    SessionPayloadTooLargeError,
 )
 from services.injection import check_injection, check_output_leak
 from services.idempotency import normalize_idempotency_key, request_idempotency
@@ -50,7 +55,7 @@ from services.react_controls import (
     build_react_decision_prompt,
     build_react_system_prompt,
 )
-from services.tools import allowed_tool_names, get_tool_definitions
+from services.tools import get_tool_definitions
 from services.tool_registry import SideEffectAmbiguousError, tool_registry
 from services.tool_loop import run_tool_round
 
@@ -59,11 +64,8 @@ logger = logging.getLogger(__name__)
 
 MAX_AUTONOMOUS_ROUNDS = 8
 PLAN_SKIP_QUERY_LEN = 80               # 短于此长度的 query 跳过 plan 阶段
-SESSION_TTL_SEC = 3600                 # 1 小时未续跑的 conversation 视为过期
-SESSION_MAX_COUNT = 200                # 最多保 200 个 session（FIFO 淘汰）
 
-# 业务工具白名单单一数据源：从 ToolRegistry 派生（D4），不再硬编码。
-# run_tool_round 内部也用 allowed_tool_names()，端点侧只在 state summary 里引用。
+# 业务工具白名单由 run_tool_round 从 ToolRegistry 派生，不在路由中硬编码。
 
 
 # 控制工具不进 ToolRegistry，由 ReAct loop 本地处理。
@@ -98,37 +100,24 @@ class AutonomousSession:
     evidence_registry: EvidenceRegistry
     grounding_required: bool
     pending_ask_call_id: str                        # 待回答的 ask_user 工具 call_id
-    created_at: float = field(default_factory=time.time)
 
 
-_sessions: dict[str, AutonomousSession] = {}        # 内存 session 表（demo 阶段够，生产换 Redis）
-_sessions_in_flight: set[str] = set()               # 防止同一会话并发续跑
-
-
-def _save_session(s: AutonomousSession) -> None:
-    """FIFO + TTL 清理后写入。"""
-    _purge_expired_sessions()
-    if len(_sessions) >= SESSION_MAX_COUNT:
-        # FIFO 淘汰最旧
-        oldest = min(_sessions.values(), key=lambda x: x.created_at)
-        _sessions.pop(oldest.conversation_id, None)
-    _sessions[s.conversation_id] = s
-
-
-def _purge_expired_sessions() -> None:
-    now = time.time()
-    expired = [cid for cid, s in _sessions.items() if now - s.created_at > SESSION_TTL_SEC]
-    for cid in expired:
-        _sessions.pop(cid, None)
+autonomous_sessions = AutonomousSessionStore.from_environment()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 请求 / 响应模型
 # ═══════════════════════════════════════════════════════════════════════════
 class AutonomousRequest(BaseModel):
-    query: str = Field(..., description="用户自然语言学习目标")
-    user_id: str = Field(default="default", description="用户 ID")
-    document_id: Optional[str] = Field(default=None, description="可选文档 ID")
+    query: str = Field(
+        ..., min_length=1, max_length=8000, description="用户自然语言学习目标"
+    )
+    user_id: str = Field(
+        default="default", min_length=1, max_length=128, description="用户 ID"
+    )
+    document_id: Optional[str] = Field(
+        default=None, max_length=512, description="可选文档 ID"
+    )
     grounding_required: bool = Field(
         default=False,
         description="为 true 时，文档回答必须返回本轮检索得到的有效 chunk ID，否则安全弃答。",
@@ -136,17 +125,132 @@ class AutonomousRequest(BaseModel):
 
 
 class ContinueRequest(BaseModel):
-    conversation_id: str = Field(..., description="ask_user 时返回的 conversation_id")
-    user_reply: str = Field(..., description="用户对 ask_user 问题的回答")
+    conversation_id: str = Field(
+        ..., min_length=1, max_length=128,
+        description="ask_user 时返回的 conversation_id",
+    )
+    user_reply: str = Field(
+        ..., min_length=1, max_length=8000,
+        description="用户对 ask_user 问题的回答",
+    )
 
 
 class StepRecord(BaseModel):
     """单步执行记录，Trajectory Eval 可消费"""
-    round_index: int
+    round_index: int = Field(ge=0)
     tool_name: Optional[str] = None
     tool_args: Optional[dict] = None
     observation_preview: Optional[str] = None
     blocked_reason: Optional[str] = None
+
+
+class _EvidenceChunkPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    chunk_id: str = Field(min_length=1)
+    document_id: str = Field(min_length=1)
+    text: str
+    rank: int = Field(ge=1)
+
+
+class _AutonomousSessionPayload(BaseModel):
+    """Versioned JSON boundary for durable pause snapshots."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1]
+    messages: list[dict[str, object]] = Field(min_length=3, max_length=256)
+    plan: list[str] = Field(max_length=6)
+    steps: list[StepRecord] = Field(min_length=1, max_length=128)
+    tools_called: list[str] = Field(max_length=128)
+    rounds_used: int = Field(ge=1, le=MAX_AUTONOMOUS_ROUNDS)
+    user_id: str = Field(min_length=1, max_length=128)
+    document_id: Optional[str] = Field(default=None, max_length=512)
+    evidence_registry: dict[str, _EvidenceChunkPayload]
+    grounding_required: bool
+    pending_ask_call_id: str = Field(min_length=1, max_length=256)
+
+    @model_validator(mode="after")
+    def validate_pause_boundary(self):
+        if (
+            self.steps[-1].tool_name != "ask_user"
+            or self.steps[-1].round_index != self.rounds_used - 1
+            or any(step.round_index >= self.rounds_used for step in self.steps)
+        ):
+            raise ValueError("session trajectory does not end at the pending ask_user")
+
+        if not any(message.get("role") == "system" for message in self.messages) or not any(
+            message.get("role") == "user" for message in self.messages
+        ):
+            raise ValueError("session messages must retain system and user context")
+
+        for message in self.messages:
+            if message.get("role") != "assistant":
+                continue
+            tool_calls = message.get("tool_calls")
+            if not isinstance(tool_calls, list):
+                continue
+            for tool_call in tool_calls:
+                if not isinstance(tool_call, dict):
+                    continue
+                function = tool_call.get("function")
+                if (
+                    tool_call.get("id") == self.pending_ask_call_id
+                    and isinstance(function, dict)
+                    and function.get("name") == "ask_user"
+                    and isinstance(function.get("arguments"), str)
+                ):
+                    return self
+        raise ValueError("pending ask_user tool call is missing from session messages")
+
+
+def _session_to_payload(session: AutonomousSession) -> dict:
+    payload = _AutonomousSessionPayload(
+        schema_version=1,
+        messages=session.messages,
+        plan=session.plan,
+        steps=session.steps,
+        tools_called=session.tools_called,
+        rounds_used=session.rounds_used,
+        user_id=session.user_id,
+        document_id=session.document_id,
+        evidence_registry={
+            chunk_id: _EvidenceChunkPayload(
+                chunk_id=evidence.chunk_id,
+                document_id=evidence.document_id,
+                text=evidence.text,
+                rank=evidence.rank,
+            )
+            for chunk_id, evidence in session.evidence_registry.items()
+        },
+        grounding_required=session.grounding_required,
+        pending_ask_call_id=session.pending_ask_call_id,
+    )
+    return payload.model_dump(mode="json")
+
+
+def _session_from_payload(
+    conversation_id: str, payload: dict
+) -> AutonomousSession:
+    snapshot = _AutonomousSessionPayload.model_validate(payload)
+    evidence_registry: EvidenceRegistry = {}
+    for chunk_id, value in snapshot.evidence_registry.items():
+        if chunk_id != value.chunk_id:
+            raise ValueError("evidence registry key does not match chunk_id")
+        evidence_registry[chunk_id] = EvidenceChunk(**value.model_dump())
+    return AutonomousSession(
+        conversation_id=conversation_id,
+        messages=snapshot.messages,
+        plan=snapshot.plan,
+        steps=snapshot.steps,
+        tools_called=snapshot.tools_called,
+        rounds_used=snapshot.rounds_used,
+        user_id=snapshot.user_id,
+        document_id=snapshot.document_id,
+        evidence_registry=evidence_registry,
+        grounding_required=snapshot.grounding_required,
+        pending_ask_call_id=snapshot.pending_ask_call_id,
+    )
 
 
 class AutonomousResponse(BaseModel):
@@ -172,6 +276,26 @@ class AutonomousResponse(BaseModel):
     grounding_status: GroundingStatus = Field(default=GroundingStatus.NOT_REQUESTED)
 
 
+async def _validate_replayed_response(response_payload: dict) -> AutonomousResponse:
+    """Reject cached pause responses whose resumable snapshot is no longer live."""
+    response = AutonomousResponse.model_validate(response_payload)
+    if not response.awaiting_user_input or not response.conversation_id:
+        return response
+    session_status = await autonomous_sessions.status(response.conversation_id)
+    if session_status is None:
+        raise HTTPException(
+            status_code=410,
+            detail="暂停会话已过期；请使用新的 Idempotency-Key 重新开始",
+        )
+    if session_status == "in_flight":
+        raise HTTPException(status_code=409, detail="conversation 正在续跑，请稍后重试")
+    return response
+
+
+async def _abort_receipt(key: Optional[str]) -> bool:
+    return await request_idempotency.abort(key) if key else False
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # State Summary（每轮注入给 LLM 防健忘）
 # ═══════════════════════════════════════════════════════════════════════════
@@ -184,7 +308,6 @@ def _build_state_summary(
 ) -> str:
     """浓缩当前进度，让 LLM 一眼看清。"""
     tools_used_unique = list(dict.fromkeys(tools_called))
-    tools_remaining = [t for t in (allowed_tool_names() - set(tools_used_unique))]
     parts = [
         f"轮次：{round_idx + 1}/{MAX_AUTONOMOUS_ROUNDS}",
         f"已调用工具（按顺序）：{tools_used_unique or '无'}",
@@ -251,6 +374,8 @@ async def _run_react_loop(
     evidence_registry: EvidenceRegistry,
     grounding_required: bool,
     idempotency_key: Optional[str] = None,
+    on_before_tool_calls: Callable[[], Awaitable[None]] | None = None,
+    pause_session_saver: Callable[[AutonomousSession], Awaitable[None]] | None = None,
 ) -> AutonomousResponse:
     """从 starting_round 开始跑 ReAct 循环。命中 finalize / ask_user / max_rounds 时返回。"""
     truncated = False
@@ -277,6 +402,7 @@ async def _run_react_loop(
             idempotency_key=idempotency_key,
             tool_choice="auto",
             extra_call_messages=state_msg,
+            on_before_tool_calls=on_before_tool_calls,
         )
 
         # ── 无 tool_calls：LLM 直接给文字（视为隐式 finalize）──
@@ -332,10 +458,14 @@ async def _run_react_loop(
             # ── 控制工具：ask_user → 保存 session 并返回 ──
             if oc.kind == "control" and fn_name == "ask_user":
                 question = fn_args.get("question", "请提供更多信息。")
-                conversation_id = f"conv_{uuid.uuid4().hex[:16]}"
+                conversation_id = f"conv_{uuid.uuid4().hex}"
                 # 注意：messages 已含 assistant message（含 ask_user 的 tool_call）
                 # 续跑时 user_reply 会作为该 tool_call 的 tool response 填回去
-                _save_session(AutonomousSession(
+                steps.append(StepRecord(
+                    round_index=round_idx, tool_name="ask_user", tool_args=fn_args,
+                    observation_preview="(awaiting user reply)",
+                ))
+                session = AutonomousSession(
                     conversation_id=conversation_id,
                     messages=messages,
                     plan=plan,
@@ -347,12 +477,28 @@ async def _run_react_loop(
                     evidence_registry=evidence_registry,
                     grounding_required=grounding_required,
                     pending_ask_call_id=oc.call_id,
-                ))
-                steps.append(StepRecord(
-                    round_index=round_idx, tool_name="ask_user", tool_args=fn_args,
-                    observation_preview="(awaiting user reply)",
-                ))
-                logger.info(f"[autonomous] ask_user paused: cid={conversation_id} q={question[:50]}")
+                )
+                try:
+                    if pause_session_saver is None:
+                        await autonomous_sessions.save(
+                            conversation_id, _session_to_payload(session)
+                        )
+                    else:
+                        await pause_session_saver(session)
+                except SessionCapacityError as exc:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="暂停会话容量已满，请稍后重试",
+                    ) from exc
+                except SessionPayloadTooLargeError as exc:
+                    raise HTTPException(
+                        status_code=413,
+                        detail="暂停会话数据过大，无法继续保存",
+                    ) from exc
+                logger.info(
+                    "[autonomous] ask_user paused: cid_prefix=%s",
+                    conversation_id[:13],
+                )
                 return AutonomousResponse(
                     plan=plan, steps=steps, tools_called=list(dict.fromkeys(tools_called)),
                     rounds_used=round_idx + 1, truncated=False,
@@ -515,7 +661,7 @@ async def autonomous_agent(
             key, "agent.autonomous", req.model_dump(mode="json")
         )
         if decision.replayed:
-            return AutonomousResponse.model_validate(decision.response)
+            return await _validate_replayed_response(decision.response)
 
     run_id = f"auto_{uuid.uuid4().hex[:12]}"
     try:
@@ -528,7 +674,7 @@ async def autonomous_agent(
             )
         return response
     except BaseException as exc:
-        durable_effect = await request_idempotency.abort(key) if key else False
+        durable_effect = await _abort_receipt(key)
         # 写工具成功后，下一轮 provider 仍可能失败。此时整个请求不可作为
         # 普通 503 自动重试；持久 receipt 不依赖可淘汰的进程内 audit。
         effect_attempted = durable_effect or tool_registry.has_effect_attempt(run_id)
@@ -558,23 +704,26 @@ async def continue_autonomous(
             key, "agent.autonomous.continue", req.model_dump(mode="json")
         )
         if decision.replayed:
-            return AutonomousResponse.model_validate(decision.response)
+            return await _validate_replayed_response(decision.response)
 
-    session = _sessions.get(req.conversation_id)
-    if not session:
-        if key:
-            await request_idempotency.abort(key)
-        if req.conversation_id in _sessions_in_flight:
-            raise HTTPException(status_code=409, detail="conversation 正在续跑，请稍后重试")
+    try:
+        session_status = await autonomous_sessions.status(req.conversation_id)
+    except BaseException:
+        await _abort_receipt(key)
+        raise
+    if session_status is None:
+        await _abort_receipt(key)
         raise HTTPException(status_code=404, detail="conversation 不存在或已过期")
+    if session_status == "in_flight":
+        await _abort_receipt(key)
+        raise HTTPException(status_code=409, detail="conversation 正在续跑，请稍后重试")
 
     # 注入检测尚未改变 session 或执行工具；分类器失败时释放
     # receipt，让客户端可以用同一个 key 安全重试。
     try:
         is_injection, reason = await check_injection(req.user_reply)
     except BaseException:
-        if key:
-            await request_idempotency.abort(key)
+        await _abort_receipt(key)
         raise
     if is_injection:
         response = AutonomousResponse(
@@ -587,15 +736,49 @@ async def continue_autonomous(
             )
         return response
 
-    # 原子认领 session，避免同一 conversation 的并发续跑重复执行工具。
-    session = _sessions.pop(req.conversation_id, None)
-    if session is None:
-        if key:
-            await request_idempotency.abort(key)
-        raise HTTPException(status_code=409, detail="conversation 正在续跑，请稍后重试")
-    _sessions_in_flight.add(req.conversation_id)
+    # 数据库 CAS 认领 session，跨进程也只允许一个续跑 owner。
+    try:
+        claim = await autonomous_sessions.claim(req.conversation_id)
+    except BaseException:
+        await _abort_receipt(key)
+        raise
+    if not claim.claimed:
+        await _abort_receipt(key)
+        if claim.reason == "in_progress":
+            raise HTTPException(status_code=409, detail="conversation 正在续跑，请稍后重试")
+        raise HTTPException(status_code=404, detail="conversation 不存在或已过期")
+    if not claim.claim_token:
+        raise RuntimeError("session claim returned without ownership data")
 
-    # copy-on-resume：provider 临时失败时保留原 session，可用同一 conversation_id 重试。
+    claim_token = claim.claim_token
+    if claim.payload is None:
+        await autonomous_sessions.consume(req.conversation_id, claim_token)
+        await _abort_receipt(key)
+        logger.error(
+            "[autonomous] unreadable persisted session: cid_prefix=%s reason=%s",
+            req.conversation_id[:13],
+            claim.reason,
+        )
+        raise HTTPException(
+            status_code=410,
+            detail="暂停会话数据无效，已安全终止；请重新开始",
+        )
+
+    try:
+        session = _session_from_payload(req.conversation_id, claim.payload)
+    except (TypeError, ValueError, ValidationError) as exc:
+        await autonomous_sessions.consume(req.conversation_id, claim_token)
+        await _abort_receipt(key)
+        logger.exception(
+            "[autonomous] invalid persisted session: cid_prefix=%s",
+            req.conversation_id[:13],
+        )
+        raise HTTPException(
+            status_code=410,
+            detail="暂停会话数据无效，已安全终止；请重新开始",
+        ) from exc
+
+    # copy-on-resume：provider 临时失败时保留数据库中的原始 JSON 快照。
     resume_messages = list(session.messages)
     resume_steps = list(session.steps)
     resume_tools_called = list(session.tools_called)
@@ -606,6 +789,32 @@ async def continue_autonomous(
         "content": f"User replied: {req.user_reply}",
     })
 
+    progress_started = False
+    session_handed_off = False
+
+    async def mark_progress_before_tool_calls() -> None:
+        nonlocal progress_started
+        if progress_started:
+            return
+        marked = await autonomous_sessions.mark_progress(
+            req.conversation_id, claim_token
+        )
+        if not marked:
+            raise RuntimeError("lost autonomous session claim before tool processing")
+        progress_started = True
+
+    async def handoff_to_next_pause(next_session: AutonomousSession) -> None:
+        nonlocal session_handed_off
+        handed_off = await autonomous_sessions.handoff(
+            req.conversation_id,
+            claim_token,
+            next_session.conversation_id,
+            _session_to_payload(next_session),
+        )
+        if not handed_off:
+            raise RuntimeError("lost autonomous session claim during pause handoff")
+        session_handed_off = True
+
     run_id = f"auto_cont_{uuid.uuid4().hex[:12]}"
     baseline = (
         len(resume_messages),
@@ -613,6 +822,7 @@ async def continue_autonomous(
         len(resume_tools_called),
         len(resume_evidence_registry),
     )
+    session_consumed = False
     try:
         response = await _run_react_loop(
             messages=resume_messages, plan=session.plan,
@@ -622,7 +832,15 @@ async def continue_autonomous(
             evidence_registry=resume_evidence_registry,
             grounding_required=session.grounding_required,
             idempotency_key=key,
+            on_before_tool_calls=mark_progress_before_tool_calls,
+            pause_session_saver=handoff_to_next_pause,
         )
+        if not session_handed_off:
+            if not await autonomous_sessions.consume(
+                req.conversation_id, claim_token
+            ):
+                raise RuntimeError("lost autonomous session claim during completion")
+        session_consumed = True
         if key:
             await request_idempotency.complete(
                 key, response.model_dump(mode="json")
@@ -637,26 +855,34 @@ async def continue_autonomous(
         )
         # Registry 在非幂等/未知 handler 前写 started marker。即使工具已开始而
         # trajectory 尚未来得及 append，也必须 fail closed，避免重放副作用。
-        durable_effect = await request_idempotency.abort(key) if key else False
+        durable_effect = await _abort_receipt(key)
         effect_attempted = (
             durable_effect or tool_registry.has_effect_attempt(run_id)
         )
-        progressed = trajectory_progressed or effect_attempted
-        # 仅在尚未执行/记录任何新动作时恢复。若已有工具轨迹，恢复原状态会
-        # 重放可能带副作用的工具，因此保守地消费该会话。
-        if not progressed:
-            _sessions.setdefault(req.conversation_id, session)
-            raise
+        progressed = progress_started or trajectory_progressed or effect_attempted
+
+        if not session_consumed and not progressed:
+            released = await autonomous_sessions.release(
+                req.conversation_id, claim_token
+            )
+            if released:
+                raise
+
+        if not session_consumed:
+            await autonomous_sessions.consume(req.conversation_id, claim_token)
 
         logger.warning(
-            "[autonomous] continuation failed after progress; session %s consumed",
-            req.conversation_id,
+            "[autonomous] continuation terminated fail-closed: cid_prefix=%s progressed=%s",
+            req.conversation_id[:13],
+            progressed,
         )
         if isinstance(exc, Exception):
             raise HTTPException(
                 status_code=410,
-                detail="续跑已执行部分操作，无法安全重试；请重新开始",
+                detail=(
+                    "续跑已执行部分操作，无法安全重试；请重新开始"
+                    if progressed
+                    else "暂停会话已过期或状态已变化；请重新开始"
+                ),
             ) from exc
         raise
-    finally:
-        _sessions_in_flight.discard(req.conversation_id)

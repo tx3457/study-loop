@@ -1,7 +1,10 @@
 """HTTP boundaries for provider failures, local CORS, and first-user state."""
 
 import asyncio
+import copy
+import sqlite3
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,6 +27,7 @@ import services.learning_path as learning_path_service
 import services.tools as tool_module
 from main import app
 from models.learning_path import CompressedReport, PathBrief
+from services.autonomous_sessions import AutonomousSessionStore
 from services.retry import RetryExhausted
 from services.tool_registry import SideEffectAmbiguousError, tool_registry
 from services.vectorstore import DocumentAlreadyExistsError
@@ -32,9 +36,28 @@ from services.vectorstore import DocumentAlreadyExistsError
 def _paused_autonomous_session(conversation_id: str):
     return autonomous_router.AutonomousSession(
         conversation_id=conversation_id,
-        messages=[],
+        messages=[
+            {"role": "system", "content": "test"},
+            {"role": "user", "content": "learn"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "ask-1",
+                    "type": "function",
+                    "function": {
+                        "name": "ask_user",
+                        "arguments": '{"question":"continue?"}',
+                    },
+                }],
+            },
+        ],
         plan=[],
-        steps=[],
+        steps=[autonomous_router.StepRecord(
+            round_index=0,
+            tool_name="ask_user",
+            tool_args={"question": "continue?"},
+        )],
         tools_called=[],
         rounds_used=1,
         user_id="default_user",
@@ -49,6 +72,30 @@ class TestApiErrorBoundaries(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.client = TestClient(app, raise_server_exceptions=False)
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory(dir="/tmp")
+        self.original_session_store = autonomous_router.autonomous_sessions
+        self.session_db_path = str(Path(self.temp_dir.name) / "sessions.sqlite3")
+        self.session_store = AutonomousSessionStore(
+            sqlite_path=self.session_db_path
+        )
+        autonomous_router.autonomous_sessions = self.session_store
+
+    def tearDown(self):
+        autonomous_router.autonomous_sessions = self.original_session_store
+        self.temp_dir.cleanup()
+
+    def _seed_session(self, conversation_id: str):
+        session = _paused_autonomous_session(conversation_id)
+        asyncio.run(self.session_store.save(
+            conversation_id,
+            autonomous_router._session_to_payload(session),
+        ))
+        return session
+
+    def _inspect_session(self, conversation_id: str):
+        return asyncio.run(self.session_store.inspect(conversation_id))
 
     def test_dev_cors_allows_localhost_and_loopback_but_not_unknown_origins(self):
         for origin in ("http://localhost:5173", "http://127.0.0.1:5173"):
@@ -131,45 +178,150 @@ class TestApiErrorBoundaries(unittest.TestCase):
         self.assertEqual(response.headers.get("access-control-allow-origin"), origin)
         finish.assert_not_awaited()
 
+    def test_autonomous_request_size_limits_fail_before_agent_execution(self):
+        injection_check = AsyncMock()
+        with patch.object(
+            autonomous_router, "check_injection", injection_check
+        ):
+            empty = self.client.post(
+                "/agent/autonomous",
+                json={"query": "", "user_id": "user"},
+            )
+            oversized = self.client.post(
+                "/agent/autonomous/continue",
+                json={
+                    "conversation_id": "conv",
+                    "user_reply": "x" * 8001,
+                },
+            )
+
+        self.assertEqual(empty.status_code, 422)
+        self.assertEqual(oversized.status_code, 422)
+        injection_check.assert_not_awaited()
+
+    def test_invalid_persisted_session_version_is_consumed_fail_closed(self):
+        conversation_id = "invalid-session-version"
+        asyncio.run(self.session_store.save(
+            conversation_id,
+            {"schema_version": 2, "messages": []},
+        ))
+        run_loop = AsyncMock()
+
+        with patch.object(
+            autonomous_router,
+            "check_injection",
+            AsyncMock(return_value=(False, "")),
+        ), patch.object(autonomous_router, "_run_react_loop", run_loop):
+            response = self.client.post(
+                "/agent/autonomous/continue",
+                json={"conversation_id": conversation_id, "user_reply": "继续"},
+            )
+
+        self.assertEqual(response.status_code, 410)
+        self.assertIn("暂停会话数据无效", response.json()["detail"])
+        self.assertIsNone(self._inspect_session(conversation_id))
+        run_loop.assert_not_awaited()
+
+    def test_semantically_invalid_pause_snapshots_are_consumed_fail_closed(self):
+        valid = autonomous_router._session_to_payload(
+            _paused_autonomous_session("template")
+        )
+        cases = {
+            "too-many-rounds": {"rounds_used": 999},
+            "empty-user": {"user_id": ""},
+            "empty-call-id": {"pending_ask_call_id": ""},
+            "missing-call": {"pending_ask_call_id": "unknown-call"},
+        }
+
+        for label, changes in cases.items():
+            with self.subTest(label=label):
+                conversation_id = f"invalid-{label}"
+                payload = copy.deepcopy(valid)
+                payload.update(changes)
+                asyncio.run(self.session_store.save(conversation_id, payload))
+                run_loop = AsyncMock()
+
+                with patch.object(
+                    autonomous_router,
+                    "check_injection",
+                    AsyncMock(return_value=(False, "")),
+                ), patch.object(autonomous_router, "_run_react_loop", run_loop):
+                    response = self.client.post(
+                        "/agent/autonomous/continue",
+                        json={
+                            "conversation_id": conversation_id,
+                            "user_reply": "继续",
+                        },
+                    )
+
+                self.assertEqual(response.status_code, 410)
+                self.assertIsNone(self._inspect_session(conversation_id))
+                run_loop.assert_not_awaited()
+
+    def test_corrupt_pause_json_is_consumed_before_provider_execution(self):
+        conversation_id = "corrupt-session-json"
+        self._seed_session(conversation_id)
+        with sqlite3.connect(self.session_db_path) as connection:
+            connection.execute(
+                """
+                UPDATE studyloop_autonomous_sessions
+                SET payload_json = '{'
+                WHERE conversation_id = ?
+                """,
+                (conversation_id,),
+            )
+        run_loop = AsyncMock()
+
+        with patch.object(
+            autonomous_router,
+            "check_injection",
+            AsyncMock(return_value=(False, "")),
+        ), patch.object(autonomous_router, "_run_react_loop", run_loop):
+            response = self.client.post(
+                "/agent/autonomous/continue",
+                json={"conversation_id": conversation_id, "user_reply": "继续"},
+            )
+
+        self.assertEqual(response.status_code, 410)
+        self.assertIsNone(self._inspect_session(conversation_id))
+        run_loop.assert_not_awaited()
+
     def test_autonomous_continue_provider_failure_before_progress_stays_retryable(self):
         origin = "http://127.0.0.1:5173"
         conversation_id = "retryable-provider-failure"
-        session = _paused_autonomous_session(conversation_id)
-        autonomous_router._sessions[conversation_id] = session
+        session = self._seed_session(conversation_id)
 
-        try:
-            with patch.object(
-                autonomous_router,
-                "check_injection",
-                AsyncMock(return_value=(False, "")),
-            ), patch.object(
-                autonomous_router,
-                "_run_react_loop",
-                AsyncMock(side_effect=RetryExhausted("provider down")),
-            ):
-                response = self.client.post(
-                    "/agent/autonomous/continue",
-                    headers={"Origin": origin},
-                    json={"conversation_id": conversation_id, "user_reply": "第三章"},
-                )
-
-            self.assertEqual(response.status_code, 503)
-            self.assertEqual(
-                response.json(),
-                {"error": "服务暂时不可用", "detail": "模型服务请求失败"},
+        with patch.object(
+            autonomous_router,
+            "check_injection",
+            AsyncMock(return_value=(False, "")),
+        ), patch.object(
+            autonomous_router,
+            "_run_react_loop",
+            AsyncMock(side_effect=RetryExhausted("provider down")),
+        ):
+            response = self.client.post(
+                "/agent/autonomous/continue",
+                headers={"Origin": origin},
+                json={"conversation_id": conversation_id, "user_reply": "第三章"},
             )
-            self.assertIs(autonomous_router._sessions[conversation_id], session)
-            self.assertEqual(response.headers.get("access-control-allow-origin"), origin)
-        finally:
-            autonomous_router._sessions.pop(conversation_id, None)
-            autonomous_router._sessions_in_flight.discard(conversation_id)
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(
+            response.json(),
+            {"error": "服务暂时不可用", "detail": "模型服务请求失败"},
+        )
+        restored = self._inspect_session(conversation_id)
+        self.assertEqual(
+            restored.payload,
+            autonomous_router._session_to_payload(session),
+        )
+        self.assertEqual(response.headers.get("access-control-allow-origin"), origin)
 
     def test_autonomous_continue_failure_after_progress_returns_gone(self):
         origin = "http://127.0.0.1:5173"
         conversation_id = "consumed-provider-failure"
-        autonomous_router._sessions[conversation_id] = _paused_autonomous_session(
-            conversation_id
-        )
+        self._seed_session(conversation_id)
 
         async def fail_after_progress(**kwargs):
             kwargs["steps"].append(
@@ -180,39 +332,33 @@ class TestApiErrorBoundaries(unittest.TestCase):
             )
             raise RetryExhausted("provider down after write")
 
-        try:
-            with patch.object(
-                autonomous_router,
-                "check_injection",
-                AsyncMock(return_value=(False, "")),
-            ), patch.object(
-                autonomous_router,
-                "_run_react_loop",
-                AsyncMock(side_effect=fail_after_progress),
-            ):
-                response = self.client.post(
-                    "/agent/autonomous/continue",
-                    headers={"Origin": origin},
-                    json={"conversation_id": conversation_id, "user_reply": "继续"},
-                )
-
-            self.assertEqual(response.status_code, 410)
-            self.assertEqual(
-                response.json(),
-                {"detail": "续跑已执行部分操作，无法安全重试；请重新开始"},
+        with patch.object(
+            autonomous_router,
+            "check_injection",
+            AsyncMock(return_value=(False, "")),
+        ), patch.object(
+            autonomous_router,
+            "_run_react_loop",
+            AsyncMock(side_effect=fail_after_progress),
+        ):
+            response = self.client.post(
+                "/agent/autonomous/continue",
+                headers={"Origin": origin},
+                json={"conversation_id": conversation_id, "user_reply": "继续"},
             )
-            self.assertNotIn(conversation_id, autonomous_router._sessions)
-            self.assertEqual(response.headers.get("access-control-allow-origin"), origin)
-        finally:
-            autonomous_router._sessions.pop(conversation_id, None)
-            autonomous_router._sessions_in_flight.discard(conversation_id)
+
+        self.assertEqual(response.status_code, 410)
+        self.assertEqual(
+            response.json(),
+            {"detail": "续跑已执行部分操作，无法安全重试；请重新开始"},
+        )
+        self.assertIsNone(self._inspect_session(conversation_id))
+        self.assertEqual(response.headers.get("access-control-allow-origin"), origin)
 
     def test_autonomous_continue_dispatched_tool_without_trajectory_returns_gone(self):
         origin = "http://127.0.0.1:5173"
         conversation_id = "audited-provider-failure"
-        autonomous_router._sessions[conversation_id] = _paused_autonomous_session(
-            conversation_id
-        )
+        self._seed_session(conversation_id)
         tool = tool_registry.get("update_learning_profile")
         self.assertIsNotNone(tool)
         original_audit = list(tool_registry._audit_log)
@@ -263,8 +409,7 @@ class TestApiErrorBoundaries(unittest.TestCase):
             self.assertEqual(len(records), 1)
             self.assertEqual(records[0].tool_name, "update_learning_profile")
             self.assertEqual(records[0].status, "ok")
-            self.assertNotIn(conversation_id, autonomous_router._sessions)
-            self.assertNotIn(conversation_id, autonomous_router._sessions_in_flight)
+            self.assertIsNone(self._inspect_session(conversation_id))
 
             second = self.client.post(
                 "/agent/autonomous/continue",
@@ -276,15 +421,11 @@ class TestApiErrorBoundaries(unittest.TestCase):
             self.assertEqual(response.headers.get("access-control-allow-origin"), origin)
         finally:
             tool_registry._audit_log[:] = original_audit
-            autonomous_router._sessions.pop(conversation_id, None)
-            autonomous_router._sessions_in_flight.discard(conversation_id)
 
     def test_autonomous_continue_ambiguous_side_effect_returns_gone(self):
         origin = "http://127.0.0.1:5173"
         conversation_id = "ambiguous-side-effect"
-        autonomous_router._sessions[conversation_id] = _paused_autonomous_session(
-            conversation_id
-        )
+        self._seed_session(conversation_id)
         tool = tool_registry.get("update_learning_profile")
         self.assertIsNotNone(tool)
         original_audit = list(tool_registry._audit_log)
@@ -306,10 +447,15 @@ class TestApiErrorBoundaries(unittest.TestCase):
                 tool_calls=[tool_call],
             ))]
         ))
-        handler = AsyncMock(side_effect=asyncio.TimeoutError)
+        handler_calls = []
+
+        async def ambiguous_handler(**kwargs):
+            inspection = await self.session_store.inspect(conversation_id)
+            handler_calls.append((inspection.state, inspection.progress_started))
+            raise asyncio.TimeoutError
 
         try:
-            with patch.object(tool, "handler", new=handler), patch.object(
+            with patch.object(tool, "handler", new=ambiguous_handler), patch.object(
                 autonomous_router, "_client", client
             ), patch.object(
                 autonomous_router,
@@ -327,18 +473,15 @@ class TestApiErrorBoundaries(unittest.TestCase):
                 response.json(),
                 {"detail": "续跑已执行部分操作，无法安全重试；请重新开始"},
             )
-            self.assertEqual(handler.await_count, 1)
+            self.assertEqual(handler_calls, [("in_flight", True)])
             records = tool_registry._audit_log[len(original_audit):]
             self.assertEqual(len(records), 1)
             self.assertEqual(records[0].tool_name, "update_learning_profile")
             self.assertEqual(records[0].status, "ambiguous")
-            self.assertNotIn(conversation_id, autonomous_router._sessions)
-            self.assertNotIn(conversation_id, autonomous_router._sessions_in_flight)
+            self.assertIsNone(self._inspect_session(conversation_id))
             self.assertEqual(response.headers.get("access-control-allow-origin"), origin)
         finally:
             tool_registry._audit_log[:] = original_audit
-            autonomous_router._sessions.pop(conversation_id, None)
-            autonomous_router._sessions_in_flight.discard(conversation_id)
 
     def test_initial_ambiguous_side_effect_is_non_retryable_conflict(self):
         origin = "http://127.0.0.1:5173"
