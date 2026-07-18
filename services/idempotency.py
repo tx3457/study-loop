@@ -29,6 +29,9 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 
 _TABLE = "studyloop_idempotency_receipts"
 _KEY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
+# ASCII "STUDYIDE" encoded as a positive signed bigint. This key is distinct
+# from the Autonomous session schema lock and stable across worker processes.
+_POSTGRES_SCHEMA_LOCK_ID = 0x5354554459494445
 
 
 class IdempotencyConflictError(RuntimeError):
@@ -191,6 +194,11 @@ class IdempotencyStore:
                 )
             """
             with self._transaction() as connection:
+                if self._postgres:
+                    connection.execute(
+                        "SELECT pg_advisory_xact_lock(%s)",
+                        (_POSTGRES_SCHEMA_LOCK_ID,),
+                    )
                 connection.execute(statement)
             self._schema_ready = True
 
