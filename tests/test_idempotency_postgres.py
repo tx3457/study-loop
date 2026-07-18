@@ -6,9 +6,12 @@ SQLite development does not require a database service.
 
 import asyncio
 import os
+import threading
 import unittest
 import uuid
+from unittest.mock import patch
 
+import services.idempotency as idempotency_module
 from services.idempotency import IdempotencyConflictError, IdempotencyStore
 
 
@@ -48,6 +51,61 @@ class TestPostgresIdempotencyStore(unittest.IsolatedAsyncioTestCase):
         conflicts = [result for result in results if isinstance(result, str)]
         self.assertEqual(len(owners), 1)
         self.assertEqual(conflicts, ["in_progress"])
+
+    async def test_two_stores_initialize_a_fresh_schema_concurrently(self):
+        import psycopg
+        from psycopg import sql
+
+        first_connect = threading.Barrier(2)
+
+        class ConcurrentInitStore(IdempotencyStore):
+            def __init__(self):
+                super().__init__(database_url=TEST_DATABASE_URL)
+                self._first_connect_pending = True
+
+            def _connect(self):
+                connection = super()._connect()
+                try:
+                    if self._first_connect_pending:
+                        self._first_connect_pending = False
+                        first_connect.wait(timeout=10)
+                except BaseException:
+                    connection.close()
+                    raise
+                return connection
+
+        table_name = f"studyloop_idempotency_test_{uuid.uuid4().hex}"
+        first = ConcurrentInitStore()
+        second = ConcurrentInitStore()
+
+        try:
+            with patch.object(idempotency_module, "_TABLE", table_name):
+                decisions = await asyncio.gather(
+                    first.begin(
+                        f"postgres-{uuid.uuid4().hex}",
+                        "agent.autonomous",
+                        {"query": "first"},
+                    ),
+                    second.begin(
+                        f"postgres-{uuid.uuid4().hex}",
+                        "agent.autonomous",
+                        {"query": "second"},
+                    ),
+                    return_exceptions=True,
+                )
+            errors = [
+                result for result in decisions if isinstance(result, BaseException)
+            ]
+            if errors:
+                raise errors[0]
+            self.assertTrue(all(not decision.replayed for decision in decisions))
+        finally:
+            with psycopg.connect(TEST_DATABASE_URL) as connection:
+                connection.execute(
+                    sql.SQL("DROP TABLE IF EXISTS {}").format(
+                        sql.Identifier(table_name)
+                    )
+                )
 
     async def test_changed_payload_is_rejected_across_connections(self):
         await self.store.begin(

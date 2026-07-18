@@ -27,8 +27,10 @@ API 分两层：
   2. 写入责任清晰：error 单独成 bank，方便后续做错题本 / 间隔重复 / 知识点聚类
   3. decision_log 形成可审计的 reasoning trace，复用 P1-2 audit 的精神到记忆层
 """
+
 import logging
 import os
+import time
 import uuid
 from collections import Counter
 from datetime import date, datetime
@@ -46,17 +48,52 @@ logger = logging.getLogger(__name__)
 ARCHIVE_THRESHOLD = 10
 # weak_points 最多保留多少条（最新优先）
 WEAK_POINTS_MAX = 20
+# ASCII "STUDYMEM" encoded as a positive signed bigint. PostgresStore.setup()
+# creates indexes concurrently, so the cross-worker lock must be session-level
+# and held by a separate autocommit connection for the full migration call.
+_POSTGRES_STORE_SETUP_LOCK_ID = 0x53545544594D454D
+
+
+def _setup_postgres_store(store, database_url: str) -> None:
+    import psycopg
+
+    # Closing this dedicated connection releases the session-level advisory
+    # lock on both success and failure. Non-blocking attempts are required:
+    # a blocking advisory-lock query keeps a transaction active while waiting,
+    # which makes CREATE INDEX CONCURRENTLY wait for that transaction.
+    with psycopg.connect(database_url, autocommit=True) as connection:
+        while True:
+            acquired = connection.execute(
+                "SELECT pg_try_advisory_lock(%s)",
+                (_POSTGRES_STORE_SETUP_LOCK_ID,),
+            ).fetchone()
+            if acquired and acquired[0]:
+                break
+            time.sleep(0.05)
+        store.setup()
+
+
+def _enter_postgres_store(store_context, database_url: str):
+    store = store_context.__enter__()
+    try:
+        _setup_postgres_store(store, database_url)
+    except BaseException as exc:
+        store_context.__exit__(type(exc), exc, exc.__traceback__)
+        raise
+    return store
+
 
 # ── Store 后端选择（有 DATABASE_URL 走 PG，否则用内存）──
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 if DATABASE_URL:
     from langgraph.store.postgres import PostgresStore
+
     _store_ctx = PostgresStore.from_conn_string(DATABASE_URL)
-    store = _store_ctx.__enter__()
-    store.setup()
+    store = _enter_postgres_store(_store_ctx, DATABASE_URL)
 else:
     from langgraph.store.memory import InMemoryStore
+
     store = InMemoryStore()
 
 
