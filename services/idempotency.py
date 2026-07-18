@@ -51,9 +51,7 @@ def normalize_idempotency_key(value: object) -> str | None:
         return None
     key = value.strip()
     if not _KEY_PATTERN.fullmatch(key):
-        raise ValueError(
-            "Idempotency-Key 必须为 8-128 位字母、数字或 . _ : -"
-        )
+        raise ValueError("Idempotency-Key 必须为 8-128 位字母、数字或 . _ : -")
     return key
 
 
@@ -328,6 +326,18 @@ class IdempotencyStore:
                 (key,),
             ).fetchone()
         return bool(row and row[0] in {"effect_started", "ambiguous"})
+
+
+async def abort_idempotency_claim(store: IdempotencyStore, key: str) -> bool:
+    """Finish receipt cleanup even if the owning request is being cancelled."""
+    cleanup = asyncio.create_task(store.abort(key))
+    while True:
+        try:
+            return await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            if cleanup.done():
+                return cleanup.result()
+            continue
 
 
 request_idempotency = IdempotencyStore.from_environment()

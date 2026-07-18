@@ -16,6 +16,7 @@ export default function Documents() {
   const [error, setError] = useState(null)
   const [listError, setListError] = useState(null)
   const fileInputRef = useRef(null)
+  const uploadingRef = useRef(false)
 
   /* ── 加载文档列表 ──────────────────────────────────────────────── */
   const fetchDocuments = useCallback(async () => {
@@ -35,7 +36,7 @@ export default function Documents() {
 
   /* ── 上传处理 ──────────────────────────────────────────────────── */
   const handleUpload = async (file) => {
-    if (!file) return
+    if (!file || uploadingRef.current) return
 
     const validTypes = [
       '.pdf', '.docx', '.txt', '.md',
@@ -47,6 +48,7 @@ export default function Documents() {
       return
     }
 
+    uploadingRef.current = true
     setUploading(true)
     setUploadProgress({ filename: file.name, status: 'uploading' })
     setError(null)
@@ -61,12 +63,14 @@ export default function Documents() {
       // 1.5s 后清除进度提示并刷新列表
       setTimeout(() => {
         setUploadProgress(null)
+        uploadingRef.current = false
         setUploading(false)
         fetchDocuments()
       }, 1500)
     } catch (err) {
       setUploadProgress({ filename: file.name, status: 'error' })
       setError(err.message)
+      uploadingRef.current = false
       setUploading(false)
     }
   }
@@ -74,6 +78,7 @@ export default function Documents() {
   /* ── 拖拽事件 ──────────────────────────────────────────────────── */
   const handleDragOver = (e) => {
     e.preventDefault()
+    if (uploadingRef.current) return
     setDragOver(true)
   }
   const handleDragLeave = (e) => {
@@ -83,6 +88,7 @@ export default function Documents() {
   const handleDrop = (e) => {
     e.preventDefault()
     setDragOver(false)
+    if (uploadingRef.current) return
     const file = e.dataTransfer.files[0]
     handleUpload(file)
   }
@@ -142,9 +148,9 @@ export default function Documents() {
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
-        onClick={() => !uploading && fileInputRef.current?.click()}
+        onClick={() => !uploadingRef.current && fileInputRef.current?.click()}
         onKeyDown={(event) => {
-          if (!uploading && (event.key === 'Enter' || event.key === ' ')) {
+          if (!uploadingRef.current && (event.key === 'Enter' || event.key === ' ')) {
             event.preventDefault()
             fileInputRef.current?.click()
           }
@@ -154,6 +160,7 @@ export default function Documents() {
           ref={fileInputRef}
           type="file"
           accept=".pdf,.docx,.txt,.md,.png,.jpg,.jpeg,.gif,.bmp,.tiff,.tif"
+          disabled={uploading}
           onChange={(event) => {
             handleUpload(event.target.files?.[0])
             event.target.value = ''

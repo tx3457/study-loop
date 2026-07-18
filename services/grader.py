@@ -1,16 +1,14 @@
-import os
 import asyncio
 from pathlib import Path
+
 from dotenv import load_dotenv
-from openai import AsyncOpenAI
+
 from models.grader import AIFeedback, QuestionGrade, GradingReport
 from models.quiz import Question
-from services.session import sessions
+from services.llm import structured_client as client, structured_model as model
+from services.session import answers_match, sessions
 
 load_dotenv(Path(__file__).parent.parent / ".env")
-
-# 批改用 json_schema 结构化输出 → 走 structured 供应商
-from services.llm import structured_client as client, structured_model as model
 
 GRADER_SYSTEM_PROMPT = """
 你是一位耐心的教学助手，专门帮助学生从错误中学习。
@@ -34,7 +32,9 @@ async def _llm_grade(question: Question, user_answer: str) -> AIFeedback:
         model=model,
         messages=[
             {"role": "system", "content": GRADER_SYSTEM_PROMPT},
-            {"role": "user", "content": f"""
+            {
+                "role": "user",
+                "content": f"""
 题目：{question.question}{options_text}
 正确答案：{question.answer}
 参考解析：{question.explanation}
@@ -42,7 +42,8 @@ async def _llm_grade(question: Question, user_answer: str) -> AIFeedback:
 学生答案：{user_answer}
 
 请批改并给出个性化讲解。
-"""},
+""",
+            },
         ],
         response_format=AIFeedback,
     )
@@ -68,7 +69,7 @@ async def grade_session(session_id: str) -> GradingReport:
             needs_llm.append(i)
             string_correct.append(False)  # 由 LLM 决定
         else:
-            is_correct = ans.strip().upper() == q.answer.strip().upper()
+            is_correct = answers_match(q, ans)
             string_correct.append(is_correct)
             if not is_correct:
                 needs_llm.append(i)
@@ -95,15 +96,17 @@ async def grade_session(session_id: str) -> GradingReport:
         if is_correct:
             correct_count += 1
 
-        grades.append(QuestionGrade(
-            index=i,
-            question=q.question,
-            user_answer=ans,
-            correct_answer=q.answer,
-            is_correct=is_correct,
-            ai_feedback=ai_feedback,
-            knowledge_gap=knowledge_gap,
-        ))
+        grades.append(
+            QuestionGrade(
+                index=i,
+                question=q.question,
+                user_answer=ans,
+                correct_answer=q.answer,
+                is_correct=is_correct,
+                ai_feedback=ai_feedback,
+                knowledge_gap=knowledge_gap,
+            )
+        )
 
     total = len(questions)
     return GradingReport(

@@ -1,15 +1,17 @@
-from openai import AsyncOpenAI
-import os
 from pathlib import Path
+
 from dotenv import load_dotenv
+
 from models.quiz import QuizResponse
-from services.vectorstore import retrieve_with_rewrite
+from services.llm import (
+    llm_parse,
+    structured_client as client,
+    structured_model as model,
+)
 from services.tracing import traceable
+from services.vectorstore import retrieve_with_rewrite
 
 load_dotenv(Path(__file__).parent.parent / ".env")
-
-# 出题用 json_schema 结构化输出 → 走 structured 供应商（DeepSeek 不支持 json_schema）
-from services.llm import structured_client as client, structured_model as model
 
 
 SYSTEM_PROMPT = """
@@ -55,7 +57,9 @@ async def generate_question_from_chunks(
     chunks_text = "\n\n".join(chunks)
 
     # 难度描述：有 difficulty_score 时用连续值，否则用文字
-    difficulty_desc = f"{difficulty_score:.2f}/1.0" if difficulty_score is not None else difficulty
+    difficulty_desc = (
+        f"{difficulty_score:.2f}/1.0" if difficulty_score is not None else difficulty
+    )
 
     # 自适应上下文：有薄弱知识点时注入
     adaptive_section = ""
@@ -70,21 +74,25 @@ async def generate_question_from_chunks(
 
     message = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": f"""原文段落：
+        {
+            "role": "user",
+            "content": f"""原文段落：
 {chunks_text}
 
 出题要求：
 - 数量：{count} 道 {type} 题
-- 难度：{difficulty_desc}{adaptive_section}{reflection_section}"""},
+- 难度：{difficulty_desc}{adaptive_section}{reflection_section}""",
+        },
     ]
-    question = await client.beta.chat.completions.parse(
+    question = await llm_parse(
+        message,
+        QuizResponse,
+        client=client,
         model=model,
-        messages=message,
-        response_format=QuizResponse,
     )
     quiz = question.choices[0].message.parsed
     for q in quiz.questions:
-        q.type = type   # 注入题型，供 grader 判断是否需要语义批改
+        q.type = type  # 注入题型，供 grader 判断是否需要语义批改
     return quiz
 
 
@@ -101,7 +109,10 @@ async def generate_question(
     result = await retrieve_with_rewrite(document_id, description)
     chunks = result["documents"][0]
     return await generate_question_from_chunks(
-        chunks, count, difficulty, type,
+        chunks,
+        count,
+        difficulty,
+        type,
         difficulty_score=difficulty_score,
         weak_points=weak_points,
         reflected_message=reflected_message,

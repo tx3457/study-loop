@@ -1,16 +1,42 @@
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
-from models.session import SessionStartRequest, AnswerRequest, AnswerResult, SessionResult, QuestionView
+import asyncio
+import logging
+
+from chromadb.errors import ChromaError, NotFoundError
+from fastapi import APIRouter, Header, HTTPException
+from pydantic import BaseModel, ValidationError
+
+from models.session import (
+    SessionStartRequest,
+    AnswerRequest,
+    AnswerResult,
+    SessionResult,
+    QuestionView,
+)
 from models.grader import GradingReport
 from models.report import LearningReport
-from services.session import start_session, submit_answer, get_result
+from services.session import (
+    InvalidQuizResponseError,
+    SessionConflictError,
+    SessionNotFoundError,
+    get_result,
+    start_session,
+    submit_answer,
+)
 from services.grader import grade_session
 from services.report import generate_report
 from services.wrong_questions import collect_wrong_answers
 from services.memory import write_episodic_memory, update_semantic_memory
+from services.idempotency import (
+    abort_idempotency_claim,
+    normalize_idempotency_key,
+    request_idempotency,
+)
 from services.session import sessions
+from services.tool_registry import SideEffectAmbiguousError
 
 router = APIRouter(prefix="/session")
+logger = logging.getLogger(__name__)
+_answer_locks: dict[str, asyncio.Lock] = {}
 
 
 class StartSessionResponse(BaseModel):
@@ -21,48 +47,147 @@ class StartSessionResponse(BaseModel):
 
 @router.post("/start", response_model=StartSessionResponse)
 async def start(req: SessionStartRequest):
-    session_id, questions = await start_session(req)
-    return StartSessionResponse(session_id=session_id, total=len(questions), questions=questions)
+    try:
+        session_id, questions = await start_session(req)
+    except NotFoundError as exc:
+        raise HTTPException(status_code=404, detail="文档不存在") from exc
+    except ChromaError as exc:
+        logger.exception("session start document lookup failed")
+        raise HTTPException(status_code=503, detail="文档存储暂时不可用") from exc
+    except (InvalidQuizResponseError, ValidationError) as exc:
+        logger.warning(
+            "quiz provider returned invalid structured output: %s", type(exc).__name__
+        )
+        raise HTTPException(status_code=503, detail="模型返回的题目格式无效") from exc
+    return StartSessionResponse(
+        session_id=session_id, total=len(questions), questions=questions
+    )
 
 
 @router.post("/{session_id}/answer", response_model=AnswerResult)
-async def answer(session_id: str, req: AnswerRequest):
+async def answer(
+    session_id: str,
+    req: AnswerRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+):
+    key = normalize_idempotency_key(idempotency_key)
+    claimed = False
+    if key:
+        decision = await request_idempotency.begin(
+            key,
+            "session.answer",
+            {"session_id": session_id, **req.model_dump(mode="json")},
+        )
+        if decision.replayed:
+            return AnswerResult.model_validate(decision.response)
+        claimed = True
+
+    effect_started = False
+
+    async def mark_effect() -> None:
+        nonlocal effect_started
+        if effect_started:
+            return
+        if key:
+            await request_idempotency.mark_effect_started(key, "session_answer")
+        effect_started = True
+
     try:
-        return await submit_answer(session_id, req.answer)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        if session_id not in sessions:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Session {session_id} not found",
+            )
+
+        lock = _answer_locks.setdefault(session_id, asyncio.Lock())
+        async with lock:
+            response = await submit_answer(
+                session_id,
+                req.answer,
+                question_index=req.question_index,
+                before_commit=mark_effect,
+            )
+            if key:
+                await request_idempotency.complete(
+                    key, response.model_dump(mode="json")
+                )
+            return response
+    except BaseException as exc:
+        durable_effect = False
+        if claimed and key:
+            try:
+                durable_effect = await abort_idempotency_claim(
+                    request_idempotency,
+                    key,
+                )
+            except BaseException:
+                logger.exception("session answer receipt cleanup failed")
+
+        ambiguous = effect_started or durable_effect
+        if ambiguous:
+            session = sessions.get(session_id)
+            if session is not None:
+                session.status = "ambiguous"
+
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        if ambiguous and not isinstance(exc, SideEffectAmbiguousError):
+            raise SideEffectAmbiguousError("session_answer") from exc
+        if isinstance(exc, SessionNotFoundError):
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if isinstance(exc, SessionConflictError):
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        raise
 
 
 @router.get("/{session_id}/result", response_model=SessionResult)
 async def result(session_id: str):
     try:
         return await get_result(session_id)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    except SessionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except SessionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def _require_completed_session(session_id: str):
+    session = sessions.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+    if session.status != "completed":
+        raise HTTPException(status_code=409, detail="Session not completed")
+    return session
 
 
 @router.post("/{session_id}/grade", response_model=GradingReport)
 async def grade(session_id: str):
+    session = _require_completed_session(session_id)
     try:
         report = await grade_session(session_id)
-        collect_wrong_answers(session_id, report)           # 自动收集错题
+        collect_wrong_answers(session_id, report)  # 自动收集错题
 
-        # 画像写回：答完最后一题时 submit_answer 已写（必经路径），
-        # 这里仅在当时写失败的情况下兜底重写，避免 EMA / weak_points 重复累积
-        session = sessions.get(session_id)
-        if session and not session.profile_written:
+        # 选择题在答完最后一题时已写画像；简答题必须等语义批改完成后再写。
+        # profile_written 防止重试 /grade 时重复累积 EMA 与 weak_points。
+        if not session.profile_written:
             await write_episodic_memory(session.user_id, report, session.document_id)
             await update_semantic_memory(session.user_id, report, session.document_id)
             session.profile_written = True
 
         return report
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except ValidationError as exc:
+        logger.warning("grader provider returned invalid structured output")
+        raise HTTPException(status_code=503, detail="模型返回的批改格式无效") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/{session_id}/report", response_model=LearningReport)
 async def report(session_id: str):
+    _require_completed_session(session_id)
     try:
         return await generate_report(session_id)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except ValidationError as exc:
+        logger.warning("report provider returned invalid structured output")
+        raise HTTPException(status_code=503, detail="模型返回的报告格式无效") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc

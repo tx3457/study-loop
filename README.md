@@ -78,11 +78,14 @@ npm run dev
 | Structured Output | `STRUCTURED_API_KEY`、`STRUCTURED_BASE_URL`、`STRUCTURED_MODEL` |
 | Embeddings | `EMBEDDING_API_KEY`、`EMBEDDING_BASE_URL`、`LLM_EMBEDDING_MODEL` |
 
-Autonomous Agent 会为同一次前端重试复用 `Idempotency-Key`。使用
+Web 前端会为 Autonomous 请求、单题答案和 Adaptive 单轮提交生成
+`Idempotency-Key`；同一内容重试时复用原 key，修改答案后生成新 key。Quiz 的
+题号和 Adaptive 的轮次也会随请求提交，服务端会拒绝过期提交。使用
 `DATABASE_URL` 时，重试 receipt 和人工确认暂停快照保存在 PostgreSQL；本地
 无数据库时，两者默认共用 `IDEMPOTENCY_DB_PATH` 指定的 SQLite 文件。暂停快照
 支持进程重启和多 worker 原子续跑，默认保留 1 小时。相关容量和 TTL 配置见
-[`.env.example`](.env.example)。
+[`.env.example`](.env.example)。Quiz 与 Adaptive 会话本身仍保存在进程内存中，
+后端重启后需要重新开始。
 
 Structured Output 和 Embeddings 的专用 key 与地址必须成对配置；两者同时留空时才会整组回退到 `LLM_*`。完整配置见 [`.env.example`](.env.example)。
 

@@ -1,6 +1,8 @@
 import chromadb
+import hashlib
 import logging
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -38,14 +40,52 @@ chromadb_client = chromadb.PersistentClient(_CHROMA_DIR)
 # 单次 embedding 请求最多 chunk 数:大文档分批,避免撞厂商单请求 input 上限
 EMBED_BATCH_SIZE = 64
 _STAGING_PREFIX = "studyloop-staging-"
-_STAGING_TTL_SECONDS = max(
-    60, int(os.getenv("STAGING_COLLECTION_TTL_SECONDS", "3600"))
-)
+_STAGING_TTL_SECONDS = max(60, int(os.getenv("STAGING_COLLECTION_TTL_SECONDS", "3600")))
 _active_staging_names: set[str] = set()
+_VALID_COLLECTION_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{1,510}[A-Za-z0-9]$")
 
 
 class DocumentAlreadyExistsError(Exception):
     """A published collection already owns this document id."""
+
+
+def _storage_document_id(document_id: str) -> str:
+    """Map a public filename to a deterministic Chroma-safe collection name.
+
+    Existing ASCII identifiers remain unchanged for backward compatibility.
+    Unicode, spaces and other valid filename characters use a 224-bit digest;
+    the original public id is retained in collection metadata.
+    """
+    if _VALID_COLLECTION_NAME.fullmatch(document_id):
+        return document_id
+    digest = hashlib.sha256(document_id.encode("utf-8")).hexdigest()[:56]
+    return f"doc-{digest}"
+
+
+def _require_public_document_owner(collection, document_id: str):
+    """Reject internal collection-name aliases for a public document id."""
+    metadata = collection.metadata if isinstance(collection.metadata, dict) else {}
+    public_id = (
+        metadata.get("source_document_id")
+        or metadata.get("source_filename")
+        or collection.name
+    )
+    if public_id != document_id:
+        raise NotFoundError(f"Document {document_id!r} not found")
+    return collection
+
+
+async def _get_public_document_collection(document_id: str):
+    collection = await asyncio.to_thread(
+        chromadb_client.get_collection,
+        name=_storage_document_id(document_id),
+    )
+    return _require_public_document_owner(collection, document_id)
+
+
+async def ensure_document_available(document_id: str) -> None:
+    """Resolve a public document id and fail if its collection is unavailable."""
+    await _get_public_document_collection(document_id)
 
 
 async def _embed(texts: list[str]):
@@ -86,24 +126,25 @@ def _staging_is_stale(metadata: dict, now: float | None = None) -> bool:
 
 async def _ensure_document_slot_available(document_id: str) -> None:
     """Reject real duplicates while migrating legacy empty ghost collections."""
-    existing = await _get_collection_if_exists(document_id)
+    storage_id = _storage_document_id(document_id)
+    existing = await _get_collection_if_exists(storage_id)
     if existing is None:
         return
 
     metadata = existing.metadata if isinstance(existing.metadata, dict) else {}
     status = metadata.get("ingest_status")
     count = await asyncio.to_thread(existing.count)
-    removable = (
-        status == "indexing" and _staging_is_stale(metadata)
-    ) or (
+    removable = (status == "indexing" and _staging_is_stale(metadata)) or (
         status != "indexed" and count == 0
     )
     if removable:
         try:
-            await asyncio.to_thread(chromadb_client.delete_collection, name=document_id)
+            await asyncio.to_thread(chromadb_client.delete_collection, name=storage_id)
         except NotFoundError:
             pass
-        logger.info("[vectorstore] removed incomplete collection before upload: %s", document_id)
+        logger.info(
+            "[vectorstore] removed incomplete collection before upload: %s", document_id
+        )
         return
 
     raise DocumentAlreadyExistsError(f"文档 '{document_id}' 已存在，请先删除后再上传")
@@ -132,13 +173,14 @@ async def _run_blocking_to_completion(func, /, *args, **kwargs):
 
 async def deal_document(document_id: str, filename: str, chunks: list[str]):
     # 同名重传不能继续用 add：Chroma 会忽略重复 id，导致接口成功但正文仍是旧版本。
+    storage_id = _storage_document_id(document_id)
     await _ensure_document_slot_available(document_id)
 
     # 先完成所有外部 embedding 调用，provider 失败时不产生任何 Chroma 写入。
     # 分批 embed:几百 chunk 一次性 embed 会撞 API input 上限(多数厂商 ~2048 条/8k token)
     embeddings: list = []
     for start in range(0, len(chunks), EMBED_BATCH_SIZE):
-        resp = await _embed(chunks[start:start + EMBED_BATCH_SIZE])
+        resp = await _embed(chunks[start : start + EMBED_BATCH_SIZE])
         embeddings.extend(item.embedding for item in resp.data)
 
     # 写入唯一 staging collection；只有 add 完整成功后才 rename 发布为 document_id。
@@ -153,6 +195,7 @@ async def deal_document(document_id: str, filename: str, chunks: list[str]):
             metadata={
                 "ingest_status": "indexing",
                 "source_filename": filename,
+                "source_document_id": document_id,
                 "created_at": int(time.time()),
             },
         )
@@ -161,7 +204,7 @@ async def deal_document(document_id: str, filename: str, chunks: list[str]):
             collection.add,
             documents=chunks,
             embeddings=embeddings,
-            ids=[f"{document_id}_chunk_{i}" for i in range(len(chunks))],
+            ids=[f"{storage_id}_chunk_{i}" for i in range(len(chunks))],
             metadatas=[
                 {"source": chunks[i][:50], "doc_id": document_id, "chunk_index": i}
                 for i in range(len(chunks))
@@ -173,13 +216,17 @@ async def deal_document(document_id: str, filename: str, chunks: list[str]):
         try:
             await _run_blocking_to_completion(
                 collection.modify,
-                name=document_id,
-                metadata={"ingest_status": "indexed", "source_filename": filename},
+                name=storage_id,
+                metadata={
+                    "ingest_status": "indexed",
+                    "source_filename": filename,
+                    "source_document_id": document_id,
+                },
             )
         except Exception as publish_error:
             # Chroma 的 rename 冲突没有稳定的专用异常类型；以正式 collection
             # 是否已出现判定并发同名上传，统一返回 409 而不是误报存储故障。
-            if await _collection_exists(document_id):
+            if await _collection_exists(storage_id):
                 raise DocumentAlreadyExistsError(
                     f"文档 '{document_id}' 已存在，请先删除后再上传"
                 ) from publish_error
@@ -201,7 +248,7 @@ async def deal_document(document_id: str, filename: str, chunks: list[str]):
     finally:
         _active_staging_names.discard(staging_name)
 
-    _bm25_cache.pop(document_id, None)   # 文档内容已变,BM25 缓存失效
+    _bm25_cache.pop(document_id, None)  # 文档内容已变,BM25 缓存失效
     return len(chunks)
 
 
@@ -238,9 +285,11 @@ def clear_bm25_cache() -> None:
 
 
 async def query_document(document_id: str, query: str):
+    collection = await _get_public_document_collection(document_id)
     query_vec = await _embed([query])
-    collection = chromadb_client.get_collection(name=document_id)
-    return await asyncio.to_thread(collection.query,query_embeddings=[query_vec.data[0].embedding],n_results=5)
+    return await asyncio.to_thread(
+        collection.query, query_embeddings=[query_vec.data[0].embedding], n_results=5
+    )
 
 
 @traceable(
@@ -272,15 +321,15 @@ async def hybrid_query_document(
     recall_n = n_results * recall_multiplier
 
     # 1. 向量检索
+    collection = await _get_public_document_collection(document_id)
     query_vec = await _embed([query])
-    collection = chromadb_client.get_collection(name=document_id)
     vec_results = await asyncio.to_thread(
         collection.query,
         query_embeddings=[query_vec.data[0].embedding],
-        n_results=recall_n
+        n_results=recall_n,
     )
-    vec_docs = vec_results["documents"][0]      # list[str]
-    vec_ids = vec_results["ids"][0]             # list[str]
+    vec_docs = vec_results["documents"][0]  # list[str]
+    vec_ids = vec_results["ids"][0]  # list[str]
 
     # 2. BM25 检索:索引按 document_id 缓存(文档增删时失效),避免每次全量重建
     idx = await _get_bm25_index(collection, document_id)
@@ -311,7 +360,9 @@ async def hybrid_query_document(
     # 4. Cross-Encoder 精排(可降级)
     if use_rerank and len(rrf_top_docs) > 1:
         try:
-            reranked = await rerank_docs(query, rrf_top_docs, rrf_top_ids, top_k=n_results)
+            reranked = await rerank_docs(
+                query, rrf_top_docs, rrf_top_ids, top_k=n_results
+            )
             top_docs = [r[0] for r in reranked]
             top_ids = [r[2] for r in reranked]
             return {"documents": [top_docs], "ids": [top_ids]}
@@ -330,7 +381,9 @@ async def hybrid_query_document(
     run_type="retriever",
     metadata={"strategy": "hyde+multiquery+hybrid+rrf"},
 )
-async def retrieve_with_rewrite(document_id: str, query: str, n_results: int = 5) -> dict:
+async def retrieve_with_rewrite(
+    document_id: str, query: str, n_results: int = 5
+) -> dict:
     """生产检索入口：按 env 决定是否做 HyDE / Multi-query 改写，再 hybrid 检索 + RRF 合并。
 
     组合矩阵（与 test/run_eval_v3_phase9.py 同一套逻辑，保证生产 == 评测）：
@@ -374,27 +427,35 @@ async def retrieve_with_rewrite(document_id: str, query: str, n_results: int = 5
     ranked_lists: list[list[tuple[str, str]]] = []
     for r in results:
         if isinstance(r, Exception):
-            logger.warning(f"[retrieve_with_rewrite] one sub-query failed, skipped: {r}")
+            logger.warning(
+                f"[retrieve_with_rewrite] one sub-query failed, skipped: {r}"
+            )
             continue
         docs = r.get("documents", [[]])[0] or []
         ids = r.get("ids", [[]])[0] or []
-        ranked_lists.append([(ids[i], docs[i]) for i in range(min(len(docs), len(ids)))])
+        ranked_lists.append(
+            [(ids[i], docs[i]) for i in range(min(len(docs), len(ids)))]
+        )
 
     # ② 全失败兜底：退回单 query hybrid
     if not ranked_lists:
-        logger.warning("[retrieve_with_rewrite] all rewritten sub-queries failed, fallback to original query")
+        logger.warning(
+            "[retrieve_with_rewrite] all rewritten sub-queries failed, fallback to original query"
+        )
         return await hybrid_query_document(document_id, query, n_results=n_results)
 
     merged = rrf_merge_ranked_lists(ranked_lists, top_k=n_results)
     return {
         "documents": [[m[1] for m in merged]],
-        "ids":       [[m[0] for m in merged]],
+        "ids": [[m[0] for m in merged]],
     }
 
 
-async def bm25_only_query_document(document_id: str, query: str, n_results: int = 5) -> dict:
+async def bm25_only_query_document(
+    document_id: str, query: str, n_results: int = 5
+) -> dict:
     """纯 BM25 检索（用于评测对照组，与 hybrid 和 naive 三组对比）"""
-    collection = chromadb_client.get_collection(name=document_id)
+    collection = await _get_public_document_collection(document_id)
     idx = await _get_bm25_index(collection, document_id)
     all_docs, all_ids, bm25 = idx["all_docs"], idx["all_ids"], idx["bm25"]
     if bm25 is None:
@@ -413,9 +474,8 @@ async def get_all_document():
         metadata = collection.metadata if isinstance(collection.metadata, dict) else {}
         status = metadata.get("ingest_status")
         if status == "indexing":
-            if (
-                collection.name not in _active_staging_names
-                and _staging_is_stale(metadata, now)
+            if collection.name not in _active_staging_names and _staging_is_stale(
+                metadata, now
             ):
                 try:
                     await asyncio.to_thread(
@@ -449,6 +509,11 @@ async def get_all_document():
         visible.append(collection)
     return visible
 
+
 async def delete_document(document_id: str):
-    await asyncio.to_thread(chromadb_client.delete_collection,name=document_id)
-    _bm25_cache.pop(document_id, None)   # 仅在存储删除成功后失效
+    collection = await _get_public_document_collection(document_id)
+    await asyncio.to_thread(
+        chromadb_client.delete_collection,
+        name=collection.name,
+    )
+    _bm25_cache.pop(document_id, None)  # 仅在存储删除成功后失效

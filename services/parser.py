@@ -17,6 +17,7 @@
   4. OCR 失败 graceful：返回带 error metadata 的 Document，不抛异常
      （避免单页失败拖垮整批上传）
 """
+
 import asyncio
 import io
 import logging
@@ -28,7 +29,6 @@ from typing import Optional
 from langchain_community.document_loaders import (
     Docx2txtLoader,
     PyPDFLoader,
-    TextLoader,
 )
 from langchain_core.documents import Document
 
@@ -47,6 +47,10 @@ OCR_MAX_PAGES = 20
 
 class UnsupportedFileError(ValueError):
     """文件类型不支持。继承 ValueError，由 main.py 的 handler 转 400。"""
+
+
+class DocumentParseError(Exception):
+    """The uploaded bytes cannot be safely parsed as the declared document type."""
 
 
 # ── OCR Backend 抽象（Strategy 模式）─────────────────────────────────────────
@@ -79,6 +83,7 @@ class TesseractBackend(OCRBackend):
         self.available = False
         try:
             import pytesseract
+
             pytesseract.get_tesseract_version()
             self._pytesseract = pytesseract
             self.available = True
@@ -95,6 +100,7 @@ class TesseractBackend(OCRBackend):
         max_size = 2000
         if max(image.size) > max_size:
             from PIL import Image as _Image
+
             ratio = max_size / max(image.size)
             image = image.resize(
                 (int(image.size[0] * ratio), int(image.size[1] * ratio)),
@@ -125,12 +131,15 @@ _MAX_IMAGE_PIXELS = 50_000_000  # ~50 MP
 
 def _open_image(image_bytes: bytes):
     from PIL import Image
+
     Image.MAX_IMAGE_PIXELS = _MAX_IMAGE_PIXELS  # 收紧默认阈值,防恶意超大图 OOM
     return Image.open(io.BytesIO(image_bytes))
 
 
 # ── 单张图片 OCR → Document ────────────────────────────────────────────────
-def _ocr_image_bytes(image_bytes: bytes, source: str, page: Optional[int] = None) -> Document:
+def _ocr_image_bytes(
+    image_bytes: bytes, source: str, page: Optional[int] = None
+) -> Document:
     """OCR 一张图片字节流，返回单 Document。失败时返回 error-marked Document。"""
     if not _ocr_backend.available:
         return Document(
@@ -193,11 +202,19 @@ def _ocr_scanned_pdf(file_bytes: bytes, filename: str) -> list[Document]:
     try:
         from pdf2image import convert_from_bytes, pdfinfo_from_bytes
     except ImportError:
-        logger.warning("[parser] pdf2image 未安装，扫描型 PDF 无法处理。pip install pdf2image")
-        return [Document(
-            page_content="扫描型 PDF 解析不可用：pdf2image 未安装",
-            metadata={"source": filename, "file_type": "pdf", "error": "pdf2image_missing"},
-        )]
+        logger.warning(
+            "[parser] pdf2image 未安装，扫描型 PDF 无法处理。pip install pdf2image"
+        )
+        return [
+            Document(
+                page_content="扫描型 PDF 解析不可用：pdf2image 未安装",
+                metadata={
+                    "source": filename,
+                    "file_type": "pdf",
+                    "error": "pdf2image_missing",
+                },
+            )
+        ]
 
     try:
         # 先探测真实总页数(用于 truncated 标记),再只渲染前 OCR_MAX_PAGES 页:
@@ -208,14 +225,20 @@ def _ocr_scanned_pdf(file_bytes: bytes, filename: str) -> list[Document]:
             total_pages = None
         # dpi=200 是质量/速度平衡点；fmt=jpeg 比 png 小 30%
         images = convert_from_bytes(
-            file_bytes, dpi=200, fmt="jpeg", first_page=1, last_page=OCR_MAX_PAGES,
+            file_bytes,
+            dpi=200,
+            fmt="jpeg",
+            first_page=1,
+            last_page=OCR_MAX_PAGES,
         )
     except Exception as e:
         logger.exception(f"[parser] pdf2image conversion failed: {e}")
-        return [Document(
-            page_content=f"PDF 转图失败：{e}",
-            metadata={"source": filename, "file_type": "pdf", "error": str(e)},
-        )]
+        return [
+            Document(
+                page_content=f"PDF 转图失败：{e}",
+                metadata={"source": filename, "file_type": "pdf", "error": str(e)},
+            )
+        ]
 
     if total_pages is None:
         total_pages = len(images)
@@ -283,10 +306,12 @@ def _parse_sync(file_bytes: bytes, filename: str) -> list[Document]:
         except UnicodeDecodeError:
             # Windows 中文 GBK fallback
             text = file_bytes.decode("gbk", errors="replace")
-        return [Document(
-            page_content=text,
-            metadata={"source": filename, "file_type": ext.lstrip(".")},
-        )]
+        return [
+            Document(
+                page_content=text,
+                metadata={"source": filename, "file_type": ext.lstrip(".")},
+            )
+        ]
 
     # 图片：单独走 OCR
     if ext in SUPPORTED_IMAGE_EXTS:
@@ -318,7 +343,17 @@ def _parse_sync(file_bytes: bytes, filename: str) -> list[Document]:
 
 async def parse_upload(file_bytes: bytes, filename: str) -> list[Document]:
     """异步入口。同步阻塞 I/O 扔到 thread pool 避免堵 event loop。"""
-    return await asyncio.to_thread(_parse_sync, file_bytes, filename)
+    try:
+        return await asyncio.to_thread(_parse_sync, file_bytes, filename)
+    except UnsupportedFileError:
+        raise
+    except Exception as exc:
+        logger.exception(
+            "[parser] document parsing failed (type=%s, bytes=%d)",
+            Path(filename).suffix.lower() or "unknown",
+            len(file_bytes),
+        )
+        raise DocumentParseError from exc
 
 
 # 暴露给上层（便于面试讲点时引用 + 单测）

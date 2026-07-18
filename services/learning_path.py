@@ -15,13 +15,12 @@ Learning Path 多阶段流水线（Phase 8 P4，借鉴 DeepTutor SourceExplorer 
   - explore 并行多 query RAG sweep（借 DeepTutor SourceExplorer）
   - critique-revise 把"双门"模式从出题扩展到规划（借 DeepTutor SpineSynthesizer）
 """
+
 import asyncio
 import logging
-import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-from openai import AsyncOpenAI
 
 from models.learning_path import (
     CompressedReport,
@@ -30,17 +29,20 @@ from models.learning_path import (
     PathBrief,
     PathCritique,
 )
-from services.vectorstore import chromadb_client, hybrid_query_document
-
-load_dotenv(Path(__file__).parent.parent / ".env")
-
-logger = logging.getLogger(__name__)
-# 路径流水线各阶段均为 json_schema 结构化输出 → 走 structured 供应商
 from services.llm import (
     llm_parse,
     structured_client as _client,
     structured_model as _model,
 )
+from services.vectorstore import ensure_document_available, hybrid_query_document
+
+load_dotenv(Path(__file__).parent.parent / ".env")
+
+logger = logging.getLogger(__name__)
+
+
+class LearningPathEvidenceUnavailableError(RuntimeError):
+    """No document evidence is available for grounded path generation."""
 
 
 # ── 阶段 A：brief_extraction ─────────────────────────────────────────────
@@ -59,7 +61,10 @@ async def extract_brief(document_id: str, user_intent: str = "") -> PathBrief:
             model=_model,
             messages=[
                 {"role": "system", "content": _BRIEF_SYSTEM},
-                {"role": "user", "content": f"文档 ID：{document_id}\n用户意图：{intent}"},
+                {
+                    "role": "user",
+                    "content": f"文档 ID：{document_id}\n用户意图：{intent}",
+                },
             ],
             response_format=PathBrief,
         )
@@ -91,16 +96,28 @@ async def explore(document_id: str, brief: PathBrief) -> ExplorationReport:
 
     seen: set = set()
     merged_chunks: list[str] = []
+    failures: list[Exception] = []
     for q, r in zip(queries, results):
         if isinstance(r, Exception):
             logger.warning(f"[planner] explore query='{q}' failed: {r}")
+            failures.append(r)
             continue
-        for doc in (r.get("documents", [[]])[0] or []):
+        for doc in r.get("documents", [[]])[0] or []:
             # 用前 80 字做 dedupe key（chunk 之间可能高度重复）
             key = doc[:80]
             if key not in seen:
                 seen.add(key)
                 merged_chunks.append(doc)
+
+    if not merged_chunks:
+        # Do not ask the model to invent a path from an empty placeholder. If every
+        # retrieval failed, preserve the original failure so API boundaries can
+        # distinguish a missing document from an unavailable provider/store.
+        if len(failures) == len(results) and failures:
+            raise failures[0]
+        raise LearningPathEvidenceUnavailableError(
+            f"文档 {document_id!r} 没有可用于生成学习路径的检索内容"
+        )
 
     return ExplorationReport(
         queries_used=queries,
@@ -136,10 +153,13 @@ async def compress(report: ExplorationReport, brief: PathBrief) -> CompressedRep
             model=_model,
             messages=[
                 {"role": "system", "content": _COMPRESS_SYSTEM},
-                {"role": "user", "content": (
-                    f"【学习意图】{brief.scope} (level={brief.level})\n\n"
-                    f"【chunks 共 {len(report.chunks)} 条，取前 30】\n{chunks_text}"
-                )},
+                {
+                    "role": "user",
+                    "content": (
+                        f"【学习意图】{brief.scope} (level={brief.level})\n\n"
+                        f"【chunks 共 {len(report.chunks)} 条，取前 30】\n{chunks_text}"
+                    ),
+                },
             ],
             response_format=CompressedReport,
         )
@@ -216,10 +236,13 @@ async def critique(path: LearningPath, compressed: CompressedReport) -> PathCrit
             model=_model,
             messages=[
                 {"role": "system", "content": _CRITIQUE_SYSTEM},
-                {"role": "user", "content": (
-                    f"【待评估 LearningPath】\n{path_dump}\n\n"
-                    f"【参考 key_concepts】{compressed.key_concepts}"
-                )},
+                {
+                    "role": "user",
+                    "content": (
+                        f"【待评估 LearningPath】\n{path_dump}\n\n"
+                        f"【参考 key_concepts】{compressed.key_concepts}"
+                    ),
+                },
             ],
             response_format=PathCritique,
         )
@@ -227,7 +250,10 @@ async def critique(path: LearningPath, compressed: CompressedReport) -> PathCrit
     except Exception as e:
         logger.warning(f"[planner] critique 失败，默认通过: {e}")
         return PathCritique(
-            overall_score=1.0, issues=[], needs_revision=False, revision_hints="",
+            overall_score=1.0,
+            issues=[],
+            needs_revision=False,
+            revision_hints="",
         )
 
 
@@ -242,7 +268,10 @@ async def generate_learning_path(
     pipeline:
       A brief → B explore → C compress → D synthesize → E critique →（不通过则 revise）
     """
-    logger.info(f"[planner] start pipeline for doc={document_id}, intent={user_intent!r}")
+    await ensure_document_available(document_id)
+    logger.info(
+        f"[planner] start pipeline for doc={document_id}, intent={user_intent!r}"
+    )
 
     # A
     brief = await extract_brief(document_id, user_intent)
@@ -254,8 +283,10 @@ async def generate_learning_path(
 
     # C
     compressed = await compress(report, brief)
-    logger.info(f"[planner] compressed → {len(compressed.summary)} chars summary, "
-                f"{len(compressed.key_concepts)} concepts")
+    logger.info(
+        f"[planner] compressed → {len(compressed.summary)} chars summary, "
+        f"{len(compressed.key_concepts)} concepts"
+    )
 
     # D
     path = await synthesize(document_id, brief, compressed)
@@ -266,13 +297,17 @@ async def generate_learning_path(
 
     # E - critique
     crit = await critique(path, compressed)
-    logger.info(f"[planner] critique: score={crit.overall_score:.2f}, "
-                f"needs_revision={crit.needs_revision}")
+    logger.info(
+        f"[planner] critique: score={crit.overall_score:.2f}, "
+        f"needs_revision={crit.needs_revision}"
+    )
 
     # E' - revise (max 1 轮)
     if crit.needs_revision and crit.revision_hints:
         logger.info(f"[planner] revising with hint: {crit.revision_hints[:80]}")
-        path = await synthesize(document_id, brief, compressed, revise_hint=crit.revision_hints)
+        path = await synthesize(
+            document_id, brief, compressed, revise_hint=crit.revision_hints
+        )
         logger.info(f"[planner] revised → {path.total_stages} stages")
 
     return path

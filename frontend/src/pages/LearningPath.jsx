@@ -33,6 +33,12 @@ export default function LearningPath() {
 
   useEffect(() => { loadDocuments() }, [loadDocuments])
 
+  const handleDocumentChange = (event) => {
+    setSelectedDoc(event.target.value)
+    setPath(null)
+    setError(null)
+  }
+
   const handleGenerate = async () => {
     if (!selectedDoc) return
     setLoading(true)
@@ -76,7 +82,7 @@ export default function LearningPath() {
             className="lp-select"
             aria-label="学习文档"
             value={selectedDoc}
-            onChange={e => setSelectedDoc(e.target.value)}
+            onChange={handleDocumentChange}
             disabled={docsLoading || loading}
           >
             <option value="">

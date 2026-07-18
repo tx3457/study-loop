@@ -18,8 +18,8 @@
       },
       "vectorstore": {
         "path": "services/vectorstore.py",
-        "sha256": "8eb431a62144339617ee453a920d83f60aa6c9cb07979436e2a8f1eaddb57b97",
-        "hash_refresh_note": "Refreshed after provider-client lifecycle and reranker-default documentation changes outside the evaluated BM25 ranking path."
+        "sha256": "9630a1996c8cf3837ed75519494e2b367e15df7e57f41f2c0ced499ffc7ff2e4",
+        "hash_refresh_note": "Refreshed after stable document collection IDs, public-owner validation, availability preflight, and error-boundary changes outside the evaluated BM25 ranking path."
       }
     }
   },

@@ -281,6 +281,10 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
 
     async def test_delete_invalidates_cache_only_after_storage_success(self):
         client = MagicMock()
+        client.get_collection.return_value = SimpleNamespace(
+            name="notes.md",
+            metadata={"source_document_id": "notes.md"},
+        )
         vectorstore._bm25_cache["notes.md"] = {"cached": True}
 
         with patch.object(vectorstore, "chromadb_client", client):

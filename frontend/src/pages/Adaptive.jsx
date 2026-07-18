@@ -10,7 +10,13 @@
  * 状态机：idle → starting → answering → (submitting → answering)* → done | error
  */
 import { useState, useRef } from 'react'
-import { startAdaptive, submitAdaptive, getDocuments } from '../api/client'
+import {
+  createIdempotencyKey,
+  getDocuments,
+  isTerminalExecutionError,
+  startAdaptive,
+  submitAdaptive,
+} from '../api/client'
 import './Adaptive.css'
 
 const ACTION_META = {
@@ -31,19 +37,26 @@ export default function Adaptive() {
   const [phase, setPhase] = useState('idle')   // idle | starting | answering | submitting | done | error
   const [req, setReq] = useState({ user_id: 'default_user', document_id: '', goal: '' })
   const [documents, setDocuments] = useState([])
+  const [docsLoading, setDocsLoading] = useState(false)
+  const [docsError, setDocsError] = useState(null)
   const [resp, setResp] = useState(null)        // 最近一轮的 turn 响应
   const [answers, setAnswers] = useState([])
   const [error, setError] = useState(null)
   const sid = useRef(null)
+  const submitIdempotencyKey = useRef(null)
 
   const busy = phase === 'starting' || phase === 'submitting'
 
   async function loadDocs() {
+    setDocsLoading(true)
+    setDocsError(null)
     try {
       const data = await getDocuments()
       setDocuments(data.documents || [])
     } catch (err) {
-      setError(err.message)
+      setDocsError(err.message)
+    } finally {
+      setDocsLoading(false)
     }
   }
 
@@ -62,6 +75,7 @@ export default function Adaptive() {
   async function handleStart(e) {
     e.preventDefault()
     if (!req.document_id.trim() || !req.goal.trim()) return
+    submitIdempotencyKey.current = null
     setPhase('starting'); setError(null); setResp(null)
     try {
       const r = await startAdaptive({
@@ -78,33 +92,53 @@ export default function Adaptive() {
 
   async function handleSubmit() {
     if (answers.some(a => !a.trim())) return
-    setPhase('submitting')
-    try {
-      const r = await submitAdaptive({ adaptive_session_id: sid.current, answers })
-      applyTurn(r)
-    } catch (err) {
-      setError(err.message); setPhase('error')
-    }
+    await submitTurn(answers, 'answering')
   }
 
   /** 讲解轮:读完点"继续"，提交空答案推进到出题验证 */
   async function handleContinueLesson() {
+    await submitTurn([], 'reading')
+  }
+
+  async function submitTurn(nextAnswers, retryPhase) {
+    if (!sid.current || phase === 'submitting' || !Number.isInteger(resp?.turn)) return
     setPhase('submitting')
+    setError(null)
     try {
-      const r = await submitAdaptive({ adaptive_session_id: sid.current, answers: [] })
+      const idempotencyKey = submitIdempotencyKey.current || createIdempotencyKey()
+      submitIdempotencyKey.current = idempotencyKey
+      const r = await submitAdaptive({
+        adaptive_session_id: sid.current,
+        answers: nextAnswers,
+        turn: resp.turn,
+        idempotency_key: idempotencyKey,
+      })
+      submitIdempotencyKey.current = null
       applyTurn(r)
     } catch (err) {
-      setError(err.message); setPhase('error')
+      const staleState = err.status === 409 && !err.code
+      if (err.status === 404 || staleState || isTerminalExecutionError(err)) {
+        submitIdempotencyKey.current = null
+        sid.current = null
+        setResp(null)
+        setAnswers([])
+        setPhase('error')
+      } else {
+        setPhase(retryPhase)
+      }
+      setError(err.message)
     }
   }
 
   function setAnswer(i, val) {
+    if (answers[i] !== val) submitIdempotencyKey.current = null
     setAnswers(prev => { const next = [...prev]; next[i] = val; return next })
   }
 
   function handleReset() {
     setPhase('idle'); setResp(null); setAnswers([]); setError(null)
     sid.current = null
+    submitIdempotencyKey.current = null
   }
 
   const r = resp
@@ -145,7 +179,15 @@ export default function Adaptive() {
           <div className="doc-input">
             <div className="field-label-row">
               <label htmlFor="adaptive-document">文档 ID</label>
-              <button type="button" className="btn-link" onClick={loadDocs}>刷新文档</button>
+              <button
+                type="button"
+                className="btn-link"
+                onClick={loadDocs}
+                disabled={docsLoading}
+                aria-busy={docsLoading}
+              >
+                {docsLoading ? '刷新中...' : '刷新文档'}
+              </button>
             </div>
             <input
               id="adaptive-document"
@@ -175,6 +217,7 @@ export default function Adaptive() {
       </form>
 
       {error && <div className="error-banner" role="alert">⚠️ {error}</div>}
+      {docsError && <div className="error-banner" role="alert">⚠️ {docsError}</div>}
 
       {/* ── 上一轮成绩 ──────────────────────────────────────────────── */}
       {r && r.last_report_score != null && (
