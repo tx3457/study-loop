@@ -28,6 +28,9 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 
 _TABLE = "studyloop_autonomous_sessions"
 _VALID_STATES = {"paused", "in_flight"}
+# ASCII "STUDYLOO" encoded as a positive signed bigint. PostgreSQL advisory
+# locks are shared by sessions in one database, serializing first-use DDL.
+_POSTGRES_SCHEMA_LOCK_ID = 0x53545544594C4F4F
 
 
 class SessionAlreadyExistsError(RuntimeError):
@@ -279,6 +282,11 @@ class AutonomousSessionStore:
             if self._schema_ready:
                 return
             with self._transaction() as connection:
+                if self._postgres:
+                    connection.execute(
+                        "SELECT pg_advisory_xact_lock(%s)",
+                        (_POSTGRES_SCHEMA_LOCK_ID,),
+                    )
                 connection.execute(
                     f"""
                     CREATE TABLE IF NOT EXISTS {_TABLE} (
