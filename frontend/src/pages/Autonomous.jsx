@@ -11,9 +11,11 @@
  */
 import { useEffect, useState, useRef } from 'react'
 import {
+  createIdempotencyKey,
   runAutonomous,
   continueAutonomous,
   getDocuments,
+  isTerminalExecutionError,
 } from '../api/client'
 import './Autonomous.css'
 
@@ -25,35 +27,73 @@ const initialState = {
   retryBlocked: false,
 }
 
-function createIdempotencyKey() {
-  const cryptoApi = globalThis.crypto
-  if (typeof cryptoApi?.randomUUID === 'function') {
-    return cryptoApi.randomUUID()
-  }
-  if (typeof cryptoApi?.getRandomValues !== 'function') {
-    throw new Error('当前浏览器无法生成安全请求标识，请升级浏览器后重试')
-  }
+const AWAITING_STORAGE_KEY = 'study-loop.autonomous.awaiting.v1'
+const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
-  const bytes = cryptoApi.getRandomValues(new Uint8Array(16))
-  bytes[6] = (bytes[6] & 0x0f) | 0x40
-  bytes[8] = (bytes[8] & 0x3f) | 0x80
-  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0'))
-  return [
-    hex.slice(0, 4).join(''),
-    hex.slice(4, 6).join(''),
-    hex.slice(6, 8).join(''),
-    hex.slice(8, 10).join(''),
-    hex.slice(10, 16).join(''),
-  ].join('-')
+function clearAwaitingRecovery() {
+  try {
+    globalThis.sessionStorage?.removeItem(AWAITING_STORAGE_KEY)
+  } catch {
+    // Storage can be unavailable in hardened browser contexts.
+  }
 }
 
-function isTerminalExecutionError(error) {
-  return error.status === 410
-    || error.code === 'side_effect_ambiguous'
-    || (
-      error.code === 'idempotency_conflict'
-      && error.reason !== 'in_progress'
-    )
+function readAwaitingRecovery() {
+  try {
+    const raw = globalThis.sessionStorage?.getItem(AWAITING_STORAGE_KEY)
+    if (!raw) return null
+
+    const value = JSON.parse(raw)
+    const request = value?.request
+    const valid = value?.version === 1
+      && typeof value.conversation_id === 'string'
+      && /^[A-Za-z0-9_-]{1,256}$/.test(value.conversation_id)
+      && typeof value.user_question === 'string'
+      && value.user_question.trim().length > 0
+      && value.user_question.length <= 8000
+      && typeof value.draft === 'string'
+      && value.draft.length <= 8000
+      && request && typeof request === 'object'
+      && typeof request.query === 'string'
+      && request.query.trim().length > 0
+      && request.query.length <= 8000
+      && typeof request.user_id === 'string'
+      && request.user_id.length <= 256
+      && typeof request.document_id === 'string'
+      && request.document_id.length <= 1024
+      && (
+        value.continue_idempotency_key == null
+        || (
+          typeof value.continue_idempotency_key === 'string'
+          && UUID_V4_PATTERN.test(value.continue_idempotency_key)
+        )
+      )
+
+    if (!valid) throw new Error('invalid autonomous recovery payload')
+    return {
+      version: 1,
+      conversation_id: value.conversation_id,
+      user_question: value.user_question,
+      draft: value.draft,
+      request: {
+        query: request.query,
+        user_id: request.user_id,
+        document_id: request.document_id,
+      },
+      continue_idempotency_key: value.continue_idempotency_key || null,
+    }
+  } catch {
+    clearAwaitingRecovery()
+    return null
+  }
+}
+
+function writeAwaitingRecovery(value) {
+  try {
+    globalThis.sessionStorage?.setItem(AWAITING_STORAGE_KEY, JSON.stringify(value))
+  } catch {
+    // The dialog remains usable even when storage is unavailable or full.
+  }
 }
 
 function FormattedAnswer({ text }) {
@@ -69,13 +109,29 @@ function FormattedAnswer({ text }) {
 }
 
 export default function Autonomous() {
-  const [state, setState] = useState(initialState)
-  const [askReply, setAskReply] = useState('')
+  const [restoredAwaiting] = useState(() => readAwaitingRecovery())
+  const [state, setState] = useState(() => restoredAwaiting ? {
+    ...initialState,
+    phase: 'awaiting',
+    request: restoredAwaiting.request,
+    response: {
+      awaiting_user_input: true,
+      conversation_id: restoredAwaiting.conversation_id,
+      user_question: restoredAwaiting.user_question,
+      rounds_used: 0,
+      steps: [],
+      tools_called: ['ask_user'],
+      truncated: false,
+    },
+  } : initialState)
+  const [askReply, setAskReply] = useState(restoredAwaiting?.draft || '')
   const [documents, setDocuments] = useState([])
   const [documentsError, setDocumentsError] = useState(null)
-  const lastConversationId = useRef(null)
+  const lastConversationId = useRef(restoredAwaiting?.conversation_id || null)
   const startIdempotencyKey = useRef(null)
-  const continueIdempotencyKey = useRef(null)
+  const continueIdempotencyKey = useRef(
+    restoredAwaiting?.continue_idempotency_key || null
+  )
   const modalRef = useRef(null)
   const modalInputRef = useRef(null)
   const startButtonRef = useRef(null)
@@ -85,6 +141,38 @@ export default function Autonomous() {
     state.phase === 'awaiting' || state.phase === 'continuing'
   ) && Boolean(state.response?.user_question)
   const formLocked = ['running', 'awaiting', 'continuing'].includes(state.phase)
+
+  function persistCurrentAwaiting(
+    draft = askReply,
+    idempotencyKey = continueIdempotencyKey.current
+  ) {
+    const conversationId = lastConversationId.current
+    const userQuestion = state.response?.user_question
+    if (!conversationId || !userQuestion) return
+    writeAwaitingRecovery({
+      version: 1,
+      conversation_id: conversationId,
+      user_question: userQuestion,
+      draft,
+      request: state.request,
+      continue_idempotency_key: idempotencyKey,
+    })
+  }
+
+  useEffect(() => {
+    if (!dialogOpen) return
+    const conversationId = lastConversationId.current
+    const userQuestion = state.response?.user_question
+    if (!conversationId || !userQuestion) return
+    writeAwaitingRecovery({
+      version: 1,
+      conversation_id: conversationId,
+      user_question: userQuestion,
+      draft: askReply,
+      request: state.request,
+      continue_idempotency_key: continueIdempotencyKey.current,
+    })
+  }, [askReply, dialogOpen, state.phase, state.request, state.response?.user_question])
 
   useEffect(() => {
     if (!dialogOpen) return undefined
@@ -152,6 +240,14 @@ export default function Autonomous() {
     continueIdempotencyKey.current = null
     if (resp.awaiting_user_input) {
       lastConversationId.current = resp.conversation_id
+      writeAwaitingRecovery({
+        version: 1,
+        conversation_id: resp.conversation_id,
+        user_question: resp.user_question,
+        draft: '',
+        request: state.request,
+        continue_idempotency_key: null,
+      })
       setState(s => ({
         ...s,
         phase: 'awaiting',
@@ -161,6 +257,7 @@ export default function Autonomous() {
       }))
       setAskReply('')
     } else {
+      clearAwaitingRecovery()
       lastConversationId.current = null
       setState(s => ({
         ...s,
@@ -179,6 +276,7 @@ export default function Autonomous() {
     try {
       const idempotencyKey = startIdempotencyKey.current || createIdempotencyKey()
       startIdempotencyKey.current = idempotencyKey
+      clearAwaitingRecovery()
       setState(s => ({
         ...s,
         phase: 'running',
@@ -196,7 +294,10 @@ export default function Autonomous() {
       _handleResponse(resp)
     } catch (err) {
       const retryBlocked = isTerminalExecutionError(err)
-      if (retryBlocked) startIdempotencyKey.current = null
+      if (retryBlocked) {
+        startIdempotencyKey.current = null
+        clearAwaitingRecovery()
+      }
       setState(s => ({
         ...s,
         phase: 'error',
@@ -218,6 +319,7 @@ export default function Autonomous() {
     try {
       const idempotencyKey = continueIdempotencyKey.current || createIdempotencyKey()
       continueIdempotencyKey.current = idempotencyKey
+      persistCurrentAwaiting(userReply, idempotencyKey)
       setState(s => ({ ...s, phase: 'continuing', error: null }))
       const resp = await continueAutonomous({
         conversation_id: conversationId,
@@ -227,6 +329,7 @@ export default function Autonomous() {
       _handleResponse(resp)
     } catch (err) {
       if (err.status === 404 || isTerminalExecutionError(err)) {
+        clearAwaitingRecovery()
         continueIdempotencyKey.current = null
         lastConversationId.current = null
         setState(s => ({
@@ -247,6 +350,7 @@ export default function Autonomous() {
   }
 
   function handleReset() {
+    clearAwaitingRecovery()
     setState(initialState)
     setAskReply('')
     lastConversationId.current = null
@@ -460,7 +564,9 @@ export default function Autonomous() {
               value={askReply}
               onChange={e => {
                 continueIdempotencyKey.current = null
-                setAskReply(e.target.value)
+                const reply = e.target.value
+                setAskReply(reply)
+                persistCurrentAwaiting(reply, null)
               }}
               placeholder="输入你的回答..."
               aria-label="你的回答"

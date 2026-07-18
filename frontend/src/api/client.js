@@ -7,6 +7,37 @@
 
 const BASE_URL = import.meta.env.VITE_API_URL || '/api'
 
+export function createIdempotencyKey() {
+  const cryptoApi = globalThis.crypto
+  if (typeof cryptoApi?.randomUUID === 'function') {
+    return cryptoApi.randomUUID()
+  }
+  if (typeof cryptoApi?.getRandomValues !== 'function') {
+    throw new Error('当前浏览器无法生成安全请求标识，请升级浏览器后重试')
+  }
+
+  const bytes = cryptoApi.getRandomValues(new Uint8Array(16))
+  bytes[6] = (bytes[6] & 0x0f) | 0x40
+  bytes[8] = (bytes[8] & 0x3f) | 0x80
+  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0'))
+  return [
+    hex.slice(0, 4).join(''),
+    hex.slice(4, 6).join(''),
+    hex.slice(6, 8).join(''),
+    hex.slice(8, 10).join(''),
+    hex.slice(10, 16).join(''),
+  ].join('-')
+}
+
+export function isTerminalExecutionError(error) {
+  return error?.status === 410
+    || error?.code === 'side_effect_ambiguous'
+    || (
+      error?.code === 'idempotency_conflict'
+      && error.reason !== 'in_progress'
+    )
+}
+
 /**
  * 通用请求封装，自动处理错误
  */
@@ -73,11 +104,18 @@ export async function startSession({ document_id, description, count, difficulty
 }
 
 /** 提交单题答案 */
-export async function submitAnswer(sessionId, answer) {
+export async function submitAnswer(sessionId, {
+  answer,
+  question_index,
+  idempotency_key,
+}) {
   return request(`/session/${sessionId}/answer`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ answer }),
+    headers: {
+      'Content-Type': 'application/json',
+      ...(idempotency_key ? { 'Idempotency-Key': idempotency_key } : {}),
+    },
+    body: JSON.stringify({ answer, question_index }),
   })
 }
 
@@ -175,11 +213,19 @@ export async function startAdaptive({ user_id = 'default_user', document_id, goa
 }
 
 /** 提交本轮作答，推进闭环（批改 → agent 决策下一步） */
-export async function submitAdaptive({ adaptive_session_id, answers }) {
+export async function submitAdaptive({
+  adaptive_session_id,
+  answers,
+  turn,
+  idempotency_key,
+}) {
   return request('/agent/adaptive/submit', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ adaptive_session_id, answers }),
+    headers: {
+      'Content-Type': 'application/json',
+      ...(idempotency_key ? { 'Idempotency-Key': idempotency_key } : {}),
+    },
+    body: JSON.stringify({ adaptive_session_id, answers, turn }),
   })
 }
 

@@ -34,11 +34,13 @@ example configuration.
 - `ToolMetadata.permission` is descriptive metadata; it is not an authorization
   system.
 - Read-only and idempotent tools may retry automatically. Unknown and
-  non-idempotent tools do not. Autonomous and tool-chat clients may send an
-  `Idempotency-Key`; completed responses are replayed from a persistent receipt,
-  while a crash after a write starts remains a non-retryable conflict. The
-  receipt provides at-most-once replay protection, not a transaction spanning
-  the receipt and LangGraph memory store.
+  non-idempotent tools do not. Autonomous, quiz-answer, adaptive-submit, and
+  tool-chat clients may send an `Idempotency-Key`; completed responses are
+  replayed from a persistent receipt, while a crash after a write starts remains
+  a non-retryable conflict. Quiz question indexes and adaptive turn numbers
+  reject stale submissions. The receipt provides at-most-once replay
+  protection, not a transaction spanning the receipt and the affected state
+  store.
 - Receipts currently have no automatic expiry. This preserves fail-closed retry
   behavior, but operators must monitor storage and manually investigate stale
   `pending` receipts; adding a simple TTL would weaken at-most-once protection.
@@ -56,6 +58,11 @@ example configuration.
   according to the sensitivity of the uploaded learning material. Autonomous
   queries and replies are capped at 8,000 characters; user, document, and
   conversation identifiers also have bounded lengths before execution starts.
+- While an Autonomous HITL question is pending, the browser stores the minimal
+  recovery state in `sessionStorage`, including the bearer `conversation_id`,
+  the question, and the unsent draft reply. It is cleared on completion, reset,
+  or terminal failure, but remains available to scripts running in the same
+  origin and tab.
 - The standalone API currently has no trusted authentication subject. A
   `conversation_id` is therefore a high-entropy bearer capability, not an
   authorization boundary, and deployments must be treated as single-user or
@@ -66,6 +73,9 @@ example configuration.
   protection, not exactly-once execution: a process crash between transitions
   can leave a pending receipt or an abandoned claim that requires operator
   cleanup. `Idempotency-Key` also remains optional.
+- Quiz and adaptive sessions remain process-local. A backend restart invalidates
+  them even when their idempotency receipts are durable, so clients must start a
+  new session after a 404 or terminal conflict.
 - A resumed LangGraph node may replay earlier code before an `interrupt`.
   The interrupt-capable assistant therefore exposes and dispatches only tools
   declared read-only or idempotent; unknown MCP tools and profile writes are

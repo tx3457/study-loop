@@ -1,6 +1,15 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import DocumentPrerequisite from '../components/DocumentPrerequisite'
-import { getDocuments, startSession, submitAnswer, getSessionResult, gradeSession, generateReport } from '../api/client'
+import {
+  createIdempotencyKey,
+  generateReport,
+  getDocuments,
+  getSessionResult,
+  gradeSession,
+  isTerminalExecutionError,
+  startSession,
+  submitAnswer,
+} from '../api/client'
 import './Quiz.css'
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -20,6 +29,41 @@ const TYPE_OPTIONS = [
   { value: 'true_false',   label: '判断题' },
   { value: 'short_answer', label: '简答题' },
 ]
+
+const LABELED_OPTION_PATTERN = /^([A-Za-z])(?:\s*[.．、:：)）]\s*|\s+)(.+)$/u
+
+function normalizeText(value) {
+  return typeof value === 'string'
+    ? value.trim().replace(/\s+/gu, ' ').toLocaleLowerCase()
+    : ''
+}
+
+function splitOption(value) {
+  const raw = typeof value === 'string' ? value.trim() : ''
+  const match = raw.match(LABELED_OPTION_PATTERN)
+  return {
+    value: normalizeText(raw),
+    label: match?.[1].toUpperCase() || null,
+    text: normalizeText(match?.[2] || raw),
+  }
+}
+
+function isCorrectOption(option, correctAnswer) {
+  const candidate = splitOption(option)
+  const expected = splitOption(correctAnswer)
+  if (!expected.value) return false
+  if (candidate.value === expected.value) return true
+  if (candidate.label && /^[A-Za-z]$/.test(expected.value)) {
+    return candidate.label === expected.value.toUpperCase()
+  }
+  if (candidate.label && candidate.text === expected.value) return true
+  return Boolean(
+    candidate.label
+    && expected.label
+    && candidate.label === expected.label
+    && candidate.text === expected.text
+  )
+}
 
 export default function Quiz() {
   /* ── 状态 ──────────────────────────────────────────────────────── */
@@ -52,6 +96,7 @@ export default function Quiz() {
   const [selectedAnswer, setSelectedAnswer] = useState('')
   const [feedback, setFeedback] = useState(null)
   const [submitting, setSubmitting] = useState(false)
+  const answerIdempotencyKey = useRef(null)
 
   // 结果
   const [result, setResult] = useState(null)
@@ -96,6 +141,7 @@ export default function Quiz() {
   /* ── 开始答题 ──────────────────────────────────────────────────── */
   const handleStart = async () => {
     if (!config.document_id) return
+    answerIdempotencyKey.current = null
     setPhase('loading')
     setError(null)
 
@@ -118,13 +164,27 @@ export default function Quiz() {
   /* ── 提交答案 ──────────────────────────────────────────────────── */
   const handleSubmit = async () => {
     if (!selectedAnswer || submitting) return
+    const answer = selectedAnswer
+    const questionIndex = currentIdx
     setSubmitting(true)
+    setError(null)
 
     try {
-      const fb = await submitAnswer(sessionId, selectedAnswer)
+      const idempotencyKey = answerIdempotencyKey.current || createIdempotencyKey()
+      answerIdempotencyKey.current = idempotencyKey
+      const fb = await submitAnswer(sessionId, {
+        answer,
+        question_index: questionIndex,
+        idempotency_key: idempotencyKey,
+      })
+      answerIdempotencyKey.current = null
       setFeedback(fb)
       setPhase('feedback')
     } catch (err) {
+      const staleState = err.status === 409 && !err.code
+      if (err.status === 404 || staleState || isTerminalExecutionError(err)) {
+        clearSession()
+      }
       setError(err.message)
     } finally {
       setSubmitting(false)
@@ -143,6 +203,7 @@ export default function Quiz() {
         setError(err.message)
       }
     } else {
+      answerIdempotencyKey.current = null
       setCurrentIdx(idx => idx + 1)
       setSelectedAnswer('')
       setFeedback(null)
@@ -150,15 +211,33 @@ export default function Quiz() {
     }
   }
 
-  /* ── 重新开始 ──────────────────────────────────────────────────── */
-  const handleRestart = () => {
+  function clearSession() {
     stopTimer()
+    answerIdempotencyKey.current = null
     setPhase('setup')
     setSessionId(null)
     setQuestions([])
+    setCurrentIdx(0)
+    setSelectedAnswer('')
     setFeedback(null)
+    setSubmitting(false)
     setResult(null)
+    setGradingReport(null)
+    setLearningReport(null)
+    setGrading(false)
+    setReporting(false)
     setElapsed(0)
+  }
+
+  /* ── 重新开始 ──────────────────────────────────────────────────── */
+  const handleRestart = () => {
+    clearSession()
+    setError(null)
+  }
+
+  const handleAnswerChange = (answer) => {
+    if (answer !== selectedAnswer) answerIdempotencyKey.current = null
+    setSelectedAnswer(answer)
   }
 
   /* ── AI 批改 ─────────────────────────────────────────────────────── */
@@ -379,9 +458,10 @@ export default function Quiz() {
                 {currentQ.options.map((opt, i) => {
                   const letter = String.fromCharCode(65 + i)
                   const isSelected = selectedAnswer === opt
+                  const isCorrect = isCorrectOption(opt, feedback?.correct_answer)
                   let optClass = 'option-item'
                   if (phase === 'feedback') {
-                    if (opt === feedback?.correct_answer) optClass += ' correct'
+                    if (isCorrect) optClass += ' correct'
                     else if (isSelected && !feedback?.correct) optClass += ' wrong'
                     else optClass += ' disabled'
                   } else if (isSelected) {
@@ -394,15 +474,15 @@ export default function Quiz() {
                       key={i}
                       className={optClass}
                       aria-pressed={isSelected}
-                      onClick={() => phase === 'answering' && setSelectedAnswer(opt)}
-                      disabled={phase === 'feedback'}
+                      onClick={() => phase === 'answering' && handleAnswerChange(opt)}
+                      disabled={phase === 'feedback' || submitting}
                     >
                       <span className="option-letter">{letter}</span>
                       <span className="option-text">{opt}</span>
-                      {phase === 'feedback' && opt === feedback?.correct_answer && (
+                      {phase === 'feedback' && isCorrect && (
                         <span className="option-check">&#10003;</span>
                       )}
-                      {phase === 'feedback' && isSelected && !feedback?.correct && opt !== feedback?.correct_answer && (
+                      {phase === 'feedback' && isSelected && !feedback?.correct && !isCorrect && (
                         <span className="option-cross">&#10007;</span>
                       )}
                     </button>
@@ -418,8 +498,8 @@ export default function Quiz() {
                 aria-labelledby={`quiz-question-${currentIdx}`}
                 placeholder="请输入你的答案..."
                 value={selectedAnswer}
-                onChange={e => setSelectedAnswer(e.target.value)}
-                disabled={phase === 'feedback'}
+                onChange={e => handleAnswerChange(e.target.value)}
+                disabled={phase === 'feedback' || submitting}
                 rows={3}
               />
             )}
