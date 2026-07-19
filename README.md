@@ -84,8 +84,10 @@ Web 前端会为 Autonomous 请求、单题答案和 Adaptive 单轮提交生成
 `DATABASE_URL` 时，重试 receipt 和人工确认暂停快照保存在 PostgreSQL；本地
 无数据库时，两者默认共用 `IDEMPOTENCY_DB_PATH` 指定的 SQLite 文件。暂停快照
 支持进程重启和多 worker 原子续跑，默认保留 1 小时。相关容量和 TTL 配置见
-[`.env.example`](.env.example)。Quiz 与 Adaptive 会话本身仍保存在进程内存中，
-后端重启后需要重新开始。
+[`.env.example`](.env.example)。多 worker 首次初始化 PostgreSQL learner memory
+时，其他 worker 最多等待 `MEMORY_STORE_SETUP_LOCK_TIMEOUT_SECONDS`（默认 300
+秒）；初始化连接需直连 PostgreSQL 或使用 session pooling。Quiz 与 Adaptive
+会话本身仍保存在进程内存中，后端重启后需要重新开始。
 
 Structured Output 和 Embeddings 的专用 key 与地址必须成对配置；两者同时留空时才会整组回退到 `LLM_*`。完整配置见 [`.env.example`](.env.example)。
 
@@ -131,11 +133,12 @@ python scripts/check_provider_capabilities.py
 # 后端测试
 python -m pytest -q
 
-# 使用临时 PostgreSQL 时会额外执行 receipt 与暂停会话的跨连接测试
+# 使用临时 PostgreSQL 时会额外执行 receipt、暂停会话与 memory 冷启动测试
 TEST_DATABASE_URL=postgresql://user:password@127.0.0.1:5432/studyloop_test \
   python -m pytest -q \
     tests/test_idempotency_postgres.py \
-    tests/test_autonomous_sessions_postgres.py
+    tests/test_autonomous_sessions_postgres.py \
+    tests/test_memory_postgres.py
 
 # Agent 演示与 BM25 评测校验
 python scripts/demo_react_tutor_agent.py
