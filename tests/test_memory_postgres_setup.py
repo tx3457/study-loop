@@ -1,7 +1,9 @@
+import os
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from services.memory import (
+    PostgresStoreSetupLockTimeoutError,
     _POSTGRES_STORE_SETUP_LOCK_ID,
     _enter_postgres_store,
     _setup_postgres_store,
@@ -9,6 +11,50 @@ from services.memory import (
 
 
 class TestPostgresMemorySetup(unittest.TestCase):
+    def test_busy_lock_times_out_and_closes_connection(self):
+        connection = MagicMock()
+        connection.__enter__.return_value = connection
+        connection.execute.return_value.fetchone.return_value = (False,)
+        store = MagicMock()
+
+        with (
+            patch.dict(
+                os.environ,
+                {"MEMORY_STORE_SETUP_LOCK_TIMEOUT_SECONDS": "1"},
+            ),
+            patch("psycopg.connect", return_value=connection),
+            patch("services.memory.time.monotonic", side_effect=(10.0, 10.4, 11.0)),
+            patch("services.memory.time.sleep") as sleep,
+        ):
+            with self.assertRaisesRegex(
+                PostgresStoreSetupLockTimeoutError,
+                "Timed out after 1 second waiting for PostgreSQL learner-memory schema lock",
+            ) as raised:
+                _setup_postgres_store(store, "postgresql://memory-test")
+
+        sleep.assert_called_once_with(0.05)
+        self.assertNotIn("memory-test", str(raised.exception))
+        store.setup.assert_not_called()
+        connection.__exit__.assert_called_once()
+
+    def test_invalid_lock_timeout_configuration_fails_before_connecting(self):
+        for value in ("", "0", "-1", "nan", "inf", "not-a-number"):
+            with self.subTest(value=value):
+                with (
+                    patch.dict(
+                        os.environ,
+                        {"MEMORY_STORE_SETUP_LOCK_TIMEOUT_SECONDS": value},
+                    ),
+                    patch("psycopg.connect") as connect,
+                ):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "MEMORY_STORE_SETUP_LOCK_TIMEOUT_SECONDS must be a positive number",
+                    ):
+                        _setup_postgres_store(MagicMock(), "postgresql://memory-test")
+
+                connect.assert_not_called()
+
     def test_store_context_closes_when_initialization_fails(self):
         error = RuntimeError("migration failed")
         events = []

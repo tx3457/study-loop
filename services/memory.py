@@ -52,16 +52,43 @@ WEAK_POINTS_MAX = 20
 # creates indexes concurrently, so the cross-worker lock must be session-level
 # and held by a separate autocommit connection for the full migration call.
 _POSTGRES_STORE_SETUP_LOCK_ID = 0x53545544594D454D
+_POSTGRES_STORE_SETUP_LOCK_TIMEOUT_ENV = "MEMORY_STORE_SETUP_LOCK_TIMEOUT_SECONDS"
+_POSTGRES_STORE_SETUP_LOCK_TIMEOUT_DEFAULT_SECONDS = 300.0
+_POSTGRES_STORE_SETUP_LOCK_POLL_SECONDS = 0.05
+
+
+class PostgresStoreSetupLockTimeoutError(TimeoutError):
+    """Another worker did not finish learner-memory schema setup in time."""
+
+
+def _postgres_store_setup_lock_timeout_seconds() -> float:
+    source = os.getenv(
+        _POSTGRES_STORE_SETUP_LOCK_TIMEOUT_ENV,
+        str(_POSTGRES_STORE_SETUP_LOCK_TIMEOUT_DEFAULT_SECONDS),
+    )
+    try:
+        value = float(source)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{_POSTGRES_STORE_SETUP_LOCK_TIMEOUT_ENV} must be a positive number"
+        ) from None
+    if not 0 < value < float("inf"):
+        raise ValueError(
+            f"{_POSTGRES_STORE_SETUP_LOCK_TIMEOUT_ENV} must be a positive number"
+        )
+    return value
 
 
 def _setup_postgres_store(store, database_url: str) -> None:
     import psycopg
 
+    timeout_seconds = _postgres_store_setup_lock_timeout_seconds()
     # Closing this dedicated connection releases the session-level advisory
     # lock on both success and failure. Non-blocking attempts are required:
     # a blocking advisory-lock query keeps a transaction active while waiting,
     # which makes CREATE INDEX CONCURRENTLY wait for that transaction.
     with psycopg.connect(database_url, autocommit=True) as connection:
+        deadline = time.monotonic() + timeout_seconds
         while True:
             acquired = connection.execute(
                 "SELECT pg_try_advisory_lock(%s)",
@@ -69,7 +96,17 @@ def _setup_postgres_store(store, database_url: str) -> None:
             ).fetchone()
             if acquired and acquired[0]:
                 break
-            time.sleep(0.05)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                unit = "second" if timeout_seconds == 1 else "seconds"
+                raise PostgresStoreSetupLockTimeoutError(
+                    f"Timed out after {timeout_seconds:g} {unit} waiting for "
+                    "PostgreSQL learner-memory schema lock; another worker may "
+                    "still be initializing it. Increase "
+                    f"{_POSTGRES_STORE_SETUP_LOCK_TIMEOUT_ENV} or initialize "
+                    "the store before starting workers."
+                )
+            time.sleep(min(_POSTGRES_STORE_SETUP_LOCK_POLL_SECONDS, remaining))
         store.setup()
 
 
