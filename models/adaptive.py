@@ -1,10 +1,8 @@
 """
-自适应学习闭环数据模型(Direction A)
+自适应学习闭环数据模型
 
-NextStepDecision 是这个 feature 的灵魂:由 LLM 推理产出"下一步该教什么",
-取代原来 start_session 里写死的 ZPD 公式(difficulty = mastery + 0.15)。
-区别在于——公式只会"线性加难度",而 agent 能根据具体错题/知识盲点选择
-"补薄弱点 / 升难度 / 同水平巩固 / 转学习路径 / 结束",并给出可解释的教学理由。
+NextStepDecision 由 LLM 根据具体错题和知识盲点产出下一步教学动作：
+补薄弱点、升难度、同水平巩固、转学习路径或结束，并给出可解释理由。
 """
 from pydantic import BaseModel, Field
 
@@ -30,7 +28,7 @@ class NextStepDecision(BaseModel):
 
 
 class AdaptiveTurn(BaseModel):
-    """单轮记录,串起来就是学生的难度/掌握度轨迹(面试可视化用)。"""
+    """单轮记录，串联后形成学生的难度与掌握度轨迹。"""
     turn: int
     action: str                                 # 触发本轮的 agent 决策动作
     topic: str

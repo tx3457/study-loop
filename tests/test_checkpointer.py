@@ -1,5 +1,5 @@
 """
-集成测试:LangGraph Durable Checkpointer(借鉴 langgraph checkpoint-sqlite/aio.py:509)
+集成测试：LangGraph Durable Checkpointer
 
 不依赖 StudyLoop 的真实 LLM Agent，构造一个纯计算的最小 graph，验证：
 1. checkpointer 写入后 sqlite 文件真实存在
@@ -7,7 +7,7 @@
 3. compile_with_checkpointer 出来的 graph 不破坏原有 orchestrator 单例
 
 跑法:
-  /path/to/python test/test_checkpointer.py -v
+  python -m pytest tests/test_checkpointer.py -q
 """
 import asyncio
 import os

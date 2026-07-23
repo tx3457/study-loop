@@ -1,5 +1,5 @@
 """
-Tutor oneshot 模式单测（Phase 3 里程碑一）
+Tutor oneshot 模式单测
 
 覆盖：
   1) _oneshot_next 纯规则单跳：三 action（quiz/grade/plan）各单跳到对应 worker，

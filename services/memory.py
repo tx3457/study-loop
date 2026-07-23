@@ -1,7 +1,7 @@
 """
-Memory Banks（Phase 8 P3 升级，借鉴 NovelClaw 的多 bank 设计）
+Memory Banks
 
-原来 2 个 namespace（profile + sessions 各一坨）→ 6 个语义 bank：
+数据按 6 个语义 bank 存储：
 
   Semantic Layer（长期画像）:
     - preferences    用户偏好（题型、难度倾向、学习风格）
@@ -22,10 +22,10 @@ API 分两层：
   - write_episodic_memory / update_semantic_memory 内部分发到对应 bank
   - 首次读旧 profile 命名空间时自动迁移到新 bank（一次性）
 
-为什么细分（面试讲点）：
+分 bank 的原因：
   1. 调用方按需取：adapt_reader 只读 preferences+mastery+weak_points，不必拉一坨 profile
   2. 写入责任清晰：error 单独成 bank，方便后续做错题本 / 间隔重复 / 知识点聚类
-  3. decision_log 形成可审计的 reasoning trace，复用 P1-2 audit 的精神到记忆层
+  3. decision_log 形成可审计的 reasoning trace
 """
 
 import logging
@@ -210,13 +210,13 @@ async def update_mastery(user_id: str, document_id: str, current_score: float) -
 async def get_weak_points(user_id: str, document_id: str | None = None) -> list[str]:
     """返回薄弱点字符串列表（最新在前）。
 
-    document_id=None → 返回全部文档的薄弱点（向后兼容，旧调用方语义不变）。
+    document_id=None → 返回全部文档的薄弱点（兼容未指定文档范围的调用）。
     document_id 给定 → 只返回「该文档」+「无文档标记的 legacy 通用」薄弱点。
 
-    为什么按文档隔离（2026-06-03 跨学科改进）：
-      weak_points 原本全局一锅。用户上传医学/数学/影视等不同领域文档时，
-      出某文档题会拿到别领域的薄弱点，污染 sufficiency 的 coverage 判定，
-      还互相挤占 WEAK_POINTS_MAX 上限。改为 per-document，与 mastery 对齐。
+    为什么按文档隔离：
+      用户上传医学/数学/影视等不同领域文档时，全局 weak_points 会把别领域
+      的薄弱点带入当前文档，污染 sufficiency 的 coverage 判定，并互相挤占
+      WEAK_POINTS_MAX 上限。per-document 隔离与 mastery 的粒度一致。
     """
     state = await read_bank_state(user_id, "weak_points") or {}
     points = state.get("points", [])
@@ -230,7 +230,7 @@ async def append_weak_points(user_id: str, new_points: list[str],
                              document_id: str | None = None) -> None:
     """去重追加薄弱点，新条目放最前。
 
-    2026-06-03 跨学科改进——按 document_id 分桶：
+    按 document_id 分桶：
       - 去重在 (document_id, point) 维度：不同文档的同名薄弱点各留一份
       - WEAK_POINTS_MAX 上限按「每文档」算，避免医学薄弱点挤占数学的额度
     """
@@ -257,10 +257,10 @@ async def get_prioritized_weak_points(user_id: str, document_id: str | None = No
                                       limit: int = 10) -> list[str]:
     """按 recency（ts 倒序）加权排序薄弱点，近期错的优先召回（importance/decay 思想）。
 
-    与 get_weak_points 的区别（不动后者，保持旧调用方语义）：
+    与 get_weak_points 的区别（后者继续保持原有调用语义）：
       - 显式按时间戳倒序，越近期的盲点越靠前（记忆"时间衰减"——老盲点权重低）
       - 截到 limit，供召回/画像卡用（避免一次塞太多薄弱点稀释信号）
-    借鉴 hermes-agent holographic 的 trust/recency 排序思路，但用零成本的时间近度规则。
+    使用零成本的时间近度规则。
     """
     state = await read_bank_state(user_id, "weak_points") or {}
     points = state.get("points", [])
@@ -298,16 +298,16 @@ async def list_errors(user_id: str, document_id: str | None = None, limit: int =
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 旧 API（向后兼容）—— 内部委托到新 bank
+# 兼容 API：内部委托到语义 bank
 # ═══════════════════════════════════════════════════════════════════════════
 async def _maybe_migrate_legacy(user_id: str) -> None:
-    """旧版 profile / sessions 命名空间数据迁移到新 bank。仅在新 bank 为空时执行。"""
+    """将 legacy profile / sessions 命名空间迁移到语义 bank，仅在目标为空时执行。"""
     # 已有任何新 bank 数据则跳过
     for bank in SEMANTIC_BANKS + EPISODIC_BANKS:
         if store.get(_bank_ns(user_id, bank), "current") or store.search(_bank_ns(user_id, bank)):
             return
 
-    # 1. 旧 profile → mastery + weak_points + preferences
+    # 1. legacy profile → mastery + weak_points + preferences
     legacy_profile = store.get(("users", user_id, "profile"), "profile")
     if legacy_profile and legacy_profile.value:
         v = legacy_profile.value
@@ -323,14 +323,14 @@ async def _maybe_migrate_legacy(user_id: str) -> None:
                 "last_updated": ts,
             })
 
-    # 2. 旧 sessions → session_briefs（按 key 透传）
+    # 2. legacy sessions → session_briefs（按 key 透传）
     legacy_sessions = store.search(("users", user_id, "sessions"))
     for r in legacy_sessions:
         store.put(_bank_ns(user_id, "session_briefs"), r.key, r.value)
 
 
 async def get_user_profile(user_id: str) -> dict | None:
-    """旧 API：聚合 preferences + mastery + weak_points + session count，重建旧字段名。"""
+    """兼容 API：聚合 preferences + mastery + weak_points + session count。"""
     await _maybe_migrate_legacy(user_id)
 
     prefs = await get_preferences(user_id)
@@ -353,7 +353,7 @@ async def get_user_profile(user_id: str) -> dict | None:
 
 
 async def get_user_sessions(user_id: str) -> list[dict]:
-    """旧 API：从 session_briefs bank 读，按日期倒序。"""
+    """兼容 API：从 session_briefs bank 读取，按日期倒序。"""
     await _maybe_migrate_legacy(user_id)
     items = await list_bank_events(user_id, "session_briefs", limit=200)
     items.sort(key=lambda x: x.get("date", x.get("timestamp", "")), reverse=True)
@@ -361,7 +361,7 @@ async def get_user_sessions(user_id: str) -> list[dict]:
 
 
 async def write_episodic_memory(user_id: str, report: GradingReport, document_id: str) -> None:
-    """旧 API：拆到 session_briefs（聚合摘要）+ error_log（每错题单条）。"""
+    """兼容 API：写入 session_briefs（聚合摘要）+ error_log（每错题单条）。"""
     knowledge_gaps = [g.knowledge_gap for g in report.grades
                       if not g.is_correct and g.knowledge_gap]
     await append_session_brief(user_id, {
@@ -389,7 +389,7 @@ async def write_episodic_memory(user_id: str, report: GradingReport, document_id
 
 
 async def update_semantic_memory(user_id: str, report: GradingReport, document_id: str) -> None:
-    """旧 API：更新 mastery（EMA）+ 追加 weak_points。"""
+    """兼容 API：更新 mastery（EMA）+ 追加 weak_points。"""
     await update_mastery(user_id, document_id, report.score)
     new_gaps = [g.knowledge_gap for g in report.grades
                 if not g.is_correct and g.knowledge_gap]
@@ -400,7 +400,7 @@ async def update_semantic_memory(user_id: str, report: GradingReport, document_i
 async def consolidate_session_extras(user_id: str, report: GradingReport, document_id: str,
                                      history: list[dict] | None = None,
                                      question_type: str | None = None) -> dict:
-    """会话结束的增量 consolidation（adapt_writer 之外）——零 LLM，借鉴 claw-code 启发式压缩。
+    """会话结束的增量 consolidation（adapt_writer 之外），全程零 LLM。
 
     与 adapt_writer 分工（避免重复写）：
       adapt_writer 已写 mastery(EMA) / weak_points / session_briefs / error_log / decision_log；

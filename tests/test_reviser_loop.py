@@ -1,16 +1,16 @@
 """
-集成测试:reviewer↔reviser 循环子图(借鉴 gpt-researcher editor.py:138-142)
+集成测试：reviewer↔reviser 循环子图
 
 不消耗 LLM API,验证图拓扑正确 + 循环路由契约:
 1. reviser 节点出现在编译后 graph 的节点列表
 2. _should_revise 路由表 critic 触发时 REVISER_ENABLED=true → 'reviser'
-3. _should_revise REVISER_ENABLED=false → 'quiz_agent'(回退老路径)
+3. _should_revise REVISER_ENABLED=false → 'quiz_agent' 整轮重出
 4. _should_revise critic 通过时 → 'output_guard'
 5. _should_revise revision_count 到上限 → 'output_guard'(不死循环)
 6. reviser_agent 节点函数:LLM 失败时 fallback 返回原 quiz
 
 跑法:
-  /path/to/python test/test_reviser_loop.py -v
+  python -m pytest tests/test_reviser_loop.py -q
 """
 import os
 import sys

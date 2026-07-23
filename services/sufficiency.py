@@ -1,5 +1,5 @@
 """
-检索充分性判定 + Query 改写（Phase 8 升级 P1-1）
+检索充分性判定 + Query 改写
 
 Pre-generation 质量门：retrieve 之后、generate 之前判断检索结果是否够生成高质题。
 
@@ -15,7 +15,7 @@ Pre-generation 质量门：retrieve 之后、generate 之前判断检索结果�
   - OR 太松：只要"题数够"就过，但内容可能完全跑题。
   - AND 严格但安全：任一硬信号差就触发改写/降级，宁可降级出 2 题，不出 5 题幻觉。
 
-为什么覆盖率从硬门降为软信号（2026-06-03）：
+为什么覆盖率作为软信号：
   - 覆盖率拿的是该文档的历史 weak_points，未按本次请求的目标方向 scope。
   - 学生在同一文档探索「新方向」时，新方向与历史薄弱点无关，覆盖率必然偏低；
     若硬 gating 会把合法请求误判为证据不足并白白降级（减题、降难度）。
@@ -24,19 +24,19 @@ Pre-generation 质量门：retrieve 之后、generate 之前判断检索结果�
 为什么不用 LLM judge：
   - 已经有 post-generation 的 critic_agent 做 LLM 评估（双门设计，前置门 heuristic 后置门 LLM）
   - 这里再调 LLM 重复且贵
-  - 80% 的"不充分"情况靠 heuristic 就能识别
+  - heuristic 可在不增加模型调用的情况下拦截明显不充分的结果
 
 Rewrite Query：LLM 把过窄/口语化 query 改写得更宽泛，加同义词、去具体限定。
 """
 import logging
 from typing import Literal
 
-from services.llm import _client, model as _model
+from services.llm import _client, llm_chat, model as _model
 
 logger = logging.getLogger(__name__)
 
 
-# ── 配置常量（写成模块级，便于面试讲点 + chunk_size sweep 调）─────────────────
+# ── 配置常量（便于通过 chunk_size sweep 调优）──────────────────────────────
 MIN_CHUNKS = 2                  # 数量信号：少于 2 个 chunk 一律不充分
 DIVERSITY_SAMPLE_CHARS = 30     # 多样性信号：取每 chunk 前 N 字判唯一
 COVERAGE_THRESHOLD = 0.5        # 覆盖信号：weak_points 命中率门槛
@@ -105,13 +105,14 @@ async def rewrite_query(
         user_msg += f"\n用户薄弱点（改写时可参考）：{wp_str}"
 
     try:
-        resp = await _client.chat.completions.create(
-            model=_model,
-            max_tokens=128,
-            messages=[
+        resp = await llm_chat(
+            [
                 {"role": "system", "content": _REWRITE_SYSTEM},
                 {"role": "user", "content": user_msg},
             ],
+            client=_client,
+            model=_model,
+            max_tokens=128,
         )
         rewritten = (resp.choices[0].message.content or "").strip()
         # 简单清洗：去引号、去标点尾巴

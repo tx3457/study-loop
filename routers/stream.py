@@ -1,5 +1,5 @@
 """
-Agent 流式端点（Phase 4 Day 18）
+Agent 流式端点
 
 POST /agent/stream：SSE 流式响应，实时推送多 Agent 执行进度。
 
@@ -24,7 +24,7 @@ Agent 流水线是单向的，选 SSE 更简单，不需要额外依赖。
 
 注：Token 级别流（打字机效果）需要将 LLM 替换为 LangChain ChatOpenAI wrapper，
     这样 astream_events 能捕获 on_chat_model_stream 事件并 yield 每个 token。
-    当前项目使用原生 AsyncOpenAI，只支持节点级别进度推送，已足够面试演示。
+    当前项目使用原生 AsyncOpenAI，只支持节点级别进度推送。
 """
 import json
 import logging

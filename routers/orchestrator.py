@@ -1,5 +1,5 @@
 """
-Orchestrator 路由（Phase 4 Day 15）
+Orchestrator 路由
 
 POST /agent/run  →  根据 action 路由到对应 Agent 流水线：
   action="quiz"  → AdaptAgent(读画像) → QuizAgent(检索+出题+审核)

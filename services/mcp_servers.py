@@ -1,6 +1,5 @@
 """
-Live MCP server 接入（灰度）——把「MCP 只做了 echo 测试、没接真实 server」补成
-「接入真实 MCP live server，跑通端到端工具调用」。
+Live MCP server 接入（灰度）
 
 接入 duckduckgo-mcp-server（uvx 启动，stdio transport，无需 API key）：
   - search        ：DuckDuckGo 联网搜索
@@ -12,7 +11,7 @@ unknown MCP 默认不会进入该路径。
 
 灰度：MCP_LIVE_ENABLED=true 才连（默认 false）；连不上 fail-soft 不阻断启动（降级回无联网）。
 守底线：出题（quiz_agent）走 search_document 检索本地文档库，不碰这些联网工具；
-       出题证据仍只来自已建库材料，Faithfulness 卖点不受污染。
+       出题证据仍只来自已建库材料，保持 faithfulness 边界。
 
 依赖：本机需 uv（uvx）。首次连接时 uvx 自动从 PyPI 拉 duckduckgo-mcp-server。
      UVX_PATH 可指定 uvx 绝对路径（systemd/docker 下 PATH 可能不含 ~/.local/bin）。

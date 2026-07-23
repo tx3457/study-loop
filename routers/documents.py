@@ -1,8 +1,7 @@
 """
-文档上传 / 列表 / 删除（Phase 8 升级：接入多格式 parser + AdaptiveChunker）
+文档上传 / 列表 / 删除
 
-升级前：只支持 utf-8 文本，content.decode("utf-8")，PDF 上传会 UnicodeDecodeError。
-升级后：parser 自动识别 .pdf/.docx/.txt/.md/图片(OCR)，chunker 自适应切分。
+parser 自动识别 .pdf/.docx/.txt/.md/图片(OCR)，chunker 自适应切分。
 """
 
 import os

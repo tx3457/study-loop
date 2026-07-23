@@ -1,5 +1,5 @@
 """
-单测:MCP 客户端 + ToolRegistry 桥接(借鉴 letta/services/mcp/base_client.py)
+单测：MCP 客户端 + ToolRegistry 桥接
 
 不连真实 MCP server(无外部依赖),用 mock ClientSession 验证:
 1. list_tools 返回 server.list_tools() 的 tools 字段
@@ -9,7 +9,7 @@
 5. 闭包陷阱:多个 tool 注册后,各自 handler 调用各自对应的 MCP tool name
 
 跑法:
-  /path/to/python test/test_mcp_client.py -v
+  python -m pytest tests/test_mcp_client.py -q
 """
 import asyncio
 import sys

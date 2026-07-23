@@ -1,7 +1,7 @@
-"""orchestrator 入口路由 _route 单测（2026-06-03 补测试网）。
+"""orchestrator 入口路由 _route 单测。
 
 _route 是整个 orchestrator 最核心的分叉点（按 action 字段确定性硬分流到三条流水线）。
-确定性规则、零 mock。面试「入口是 LLM 决策还是规则」可用此测试佐证「100% 确定性」。
+使用确定性规则，测试无需 mock。
 """
 import unittest
 

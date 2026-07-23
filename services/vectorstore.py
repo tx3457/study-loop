@@ -9,7 +9,11 @@ from pathlib import Path
 from dotenv import load_dotenv
 import asyncio
 from chromadb.errors import NotFoundError
-from services.provider_config import build_managed_async_openai, load_provider_configs
+from services.provider_config import (
+    build_managed_async_openai,
+    load_provider_configs,
+    run_with_provider_deadline,
+)
 from services.retry import with_retry
 from services.tracing import traceable
 from services.reranker import RerankerUnavailable, rerank_docs, reranker_enabled
@@ -91,14 +95,15 @@ async def ensure_document_available(document_id: str) -> None:
 async def _embed(texts: list[str]):
     """embedding 统一入口：接 with_retry（厂商偶发连接抖动/超时 → 指数退避重试）。
 
-    此前 3 处 embeddings.create 裸调用是 resilience 链的盲区——LLM 调用全有
-    retry，embedding 一抖整条 RAG 链直接 500。
+    所有 embedding 调用通过同一重试与超时策略执行。
     """
-    return await with_retry(
-        lambda: client.embeddings.create(model=embedding_model, input=texts),
-        max_retries=3,
-        base_delay=1.0,
-        timeout=30,
+    return await run_with_provider_deadline(
+        lambda: with_retry(
+            lambda: client.embeddings.create(model=embedding_model, input=texts),
+            max_retries=3,
+            base_delay=1.0,
+            timeout=30,
+        )
     )
 
 
@@ -172,7 +177,7 @@ async def _run_blocking_to_completion(func, /, *args, **kwargs):
 
 
 async def deal_document(document_id: str, filename: str, chunks: list[str]):
-    # 同名重传不能继续用 add：Chroma 会忽略重复 id，导致接口成功但正文仍是旧版本。
+    # 同名重传不能继续用 add：Chroma 会忽略重复 id，导致接口成功但正文仍未更新。
     storage_id = _storage_document_id(document_id)
     await _ensure_document_slot_available(document_id)
 
@@ -306,7 +311,7 @@ async def hybrid_query_document(
     """
     Hybrid 检索：向量 + BM25 → RRF 融合 → Cross-Encoder 精排。
 
-    两阶段检索(借鉴 kotaemon rerankings/cohere.py:35 工业实践):
+    两阶段检索：
       召回阶段:vec + BM25,RRF 取 top n_results * 3(给精排足够候选)
       精排阶段:CrossEncoder 真正读 (query, doc) 对打分,取 top n_results
 
@@ -386,7 +391,7 @@ async def retrieve_with_rewrite(
 ) -> dict:
     """生产检索入口：按 env 决定是否做 HyDE / Multi-query 改写，再 hybrid 检索 + RRF 合并。
 
-    组合矩阵（与 test/run_eval_v3_phase9.py 同一套逻辑，保证生产 == 评测）：
+    组合矩阵：
       Multi-query 关 + HyDE 关 → 直接 hybrid(query)
       Multi-query 开 + HyDE 关 → N 个变体各 hybrid → RRF 合并
       Multi-query 关 + HyDE 开 → hybrid(HyDE 改写后的假设答案)
@@ -394,9 +399,9 @@ async def retrieve_with_rewrite(
 
     env 开关见 services/query_rewriter.py：
       QUERY_REWRITE_ENABLED（总开关）/ HYDE_ENABLED / MULTIQUERY_ENABLED / MULTIQUERY_N
-      全关时行为与旧版 hybrid_query_document 完全一致（零行为变化）。
+      全关时直接调用 hybrid_query_document。
 
-    生产加固（相对评测版）：
+    健壮性处理：
       ① query 去重——HyDE/multi-query 改写失败会 fallback 回原 query，可能产生重复，去重避免重复检索与 RRF 偏置
       ② 全失败兜底——所有改写后的子查询都检索失败时，退回单 query hybrid，绝不返回空 chunks 饿死出题
     """
@@ -491,7 +496,7 @@ async def get_all_document():
                     )
             continue
 
-        # 升级前的 embedding ghost 没有 metadata 且 count=0：隐藏并迁移清理。
+        # 没有 metadata 且 count=0 的 embedding ghost：隐藏并迁移清理。
         if status != "indexed" and await asyncio.to_thread(collection.count) == 0:
             try:
                 await asyncio.to_thread(

@@ -1,8 +1,7 @@
-"""input_guard / output_guard 纯校验函数单测（2026-06-03 补测试网）。
+"""input_guard / output_guard 纯校验函数单测。
 
 覆盖 fail-fast 输入校验与输出兜底校验。纯函数、零 mock。
-注：output_guard 的「题数严格相等」校验即将在健壮性改进中放宽，
-故这里只测稳定行为（空输出 / 缺字段），不锁定「严格相等」这一即将变化的细节。
+output_guard 只覆盖空输出、缺字段等稳定行为，不约束题数一致性策略。
 """
 import unittest
 

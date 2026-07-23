@@ -26,7 +26,7 @@ StudyLoop 是一个基于个人学习材料的 AI 自适应学习系统。它支
 
 ```bash
 cp .env.example .env
-# 编辑 .env，配置模型服务
+# 编辑 .env，配置模型服务并设置非空 POSTGRES_PASSWORD
 docker compose up --build -d
 ```
 
@@ -34,6 +34,9 @@ docker compose up --build -d
 
 - Web：<http://localhost:4001>
 - API 文档：<http://localhost:8001/docs>
+
+默认 Compose 仅将 Web 与 API 绑定到本机回环地址，PostgreSQL 不发布宿主端口。
+如需共享访问，应先在反向代理层增加认证与 TLS，不要直接将后端端口暴露到公网。
 
 停止服务：
 
@@ -106,6 +109,8 @@ curl -i http://localhost:8001/health/providers
 ```
 
 `/health/live` 只检查进程存活，不访问外部服务。`/health/providers` 调用 Provider 的 `models.list`，不会发起 Chat、Structured Output 或 Embedding 请求；结果默认缓存 30 秒。全部模型在目录中可见时返回 200，否则返回 503 和稳定的诊断码。目录可达只代表凭据、地址和模型可见性正常，不代表 Structured Output、Tool Calling 或 Embedding 能力已经实际验证。
+
+统一的 `llm_chat`、`llm_parse` 和 Embedding 重试链路默认各有 60 秒端到端预算（含退避等待），可通过 `PROVIDER_REQUEST_DEADLINE_SECONDS` 调整。HTTP 边界会返回稳定错误码：限流为 `provider_rate_limited`（429）、超时为 `provider_timeout`（504）、其他上游故障为 `provider_unavailable`（503），未配置则为 `provider_not_configured`（503）；前端不需要解析 Provider 原始异常。
 
 首次接入真实 Provider 时，再显式运行一次能力检查：
 

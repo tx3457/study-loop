@@ -1,5 +1,5 @@
 """
-Assistant Worker 单测（Phase 4 里程碑二，非 interrupt 部分，3.10 可跑）
+Assistant Worker 单测（非 interrupt 部分）
 
 覆盖：
   1) assistant_agent ReAct：mock run_tool_round 返回 finalize → 写 final_answer + assistant_done

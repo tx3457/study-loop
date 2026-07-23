@@ -1,9 +1,7 @@
 """
-LangGraph Durable Checkpointer(Phase 9 P0-4)
+LangGraph Durable Checkpointer
 
-设计来源:直接 wrap langgraph 原生 AsyncSqliteSaver
-(reference/langgraph/libs/checkpoint-sqlite/langgraph/checkpoint/sqlite/aio.py:509-559),
-不自己造轮子。
+直接封装 LangGraph 原生 AsyncSqliteSaver。
 
 为什么需要 checkpointer?
   没有它:LangGraph 是无状态执行,进程挂掉 / 服务重启后,

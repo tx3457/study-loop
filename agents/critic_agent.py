@@ -1,8 +1,8 @@
 """
-Critic Agent：独立 subgraph，Tutor↔Critic 反思循环的核心（Phase 7 美团 JD 改造 T2）
+Critic Agent：独立 subgraph，Tutor↔Critic 反思循环的核心
 
 ── 与现有 quiz_agent.py:77-98 review 节点的差异 ─────────────────────────────
-| 维度        | 当前 review                    | T2 critic_agent                |
+| 维度        | 当前 review                    | critic_agent                   |
 |-------------|--------------------------------|---------------------------------|
 | 输出        | ReviewResult(passed: bool)     | CritiqueReport(3D + suggestions)|
 | 与 tutor 关系| 节点内部循环                    | 独立 subgraph 与 quiz_agent 串接|
@@ -18,13 +18,6 @@ Critic Agent：独立 subgraph，Tutor↔Critic 反思循环的核心（Phase 7 
   reinforce_evidence : 若初判置信度低 → dispatch_tool('search_document') 拉新 chunks
   produce_report     : 综合证据生成最终 CritiqueReport（含 suggestions 列表）
 
-── 面试讲点 ────────────────────────────────────────────────────────────────
-"我把 review 从单次 bool 升级为独立 Critic Agent：
- (1) 输出结构化 3 维度评分 + 改进建议列表（而不是 passed/failed）；
- (2) Critic 自主决定是否触发 search_document 二次检索证据，体现 agent
-     自主决策能力；
- (3) 跑了 20 题 ablation 实验（critic on vs off），对比一次通过率和
-     题目质量评分变化。"
 """
 import json
 import logging
@@ -34,8 +27,7 @@ from langgraph.graph import StateGraph, START, END
 
 from models.critique import CritiqueReport, CritiqueSuggestion, DimensionScore
 from services.tools import dispatch_tool
-from services.memory import get_user_profile
-from services.llm import _client, model as _model
+from services.llm import _client, llm_chat, model as _model
 from services.tracing import traceable
 
 logger = logging.getLogger(__name__)
@@ -53,7 +45,7 @@ class CriticState(TypedDict, total=False):
     document_id: str
     difficulty_score: float    # 用户画像难度（用于判定 difficulty 维度）
     weak_points: list[str]     # 用户薄弱点（用于判定 coverage 维度）
-    insufficient_evidence: bool  # P1-1：上游 sufficiency_check 标记，触发更严格审核
+    insufficient_evidence: bool  # 上游 sufficiency_check 标记，触发更严格审核
 
     # 中间
     initial_report: dict | None       # analyze 产出的初判
@@ -109,7 +101,7 @@ async def _analyze(state: CriticState) -> dict:
         f"【参考 chunks】\n{chunks_text}\n\n"
         f"【待审核题目】\n{quiz_text}"
     )
-    # P1-1：上游 sufficiency_check 标记证据不足时，提示 critic 对 relevance 更严格
+    # 上游 sufficiency_check 标记证据不足时，提示 critic 对 relevance 更严格
     if state.get("insufficient_evidence"):
         user_msg += (
             "\n\n⚠️ 上游 sufficiency_check 报告本次检索证据不充分（chunks 数量少、"
@@ -118,13 +110,14 @@ async def _analyze(state: CriticState) -> dict:
         )
 
     try:
-        resp = await _client.chat.completions.create(
-            model=_model,
-            response_format={"type": "json_object"},
-            messages=[
+        resp = await llm_chat(
+            [
                 {"role": "system", "content": _ANALYZE_SYSTEM},
                 {"role": "user", "content": user_msg},
             ],
+            client=_client,
+            model=_model,
+            response_format={"type": "json_object"},
         )
         report_text = resp.choices[0].message.content or "{}"
         report_dict = json.loads(report_text)
@@ -142,7 +135,6 @@ async def _analyze(state: CriticState) -> dict:
 @traceable(name="critic_agent.reinforce_evidence", run_type="tool")
 async def _reinforce_evidence(state: CriticState) -> dict:
     """二次检索：当 relevance 或 coverage 置信度低时，调 dispatch_tool 拉新 chunks"""
-    initial = state.get("initial_report", {})
     weak_points = state.get("weak_points", [])
     document_id = state.get("document_id", "")
 
@@ -185,13 +177,14 @@ async def _produce_report(state: CriticState) -> dict:
     }
 
     try:
-        resp = await _client.chat.completions.create(
-            model=_model,
-            response_format={"type": "json_object"},
-            messages=[
+        resp = await llm_chat(
+            [
                 {"role": "system", "content": _FINALIZE_SYSTEM},
                 {"role": "user", "content": json.dumps(finalize_input, ensure_ascii=False)},
             ],
+            client=_client,
+            model=_model,
+            response_format={"type": "json_object"},
         )
         finalize_dict = json.loads(resp.choices[0].message.content or "{}")
     except Exception as e:

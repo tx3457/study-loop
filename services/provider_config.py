@@ -10,9 +10,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import math
 import os
 import weakref
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -24,7 +25,28 @@ from openai import AsyncOpenAI
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
-PROVIDER_TIMEOUT = httpx.Timeout(120.0, connect=20.0)
+
+def _positive_seconds(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(f"{name} must be a positive number") from None
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be a positive number")
+    return value
+
+
+PROVIDER_REQUEST_DEADLINE_SECONDS = _positive_seconds(
+    "PROVIDER_REQUEST_DEADLINE_SECONDS",
+    60.0,
+)
+PROVIDER_TIMEOUT = httpx.Timeout(
+    PROVIDER_REQUEST_DEADLINE_SECONDS,
+    connect=min(20.0, PROVIDER_REQUEST_DEADLINE_SECONDS),
+)
 _CLIENT_CLOSE_TIMEOUT_SECONDS = 5.0
 logger = logging.getLogger(__name__)
 
@@ -75,6 +97,32 @@ class ProviderConfigurationError(RuntimeError):
         super().__init__(
             f"provider configuration invalid for {capability}: {', '.join(issues)}"
         )
+
+
+class ProviderDeadlineExceeded(TimeoutError):
+    """A provider operation exceeded its end-to-end retry budget."""
+
+    def __init__(self, deadline_seconds: float) -> None:
+        self.deadline_seconds = deadline_seconds
+        super().__init__(
+            f"provider operation exceeded {deadline_seconds:g} seconds"
+        )
+
+
+async def run_with_provider_deadline(
+    operation: Callable[[], Awaitable],
+    *,
+    total_timeout: float | None = PROVIDER_REQUEST_DEADLINE_SECONDS,
+):
+    """Run a provider operation within one budget, including retries/backoff."""
+    if total_timeout is None:
+        return await operation()
+    if not math.isfinite(total_timeout) or total_timeout <= 0:
+        raise ValueError("total_timeout must be a positive number or None")
+    try:
+        return await asyncio.wait_for(operation(), timeout=total_timeout)
+    except asyncio.TimeoutError as exc:
+        raise ProviderDeadlineExceeded(total_timeout) from exc
 
 
 class _UnconfiguredProviderClient:

@@ -1,5 +1,5 @@
 """
-单测:Reflection 错误回灌(借鉴 aider/coders/base_coder.py:933-944)
+单测：Reflection 错误回灌
 
 验证三件事:
 1. _format_reflected_message 把 CritiqueReport 格式化为人类可读的反思文本
@@ -8,7 +8,7 @@
 
 跑法:
   cd study-loop
-  python -m pytest test/test_reflection_loop.py -v
+  python -m pytest tests/test_reflection_loop.py -q
 或
   python -m unittest test.test_reflection_loop
 """

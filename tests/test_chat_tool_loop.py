@@ -1,8 +1,7 @@
 """
-chat/tools tool 循环守护测试（D4 重构前先补，守护重构不改行为）
+chat/tools tool 循环守护测试
 
-routers/chat.py:chat_with_tools 的 ≤3 轮 function-calling 循环此前零单测。
-本测试 mock 掉 _client（LLM）和 dispatch_tool，覆盖：
+测试 mock 掉 _client（LLM）和 dispatch_tool，覆盖：
   1. 正常轮转：LLM 调一个工具 → dispatch → 回灌 → LLM 给最终文字
   2. 达到 MAX_TOOL_ROUNDS 上限（LLM 每轮都调工具，永不停）
   3. 白名单拦截：LLM 调不在白名单的工具 → 不 dispatch，回错误，继续
@@ -10,7 +9,7 @@ routers/chat.py:chat_with_tools 的 ≤3 轮 function-calling 循环此前零单
   5. output leak 拦截
 
 全程 mock，无网络。跑：
-  python -m pytest test/test_chat_tool_loop.py -q
+  python -m pytest tests/test_chat_tool_loop.py -q
 """
 import sys
 import unittest

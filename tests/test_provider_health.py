@@ -386,7 +386,11 @@ class TestProviderHealthApi(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(
             response.json(),
-            {"error": "服务暂时不可用", "detail": "模型服务尚未正确配置"},
+            {
+                "error": "服务暂时不可用",
+                "detail": "模型服务尚未正确配置",
+                "code": "provider_not_configured",
+            },
         )
 
     def test_application_starts_and_reports_503_without_provider_credentials(self):

@@ -1,4 +1,4 @@
-"""quiz_agent 出题子图的纯逻辑单测（2026-06-03 补测试网）。
+"""quiz_agent 出题子图的纯逻辑单测。
 
 覆盖：
   - services.sufficiency.check_sufficiency 数量/多样性两硬门 + 覆盖软信号(非阻断)

@@ -1,5 +1,5 @@
 """
-Grader Worker：supervisor-based MAS 的批改 worker 包装（Phase 2）
+Grader Worker：supervisor-based MAS 的批改 worker 包装
 
 不改 grader_agent.py / adapt_agent.py 源码，用 adapter 复用三件事：
   ① grader_agent：调 services.grader.grade_session 批改 → grading_report

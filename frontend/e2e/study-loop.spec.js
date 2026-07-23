@@ -38,7 +38,14 @@ async function mockApi(page, handler) {
       const request = route.request()
       const url = new URL(request.url())
       const path = url.pathname.slice(API_PREFIX.length)
-      const response = await handler({ path, request })
+      let response = await handler({ path, request })
+
+      // Adaptive and Autonomous load their optional document choices on entry.
+      // Tests focused on other behavior use an empty library as the neutral
+      // baseline; document-loading tests override it in their own handler.
+      if (!response && request.method() === 'GET' && path === '/documents') {
+        response = { body: { documents: [] } }
+      }
 
       if (!response) {
         unexpectedRequests.push(`${request.method()} ${path}`)
@@ -242,12 +249,13 @@ test('learning path selection clears results and errors from the previous docume
   expect(unexpectedRequests).toEqual([])
 })
 
-test('adaptive document refresh clears its own recovered load error', async ({ page }) => {
+test('adaptive loads documents on entry and refresh clears the recovered error', async ({ page }) => {
+  let failDocuments = true
   let documentRequests = 0
   const unexpectedRequests = await mockApi(page, ({ path, request }) => {
     if (request.method() === 'GET' && path === '/documents') {
       documentRequests += 1
-      return documentRequests === 1
+      return failDocuments
         ? { status: 503, body: { detail: '文档列表刷新失败' } }
         : { body: { documents: ['notes.md'] } }
     }
@@ -257,14 +265,14 @@ test('adaptive document refresh clears its own recovered load error', async ({ p
   await page.goto('/adaptive')
   const refresh = page.getByRole('button', { name: '刷新文档' })
 
-  await refresh.click()
   await expect(page.getByRole('alert')).toContainText('文档列表刷新失败')
   await expect(page.getByLabel('学习目标')).toBeEditable()
 
+  failDocuments = false
   await refresh.click()
   await expect(page.getByRole('alert')).toHaveCount(0)
   await expect(refresh).toBeEnabled()
-  expect(documentRequests).toBe(2)
+  expect(documentRequests).toBeGreaterThanOrEqual(2)
   expect(unexpectedRequests).toEqual([])
 })
 
@@ -760,18 +768,59 @@ test('document load failure is recoverable and never shown as an empty library',
   expect(unexpectedRequests).toEqual([])
 })
 
-test('dashboard load failure is recoverable and not presented as missing learning data', async ({ page }) => {
+test('dashboard keeps available data visible when one source fails', async ({ page }) => {
   let failSessions = true
   const unexpectedRequests = await mockApi(page, ({ path, request }) => {
     if (request.method() === 'GET' && path === '/documents') {
-      return { body: { documents: [] } }
+      return { body: { documents: ['notes.md'] } }
     }
     if (request.method() === 'GET' && path === '/user/default_user/sessions') {
       return failSessions
         ? { status: 503, body: { detail: '学习记录暂时不可用' } }
-        : { body: [] }
+        : { body: [{ date: '2026-07-16', correct_rate: 0.75 }] }
     }
     if (request.method() === 'GET' && path === '/user/default_user/profile') {
+      return {
+        body: {
+          topic_mastery: { 'notes.md': 0.8 },
+          weak_points: ['检索'],
+          total_sessions: 2,
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/dashboard')
+
+  await expect(page.getByRole('alert')).toContainText('部分数据暂不可用')
+  await expect(page.getByRole('alert')).toContainText('学习记录')
+  await expect(page.locator('.stat-card').filter({ hasText: '学习次数' })).toContainText('2')
+  await expect(page.getByText('还没有学习数据')).toHaveCount(0)
+
+  failSessions = false
+  await page.getByRole('button', { name: '重新加载' }).click()
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  await expect(page.locator('.stat-card').filter({ hasText: '平均正确率' })).toContainText('75%')
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('dashboard keeps a blocking retry state when every source fails', async ({ page }) => {
+  let failAll = true
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (
+      request.method() === 'GET'
+      && [
+        '/documents',
+        '/user/default_user/sessions',
+        '/user/default_user/profile',
+      ].includes(path)
+    ) {
+      if (failAll) {
+        return { status: 503, body: { detail: '学习报告数据暂时不可用' } }
+      }
+      if (path === '/documents') return { body: { documents: [] } }
+      if (path.endsWith('/sessions')) return { body: [] }
       return { body: null }
     }
     return null
@@ -782,7 +831,7 @@ test('dashboard load failure is recoverable and not presented as missing learnin
   await expect(page.getByRole('alert')).toContainText('无法加载学习报告')
   await expect(page.getByText('还没有学习数据')).toHaveCount(0)
 
-  failSessions = false
+  failAll = false
   await page.getByRole('button', { name: '重新加载' }).click()
   await expect(page.getByText('还没有学习数据')).toBeVisible()
   await expect(page.getByRole('alert')).toHaveCount(0)
@@ -892,21 +941,32 @@ test('late wrong-question responses cannot overwrite the selected document', asy
   expect(unexpectedRequests).toEqual([])
 })
 
-test('Autonomous document refresh reports failures without breaking the form', async ({ page }) => {
+test('Autonomous loads documents on entry and refresh recovers without breaking the form', async ({ page }) => {
+  let failDocuments = true
+  let documentRequests = 0
   const unexpectedRequests = await mockApi(page, ({ path, request }) => {
     if (request.method() === 'GET' && path === '/documents') {
-      return { status: 503, body: { detail: '文档服务暂时不可用' } }
+      documentRequests += 1
+      return failDocuments
+        ? { status: 503, body: { detail: '文档服务暂时不可用' } }
+        : { body: { documents: ['notes.md'] } }
     }
     return null
   })
 
   await page.goto('/autonomous')
-  await page.getByRole('button', { name: '刷新文档' }).click()
 
   await expect(page.getByRole('alert')).toContainText(
     '文档列表加载失败：文档服务暂时不可用'
   )
   await expect(page.getByLabel('你的学习目标')).toBeEditable()
+
+  const refresh = page.getByRole('button', { name: '刷新文档' })
+  failDocuments = false
+  await refresh.click()
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  await expect(refresh).toBeEnabled()
+  expect(documentRequests).toBeGreaterThanOrEqual(2)
   expect(unexpectedRequests).toEqual([])
 })
 

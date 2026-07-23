@@ -1,31 +1,31 @@
 """
-历史压缩服务（Phase 3 Day 13）
+历史压缩服务
 
 Context Engineering — Compress 策略：
   对话历史超过阈值时，将旧消息 LLM 摘要压缩为单条 system 消息，
   保留最近 N 条作为精确上下文，其余替换为摘要。
-  压缩后 token 用量减少约 70-80%。
+  压缩后减少历史消息占用的 token。
 
 触发条件：消息数 > COMPRESS_THRESHOLD（默认 20 条）
 保留精确：最近 KEEP_RECENT 条（默认 6 条）
 """
-import os
 from pathlib import Path
 from dotenv import load_dotenv
-from openai import AsyncOpenAI
 from pydantic import BaseModel
+from services.llm import (
+    llm_parse,
+    structured_client as _client,
+    structured_model as _model,
+)
 
 load_dotenv(Path(__file__).parent.parent / ".env")
-
-# 压缩摘要用 json_schema 结构化输出 → 走 structured 供应商
-from services.llm import structured_client as _client, structured_model as _model
 
 COMPRESS_THRESHOLD = 20   # 超过多少条消息触发压缩
 KEEP_RECENT = 6           # 始终保留最近 N 条精确消息
 
 
 class CompressionResult(BaseModel):
-    """压缩摘要结构化输出（替代自由文本，Phase 7 #4）"""
+    """压缩摘要结构化输出（替代自由文本）。"""
     summary: str           # 对话核心内容概述（200 字以内）
     key_points: list[str]  # 关键结论 / 决策（3-5 条）
 
@@ -39,8 +39,7 @@ async def _summarize_messages(messages: list[dict]) -> str:
     formatted = "\n".join(
         f"{m['role'].upper()}: {m['content']}" for m in messages
     )
-    response = await _client.beta.chat.completions.parse(
-        model=_model,
+    response = await llm_parse(
         messages=[
             {
                 "role": "system",
@@ -52,6 +51,8 @@ async def _summarize_messages(messages: list[dict]) -> str:
             {"role": "user", "content": formatted},
         ],
         response_format=CompressionResult,
+        client=_client,
+        model=_model,
     )
     result = response.choices[0].message.parsed
     # 拼接：摘要 + 关键结论，保持与下游兼容

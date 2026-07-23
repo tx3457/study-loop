@@ -1,5 +1,5 @@
 """
-集成测试:planner_agent 升级版(5 阶段子图 + path_reviser 循环)
+集成测试：planner_agent 5 阶段子图 + path_reviser 循环
 
 不消耗 LLM API,通过 mock services/learning_path 的 5 个纯函数 + path_reviser 的 LLM 调用,
 验证图拓扑 + 循环路由 + 精修契约。
@@ -8,7 +8,7 @@
 1. 编译后子图含 6 个节点:extract_brief / explore / compress / synthesize / critique / path_reviser
 2. critique 通过 → END(不进 path_reviser)
 3. critique 不通过 + PATH_REVISER_ENABLED=true → path_reviser → critique 重审
-4. critique 不通过 + PATH_REVISER_ENABLED=false → 回到 synthesize(老路径)
+4. critique 不通过 + PATH_REVISER_ENABLED=false → 回到 synthesize 整段重写
 5. revision_count >= 2 → END(不死循环)
 6. enable_critique=False → critique 直接通过(ablation)
 7. _route_after_critique 路由表行为
@@ -16,7 +16,7 @@
 9. planner_agent adapter 把 OrchestratorState 正确转 PlannerState
 
 跑法:
-  /path/to/python test/test_planner_loop.py -v
+  python -m pytest tests/test_planner_loop.py -q
 """
 import json
 import os

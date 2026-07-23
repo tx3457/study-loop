@@ -1,5 +1,5 @@
 """
-Retry + per-call Timeout（Phase 8 P1-2 升级）
+Retry + per-call Timeout
 
 with_retry(fn, ..., timeout=...)：指数退避重试，带 jitter，per-call asyncio.wait_for 超时。
 
@@ -53,7 +53,7 @@ async def with_retry(
         fn: 每次调用返回新 coroutine 的 callable，不能传 coroutine 对象本身。
         max_retries: 最多重试次数（不含首次调用）。
         base_delay: 首次重试前等待秒数。
-        timeout: 单次调用最长允许秒数。None 表示不限（保持旧行为）。
+        timeout: 单次调用最长允许秒数。None 表示不限。
                  触发时 cancel 整个 coroutine（cooperative cancel）。
     """
     last_exc = None

@@ -1,5 +1,5 @@
 """
-Tutor Graph interrupt + checkpointer 集成测试（Phase 2 里程碑 B）
+Tutor Graph interrupt + checkpointer 集成测试
 
 用真 AsyncSqliteSaver(临时 db) + mock worker，验证 HITL durable interrupt：
   1) ainvoke 跑到 wait_for_answers interrupt 暂停 → 返回值含 __interrupt__，payload 带 quiz
@@ -12,7 +12,7 @@ Tutor Graph interrupt + checkpointer 集成测试（Phase 2 里程碑 B）
    生产 Docker 用 python:3.11-slim，故按生产运行时验证。本机 3.10 dev env 无法跑此用例。
 
 跑（用 3.11+ 解释器，需装 langgraph==1.1.3 / langgraph-checkpoint-sqlite / aiosqlite）：
-  python -m pytest test/test_tutor_interrupt.py -q
+  python -m pytest tests/test_tutor_interrupt.py -q
 """
 import sys
 import tempfile

@@ -1,11 +1,10 @@
 """
-Critic Agent 评估 schema（Phase 7 美团 JD 改造 T2）
+Critic Agent 评估 schema
 
 ── 设计目标 ────────────────────────────────────────────────────────────────
-升级 ReviewResult（passed: bool）为结构化 3 维度评分 + 改进建议列表，
-让 Tutor↔Critic 双 agent 反思循环有真实的协作信息流通：
+CritiqueReport 提供结构化 3 维度评分 + 改进建议列表，
+供 Tutor↔Critic 双 agent 反思循环传递审核信息：
   - Tutor 出题 → Critic 多维度评分 → Tutor 看建议改进
-  - 不再是单次 bool 拒绝/通过
 
 ── 与 ReviewResult 的边界 ──────────────────────────────────────────────────
 ReviewResult 保留作为 QuizAgent 内部的"快速通过/拒绝"信号；

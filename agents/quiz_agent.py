@@ -1,8 +1,6 @@
 """
 QuizAgent：Hybrid 检索 + Sufficiency Check + Context Engineering 出题 + 质量审核
 
-Phase 8 P1-1 升级：插入 sufficiency_check 节点作为 generate 前置质量门。
-
 节点流程：
   retrieve → sufficiency_check ─┬─ sufficient → generate → review
                                 ├─ insufficient (rewrite_count<1) → rewrite_query → retrieve
@@ -43,7 +41,7 @@ async def retrieve(state: QuizAgentState) -> dict:
     }
 
 
-# ── sufficiency_check（P1-1 新增）─────────────────────────────────────────
+# ── sufficiency_check ─────────────────────────────────────────────────────
 @traceable(name="quiz_agent.sufficiency_check", run_type="chain")
 async def sufficiency_check(state: QuizAgentState) -> dict:
     """检索充分性判定，纯 heuristic，无 LLM 调用。"""
@@ -57,7 +55,7 @@ async def sufficiency_check(state: QuizAgentState) -> dict:
     return {"sufficiency_passed": passed, "sufficiency_reason": reason}
 
 
-# ── rewrite_query（P1-1 新增）─────────────────────────────────────────────
+# ── rewrite_query ─────────────────────────────────────────────────────────
 @traceable(name="quiz_agent.rewrite_query", run_type="llm")
 async def rewrite_query_node(state: QuizAgentState) -> dict:
     """LLM 改写检索 query，下游会回到 retrieve 节点重试。"""
@@ -71,7 +69,7 @@ async def rewrite_query_node(state: QuizAgentState) -> dict:
     }
 
 
-# ── degrade（P1-1 新增）───────────────────────────────────────────────────
+# ── degrade ───────────────────────────────────────────────────────────────
 @traceable(name="quiz_agent.degrade", run_type="chain")
 async def degrade(state: QuizAgentState) -> dict:
     """证据不足时降级生成参数：减题数、降难度，并标记给 critic。"""
@@ -95,7 +93,7 @@ async def degrade(state: QuizAgentState) -> dict:
 async def generate(state: QuizAgentState) -> dict:
     """调用 LLM 出题，注入 CE 参数（difficulty_score + weak_points）+ 反思回灌。
 
-    Reflection 回灌(借鉴 aider/coders/base_coder.py:933-944):
+    Reflection 回灌：
       上轮被 critic 拒绝时,state["reflected_message"] 携带格式化的拒绝原因,
       本轮 generate 把它当作 user 指令的一部分塞给 LLM,让 LLM 知道
       "上次错在哪",而不只是机械重出。
@@ -133,7 +131,7 @@ async def generate(state: QuizAgentState) -> dict:
     }
 
 
-# ── review（2026-06-03 降级为格式校验，质量判断交给主图 critic）───────────────
+# ── review（格式校验，质量判断交给主图 critic）─────────────────────────────
 def _validate_quiz_format(questions: list, qtype: str) -> tuple[bool, str]:
     """纯规则校验题目「结构是否完整可用」（能渲染 / 能批改）。无 LLM 调用。"""
     if not questions:
@@ -156,9 +154,7 @@ def _validate_quiz_format(questions: list, qtype: str) -> tuple[bool, str]:
 async def review(state: QuizAgentState) -> dict:
     """题目「格式/结构」校验——纯规则，零 LLM 调用。
 
-    重构（2026-06-03）：原 review 是 LLM 自审（判断是否基于原文/难度/答案正确），
-    与主图 critic_agent 的三维评分（难度/相关性/覆盖度）职责重叠，每题多花一次 LLM。
-    现降级为纯结构校验：只保证题目结构完整、能渲染能批改；深度质量统一交给
+    本节点只保证题目结构完整、能渲染能批改；深度质量统一交给
     主图 critic 评估。形成「规则廉价门（sufficiency + 本节点）→ LLM 昂贵门（critic）」
     的分层防御，与 sufficiency_check 的设计哲学一致。
     """

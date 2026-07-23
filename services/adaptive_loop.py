@@ -1,17 +1,12 @@
 """
-自适应学习闭环 —— Agent 决策大脑(Direction A 核心)
+自适应学习闭环的 Agent 决策逻辑
 
-和老逻辑的本质区别:
-  老:start_session 用写死公式 difficulty = mastery + 0.15(只会线性加难度)
-  新:decide_next_step 让 LLM 读"本轮逐题对错 + 知识盲点 + 历史难度/得分轨迹",
-      推理出下一步动作(补薄弱点 / 升难度 / 巩固 / 转规划 / 结束)+ 可解释理由。
-
-这是把"自适应"从规则升级成 agent 推理,也是 orchestrator(规则工作流)、
-autonomous(自由 ReAct)之外的第三条路径——一条"会教书"的闭环 agent。
+decide_next_step 读取本轮逐题对错、知识盲点及历史难度/得分轨迹，
+推理下一步动作（补薄弱点、升难度、巩固、转规划或结束）并给出理由。
 闭环:出题 → 作答 → 批改 → decide_next_step 推理 → 下一步,直到达标/练够。
 
 健壮性:LLM 决策失败时回退规则(score<0.5→remediate 降难度,否则 advance 升难度),
-保证可用性(fail-soft),不让一次 LLM 抽风打断整个辅导会话。
+以 fail-soft 方式保持辅导会话可继续执行。
 """
 import logging
 import os
@@ -29,7 +24,7 @@ from services.vectorstore import retrieve_with_rewrite
 logger = logging.getLogger(__name__)
 load_dotenv(Path(__file__).parent.parent / ".env")
 
-# LLM 调用统一走 services.llm.llm_chat / llm_parse（D1）；默认 client 在那里管理。
+# LLM 调用统一走 services.llm.llm_chat / llm_parse；默认 client 在那里管理。
 # 这里只保留 _model 给 llm_chat/llm_parse 显式透传。
 _model = os.getenv("LLM_MODEL")
 
@@ -155,7 +150,7 @@ async def decide_next_step(
     user_msg = "\n\n".join(parts)
 
     try:
-        # 统一 LLM 入口（D1）：带退避重试 + client 注入（保留测试 mock 能力）。
+        # 统一 LLM 入口：带退避重试 + client 注入（保留测试 mock 能力）。
         resp = await llm_parse(
             [
                 {"role": "system", "content": _DECIDE_SYSTEM},
@@ -226,7 +221,7 @@ async def generate_lesson(
 
     user_msg = f"知识点 / 薄弱点:{gaps}\n\n参考资料:\n{material}\n\n{wrong}"
     try:
-        # 统一 LLM 入口（D1）：带退避重试 + client 注入。
+        # 统一 LLM 入口：带退避重试 + client 注入。
         resp = await llm_chat(
             [
                 {"role": "system", "content": _LESSON_SYSTEM},

@@ -1,19 +1,13 @@
 """
-Function Calling 工具定义与分发（Phase 8 P1-2 升级：接入 ToolRegistry）
+Function Calling 工具定义与分发
 
-升级前：dispatch_tool 是 if/elif 长链，无超时、无 audit、所有 tool 共享配置
-升级后：每个 tool 注册到 ToolRegistry，invoke 时自动带 per-tool timeout + retry + audit
+每个 tool 注册到 ToolRegistry，invoke 时自动带 per-tool timeout + retry + audit。
 
 向后兼容：
   - TOOL_DEFINITIONS 仍然导出（legacy import-time snapshot）
   - get_tool_definitions() 从 registry 动态生成；interrupt 节点另用 replay-safe 子集
-  - dispatch_tool 签名扩展了可选 run_id/user_id，旧调用方不传也能跑
+  - dispatch_tool 的 run_id/user_id 为可选参数
 
-面试讲点：
-  "我把 dispatch_tool 从 if/elif 长链改造成 Tool Registry。每个 tool 在注册时
-   声明自己的 timeout/retry SLO；invoke 通过 with_retry + asyncio.wait_for 强制执行，
-   并自动写 audit_log。Tool 增删只需改注册块，dispatch 代码零修改——这是
-   Open/Closed Principle。"
 """
 import json
 import logging
@@ -33,9 +27,7 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def _search_document(document_id: str, query: str) -> str:
-    # 走生产检索入口(含 HyDE/Multi-query 改写),与 orchestrator 出题流、评测脚本同一条链路。
-    # 此前直接调 hybrid_query_document 会跳过 query 改写,导致 agent 工具路径检索质量低于出题流,
-    # 也破坏了"生产 == 评测"不变量。改走 retrieve_with_rewrite 恢复一致。
+    # 走统一生产检索入口（含 HyDE/Multi-query 改写），与出题流保持一致。
     result = await retrieve_with_rewrite(document_id, query)
     chunks = result["documents"][0][:3]    # 避免 token 爆炸
     chunk_ids = result["ids"][0][:3]
@@ -76,7 +68,7 @@ async def _get_learning_path(document_id: str) -> str:
 
 
 def _coerce_dict(value: Any) -> dict:
-    """Tool args may arrive as JSON strings in tests/demo or objects from FC."""
+    """Tool args may arrive as JSON strings or objects from function calling."""
     if isinstance(value, dict):
         return value
     if isinstance(value, str):
@@ -100,10 +92,10 @@ async def _grade_answer(
     explanation: str = "",
     question_type: str = "short_answer",
 ) -> str:
-    """Lightweight single-answer grader for the ReAct tutor demo path.
+    """Deterministic single-answer grader for the ReAct tutor.
 
     The full production session grader remains services.grader.grade_session.
-    This tool is deterministic so tests/demo do not need a model key.
+    This tool does not require a model call.
     """
     ans_norm = _norm_answer(answer)
     correct_norm = _norm_answer(correct_answer)
@@ -138,7 +130,7 @@ async def _grade_answer(
 
 
 async def _update_learning_profile(user_id: str, document_id: str, grade_result: dict | str) -> str:
-    """Write the single-question demo result into the existing memory banks."""
+    """Write a single-question grade result into the learner memory banks."""
     result = _coerce_dict(grade_result)
     score = result.get("score")
     if not isinstance(score, (int, float)):
@@ -166,7 +158,7 @@ async def _update_learning_profile(user_id: str, document_id: str, grade_result:
 
 
 async def _plan_next_step(profile: dict | str, last_result: dict | str) -> str:
-    """Deterministic next-step planner for demo/interview trace display."""
+    """Deterministic next-step planner for trace display."""
     profile_data = _coerce_dict(profile)
     result = _coerce_dict(last_result)
     score = result.get("score")
@@ -381,10 +373,10 @@ _register_all()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 3. 向后兼容接口
+# 3. 兼容接口
 # ═══════════════════════════════════════════════════════════════════════════
 
-# 旧代码可能 import TOOL_DEFINITIONS；保留为向后兼容快照。
+# 保留 TOOL_DEFINITIONS import 兼容快照。
 # 允许未知工具的 standalone agent/chat 使用 get_tool_definitions() 动态发现 MCP；
 # interrupt-capable 节点必须使用下面的 replay-safe schema + allowlist 双重约束。
 TOOL_DEFINITIONS = tool_registry.get_openai_schemas()
@@ -396,9 +388,9 @@ def get_tool_definitions() -> list[dict]:
 
 
 def allowed_tool_names() -> set[str]:
-    """业务工具白名单的单一数据源（D4）：从 registry 派生，不再各端点硬编码。
+    """业务工具白名单的单一数据源，从 registry 派生，不在各端点硬编码。
 
-    新增/删除业务工具只改注册块，chat 与 autonomous 的白名单自动同步。
+    增删业务工具只改注册块，chat 与 autonomous 的白名单自动同步。
     控制工具（finalize / ask_user）不在 registry，由 autonomous 端点自行处理。
     """
     return set(tool_registry.list_tools())
@@ -436,7 +428,7 @@ async def dispatch_tool(
 ) -> str:
     """根据 tool_call 名字调用工具，返回 JSON 字符串。
 
-    新增可选 run_id / user_id 用于 audit 关联；旧调用方不传也能跑（向后兼容）。
+    可选 run_id / user_id 用于 audit 关联，省略时按无关联标识执行。
     """
     logger.info(f"[tools] dispatch: {name}({arguments}) run_id={run_id}")
     return await tool_registry.invoke(

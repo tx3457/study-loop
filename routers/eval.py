@@ -1,5 +1,5 @@
 """
-A/B 评测端点（Phase 7 工程补洞 #3）
+A/B 评测端点
 
 POST /eval/ab  →  运行一次 A/B 实验，返回两组对比 + LLM-as-Judge 评分
 
@@ -34,7 +34,7 @@ async def ab_experiment(config: ABConfig):
     """运行 A/B 评测实验。
 
     流程：检索 → 并发生成两组题目 → 并发 LLM-as-Judge → 聚合对比。
-    耗时约 20-40 秒（取决于 LLM 响应速度），建议前端加 loading 状态。
+    调用依赖外部 LLM，前端应显示 loading 状态。
     """
     logger.info(f"[eval] A/B experiment: {config.experiment}, doc={config.document_id}")
     return await run_ab_experiment(config)

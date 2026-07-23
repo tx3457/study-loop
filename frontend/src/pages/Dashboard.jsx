@@ -22,30 +22,68 @@ export default function Dashboard() {
   const [wrongLoading, setWrongLoading] = useState(false)
   const [wrongError, setWrongError] = useState(null)
   const [error, setError] = useState(null)
+  const [partialError, setPartialError] = useState(null)
+  const dashboardRequestId = useRef(0)
   const wrongRequestId = useRef(0)
 
   /* ── 加载数据 ──────────────────────────────────────────────────── */
   const loadDashboard = useCallback(async () => {
+    const requestId = ++dashboardRequestId.current
     setLoading(true)
     setError(null)
+    setPartialError(null)
+    const sources = [
+      {
+        label: '文档列表',
+        load: getDocuments,
+        apply: data => setDocuments(data.documents || []),
+      },
+      {
+        label: '学习记录',
+        load: getUserSessions,
+        apply: data => setSessions(Array.isArray(data) ? data : []),
+      },
+      {
+        label: '学习画像',
+        load: getUserProfile,
+        apply: data => {
+          setProfile(data)
+          setNoProfile(!data)
+        },
+      },
+    ]
     try {
-      const [docs, sess, prof] = await Promise.all([
-        getDocuments(),
-        getUserSessions(),
-        getUserProfile(),
-      ])
-      setDocuments(docs.documents || [])
-      setSessions(Array.isArray(sess) ? sess : [])
-      setProfile(prof)
-      setNoProfile(!prof)
-    } catch (err) {
-      setError(err.message)
+      const results = await Promise.allSettled(sources.map(source => source.load()))
+      if (requestId !== dashboardRequestId.current) return
+
+      const failures = []
+      results.forEach((result, index) => {
+        if (result.status === 'fulfilled') {
+          sources[index].apply(result.value)
+          return
+        }
+        const message = result.reason?.message
+        failures.push(message
+          ? `${sources[index].label}（${message}）`
+          : sources[index].label)
+      })
+
+      if (failures.length === sources.length) {
+        setError(`全部数据源加载失败：${failures.join('、')}`)
+      } else if (failures.length > 0) {
+        setPartialError(`部分数据加载失败：${failures.join('、')}`)
+      }
     } finally {
-      setLoading(false)
+      if (requestId === dashboardRequestId.current) setLoading(false)
     }
   }, [])
 
-  useEffect(() => { loadDashboard() }, [loadDashboard])
+  useEffect(() => {
+    loadDashboard()
+    return () => {
+      dashboardRequestId.current += 1
+    }
+  }, [loadDashboard])
 
   /* ── 加载错题本 ────────────────────────────────────────────────── */
   const loadWrongQuestions = useCallback(async (documentId) => {
@@ -106,6 +144,16 @@ export default function Dashboard() {
         <p className="page-desc">基于三层记忆系统的学习分析：知识点掌握度、学习趋势、错题回顾。</p>
       </header>
 
+      {partialError && !error && (
+        <div className="load-error-state dash-partial-error" role="alert">
+          <p className="state-title">部分数据暂不可用</p>
+          <p className="state-desc">{partialError}</p>
+          <button type="button" className="state-action" onClick={loadDashboard}>
+            重新加载
+          </button>
+        </div>
+      )}
+
       {error ? (
         <div className="load-error-state" role="alert">
           <p className="state-title">无法加载学习报告</p>
@@ -114,7 +162,7 @@ export default function Dashboard() {
             重新加载
           </button>
         </div>
-      ) : noProfile && realSessions.length === 0 ? (
+      ) : !partialError && noProfile && realSessions.length === 0 ? (
         <div className="dash-empty">
           <div className="empty-icon">
             <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round">

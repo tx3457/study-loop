@@ -114,5 +114,5 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
-      - name: Validate Docker Compose configuration
-        run: ENV_FILE=.env.example docker compose config --quiet
+      - name: Validate Docker Compose security defaults
+        run: python scripts/check_compose_security.py

@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 
 from models.grader import AIFeedback, QuestionGrade, GradingReport
 from models.quiz import Question
-from services.llm import structured_client as client, structured_model as model
+from services.llm import llm_parse, structured_client as client, structured_model as model
 from services.session import answers_match, sessions
 
 load_dotenv(Path(__file__).parent.parent / ".env")
@@ -28,8 +28,7 @@ async def _llm_grade(question: Question, user_answer: str) -> AIFeedback:
     if question.options:
         options_text = f"\n选项：{', '.join(question.options)}"
 
-    response = await client.beta.chat.completions.parse(
-        model=model,
+    response = await llm_parse(
         messages=[
             {"role": "system", "content": GRADER_SYSTEM_PROMPT},
             {
@@ -46,6 +45,8 @@ async def _llm_grade(question: Question, user_answer: str) -> AIFeedback:
             },
         ],
         response_format=AIFeedback,
+        client=client,
+        model=model,
     )
     return response.choices[0].message.parsed
 

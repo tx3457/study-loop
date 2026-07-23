@@ -5,7 +5,6 @@ from models.quiz import Question
 from models.session import QuizSession, QuestionView, SessionStartRequest
 
 # 内存错题库：{document_id: {entry_id: WrongEntry}}
-# Phase 3 升级为持久化存储
 wrong_bank: dict[str, dict[str, WrongEntry]] = {}
 
 # 避免循环导入，在函数内部 import sessions

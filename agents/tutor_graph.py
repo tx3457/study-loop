@@ -1,5 +1,5 @@
 """
-Tutor Graph：Supervisor-based Multi-Agent 图（Phase 2：跑通 guided 教学闭环 + HITL interrupt）
+Tutor Graph：Supervisor-based Multi-Agent guided 教学闭环 + HITL interrupt
 
 结构（与 orchestrator.py 的静态 if/else 流水线对照）：
   START → tutor_input_guard → teaching_supervisor
@@ -9,7 +9,7 @@ Tutor Graph：Supervisor-based Multi-Agent 图（Phase 2：跑通 guided 教学�
             ↓
         tutor_output_guard → END
 
-Phase 2 闭环（guided 模式）：
+guided 模式闭环：
   diagnostic → quiz → critic →（reviser↔critic 精修）→ wait_for_answers(暂停)
             → [Command(resume=answers)] → grader → supervisor 决策下一轮 / finish
 
@@ -105,7 +105,7 @@ async def _critic_node(state: TutorState) -> dict:
     """质量门：调 critic_agent subgraph 评估题目质量，累积 critique 并置 critic_passed。
 
     与 orchestrator._critic_adapter 同构：critic 自主拉一次最新 chunks 作证据，revision_count +1。
-    Phase 2 新增：根据 overall_score/severity 判定是否通过（overall>=0.7 且无 high severity），
+    根据 overall_score/severity 判定是否通过（overall>=0.7 且无 high severity），
     置位 critic_passed，供 supervisor 规则路径放行到 wait_for_answers。
     """
     # 拉一次最新 chunks 给 critic 作证据（独立于 quiz_agent 内部检索）
@@ -211,7 +211,7 @@ async def wait_for_answers(state: TutorState) -> dict:
     }
 
 
-# ── Phase 2 stub：tutor（讲解可后续接 adaptive_loop.generate_lesson）─
+# ── tutor stub：阻止 supervisor 连续只讲不练 ───────────────────────────────
 async def _tutor_stub(state: TutorState) -> dict:
     """tutor 占位：标记不再连续讲（allow_teach=False），避免 supervisor 连续只讲不练。"""
     logger.info("[tutor_graph._tutor_stub] stub, mark allow_teach=False")
@@ -221,7 +221,7 @@ async def _tutor_stub(state: TutorState) -> dict:
 # ── 编译图 ───────────────────────────────────────────────────────────────────
 _builder = StateGraph(TutorState)
 
-# 节点名沿用 input_guard/output_guard（与 Phase 1 骨架一致、supervisor._FINISH_NODE 对齐），
+# 节点名沿用 input_guard/output_guard，并与 supervisor._FINISH_NODE 对齐，
 # 但绑定的是 guided 专用的轻量 guard 函数（不复用 orchestrator 的 quiz/grade/plan 校验）。
 _builder.add_node("input_guard",         tutor_input_guard)   # guided 轻量输入校验
 _builder.add_node("teaching_supervisor", _supervisor_node)    # LLM 动态编排大脑
@@ -256,7 +256,7 @@ _builder.add_edge("output_guard", END)
 tutor_graph = _builder.compile()
 
 
-# ── Durable Checkpointer 工厂（Phase 2：interrupt 依赖 checkpointer 持久化中断点）──────
+# ── Durable Checkpointer 工厂（interrupt 依赖 checkpointer 持久化中断点）──────
 def compile_tutor_graph(checkpointer):
     """用同一个 StateGraph builder 编译一份带 checkpointer 的 tutor_graph。
 

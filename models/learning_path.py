@@ -1,7 +1,7 @@
 """
-Learning Path 数据模型（Phase 8 P4：planner 多阶段流水线升级）
+Learning Path 数据模型
 
-新增 3 个中间数据类，对应 brief → explore → compress → synthesize 四阶段：
+数据模型对应 brief → explore → compress → synthesize 流水线：
   - PathBrief         : brief_extraction 阶段产出（结构化用户意图）
   - ExplorationReport : explore 阶段产出（并行 RAG 召回的 chunks + 候选概念）
   - CompressedReport  : compress 阶段产出（压缩到 ~1000 token 的摘要）
@@ -11,7 +11,7 @@ Learning Path 数据模型（Phase 8 P4：planner 多阶段流水线升级）
 from pydantic import BaseModel, Field
 
 
-# ── 现有 schema（不动，下游兼容）────────────────────────────────────────────
+# ── 对外 schema（保持下游兼容）──────────────────────────────────────────────
 class LearningStage(BaseModel):
     stage: int
     title: str
@@ -27,7 +27,7 @@ class LearningPath(BaseModel):
     stages: list[LearningStage]
 
 
-# ── 新增：多阶段中间数据 ────────────────────────────────────────────────────
+# ── 多阶段中间数据 ──────────────────────────────────────────────────────────
 class PathBrief(BaseModel):
     """brief_extraction 阶段：把用户 query 改写成结构化意图。"""
     title: str = Field(description="规划标题，例如 '掌握 RAG 系统基础'")

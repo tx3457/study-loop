@@ -1,5 +1,5 @@
 """
-Assistant ask_user interrupt + resume 集成测试（Phase 4 里程碑二）
+Assistant ask_user interrupt + resume 集成测试
 
 用真 AsyncSqliteSaver(临时 db) + mock run_tool_round，验证 assistant 的 HITL：
   1) assist 模式跑到 assistant 内部 ask_user → interrupt 暂停 → 返回值含 __interrupt__，payload 带 question
@@ -15,7 +15,7 @@ interrupt 重放语义说明（关键，决定 mock side_effect 顺序）：
   因此 mock side_effect = [ask_user, ask_user(replay), finalize]。
 
 跑（用 3.11+ 解释器，需装 langgraph / langgraph-checkpoint-sqlite / aiosqlite / openai）：
-  python -m pytest test/test_tutor_assist_interrupt.py -q
+  python -m pytest tests/test_tutor_assist_interrupt.py -q
 """
 import sys
 import tempfile

@@ -1,5 +1,5 @@
 """
-多格式文档解析（Phase 8 升级 P0-1，借鉴 AgentCraft core/parser.py）
+多格式文档解析
 
 支持格式：
   .pdf          → 文本型走 PyPDFLoader；扫描型自动 fallback 到 pdf2image + OCR
@@ -7,10 +7,10 @@
   .txt / .md    → TextLoader（utf-8 / GBK fallback）
   .png/.jpg/... → OCRBackend.recognize()
 
-设计选择（面试讲点）：
+设计选择：
   1. 解析与切分解耦：parser 只产 Document，chunker 单独负责切块
-  2. OCRBackend 抽象（Strategy 模式）：当前用 Tesseract，未来加 PaddleOCRBackend
-     实现同一接口、改一行配置即可切换（Open/Closed 原则）
+  2. OCRBackend 抽象（Strategy 模式）：当前用 Tesseract，其他 backend
+     可实现同一接口并通过配置切换
   3. PDF 两路径自动切换：
        PyPDFLoader 抽到的文本长度 < 阈值 → 判定为扫描型 → pdf2image + 每页 OCR
        否则 → 文本路径
@@ -223,7 +223,7 @@ def _ocr_scanned_pdf(file_bytes: bytes, filename: str) -> list[Document]:
             total_pages = int(pdfinfo_from_bytes(file_bytes).get("Pages", 0)) or None
         except Exception:
             total_pages = None
-        # dpi=200 是质量/速度平衡点；fmt=jpeg 比 png 小 30%
+        # dpi=200 平衡识别质量与转换开销；JPEG 控制中间图像体积。
         images = convert_from_bytes(
             file_bytes,
             dpi=200,
@@ -356,7 +356,7 @@ async def parse_upload(file_bytes: bytes, filename: str) -> list[Document]:
         raise DocumentParseError from exc
 
 
-# 暴露给上层（便于面试讲点时引用 + 单测）
+# 暴露给上层调用和单测
 def get_ocr_backend_name() -> str:
     return _ocr_backend.name
 

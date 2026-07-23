@@ -1,8 +1,7 @@
 """
-自适应文档切分（Phase 8 升级 P0-2，借鉴 AgentCraft core/text_splitter.py）
+自适应文档切分
 
 为什么不直接用 RecursiveCharacterTextSplitter：
-  - 项目 README 一直宣称 SemanticChunker，但 routers/documents.py 实际用的是 Recursive。
   - Recursive 用通用分隔符，对中文段落结构感知差；对 PDF 多列布局会在中文标点处错切。
   - AdaptiveChunker = 段落优先 → 句子兜底 → 标点兜底 → 硬切兜底，按文件类型自动选策略。
 
@@ -24,7 +23,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 logger = logging.getLogger(__name__)
 
 
-# ── 切分参数（写成模块常量，便于面试时讲"这些是经验值，可以通过 chunk_size sweep 调"）─
+# ── 切分参数（模块常量，便于通过 chunk_size sweep 调优）────────────────────
 DEFAULT_CHUNK_SIZE = 500
 DEFAULT_CHUNK_OVERLAP = 50
 DEFAULT_MIN_CHUNK_SIZE = 100

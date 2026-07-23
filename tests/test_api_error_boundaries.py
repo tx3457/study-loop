@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from fastapi.testclient import TestClient
 from chromadb.errors import InternalError, NotFoundError
-from openai import APIConnectionError
+from openai import APIConnectionError, APITimeoutError, RateLimitError
 
 import routers.autonomous as autonomous_router
 import routers.chat as chat_router
@@ -28,6 +28,7 @@ import services.tools as tool_module
 from main import app
 from models.learning_path import CompressedReport, PathBrief
 from services.autonomous_sessions import AutonomousSessionStore
+from services.provider_config import ProviderDeadlineExceeded
 from services.retry import RetryExhausted
 from services.tool_registry import SideEffectAmbiguousError, tool_registry
 from services.vectorstore import DocumentAlreadyExistsError
@@ -148,7 +149,11 @@ class TestApiErrorBoundaries(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(
             response.json(),
-            {"error": "服务暂时不可用", "detail": "模型服务请求失败"},
+            {
+                "error": "服务暂时不可用",
+                "detail": "模型服务请求失败",
+                "code": "provider_unavailable",
+            },
         )
         self.assertEqual(response.headers.get("access-control-allow-origin"), origin)
 
@@ -171,7 +176,11 @@ class TestApiErrorBoundaries(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(
             response.json(),
-            {"error": "服务暂时不可用", "detail": "模型服务请求失败"},
+            {
+                "error": "服务暂时不可用",
+                "detail": "模型服务请求失败",
+                "code": "provider_unavailable",
+            },
         )
         self.assertFalse(response.json().get("truncated", False))
         self.assertNotEqual(response.json().get("finalize_reason"), "max_rounds_truncated")
@@ -309,7 +318,11 @@ class TestApiErrorBoundaries(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(
             response.json(),
-            {"error": "服务暂时不可用", "detail": "模型服务请求失败"},
+            {
+                "error": "服务暂时不可用",
+                "detail": "模型服务请求失败",
+                "code": "provider_unavailable",
+            },
         )
         restored = self._inspect_session(conversation_id)
         self.assertEqual(
@@ -671,7 +684,11 @@ class TestApiErrorBoundaries(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(
             response.json(),
-            {"error": "服务暂时不可用", "detail": "模型服务请求失败"},
+            {
+                "error": "服务暂时不可用",
+                "detail": "模型服务请求失败",
+                "code": "provider_unavailable",
+            },
         )
         self.assertEqual(response.headers.get("access-control-allow-origin"), origin)
 
@@ -729,10 +746,77 @@ class TestApiErrorBoundaries(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(
             response.json(),
-            {"error": "服务暂时不可用", "detail": "模型服务请求失败"},
+            {
+                "error": "服务暂时不可用",
+                "detail": "模型服务请求失败",
+                "code": "provider_unavailable",
+            },
         )
         self.assertNotIn("internal-model-42", response.text)
         self.assertEqual(response.headers.get("access-control-allow-origin"), origin)
+
+    def test_provider_deadline_is_stable_504(self):
+        with patch.object(
+            learning_path_router,
+            "generate_learning_path",
+            AsyncMock(side_effect=ProviderDeadlineExceeded(30.0)),
+        ):
+            response = self.client.post("/learning-path/notes.md")
+
+        self.assertEqual(response.status_code, 504)
+        self.assertEqual(
+            response.json(),
+            {
+                "error": "模型服务请求超时",
+                "detail": "模型服务未在时间预算内响应",
+                "code": "provider_timeout",
+            },
+        )
+
+    def test_provider_sdk_timeout_is_stable_504(self):
+        timeout = APITimeoutError(
+            request=httpx.Request(
+                "POST", "https://provider.invalid/v1/chat/completions"
+            )
+        )
+        with patch.object(
+            learning_path_router,
+            "generate_learning_path",
+            AsyncMock(side_effect=timeout),
+        ):
+            response = self.client.post("/learning-path/notes.md")
+
+        self.assertEqual(response.status_code, 504)
+        self.assertEqual(response.json()["code"], "provider_timeout")
+
+    def test_retry_exhausted_rate_limit_is_stable_429(self):
+        request = httpx.Request(
+            "POST", "https://provider.invalid/v1/chat/completions"
+        )
+        upstream = RateLimitError(
+            "rate limited",
+            response=httpx.Response(429, request=request),
+            body=None,
+        )
+        exhausted = RetryExhausted("provider retries exhausted")
+        exhausted.__cause__ = upstream
+
+        with patch.object(
+            learning_path_router,
+            "generate_learning_path",
+            AsyncMock(side_effect=exhausted),
+        ):
+            response = self.client.post("/learning-path/notes.md")
+
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(
+            response.json(),
+            {
+                "error": "模型服务请求过于频繁",
+                "detail": "模型服务当前限流，请稍后重试",
+                "code": "provider_rate_limited",
+            },
+        )
 
 
 class TestLearningPathProviderBoundary(unittest.IsolatedAsyncioTestCase):
