@@ -1,16 +1,16 @@
 """
-TeachingSupervisor：Supervisor-based Multi-Agent 的决策大脑（Phase 1 骨架）
+TeachingSupervisor：Supervisor-based Multi-Agent 的决策大脑
 
 和现有 orchestrator.py 的本质区别：
-  老（规则 workflow）：input_guard → _route(if/else 按 action 硬分流) → worker...
-                      → critic → _should_revise(阈值) → 重出 or 收尾
-  新（LLM supervisor）：input_guard → teaching_supervisor(LLM 动态编排) ⇄ worker...
-                      supervisor 每轮看"完整观察"（mode/turn/已完成 worker/批改/critique/轨迹）
-                      推理出"下一步派哪个 worker、做什么动作"，worker 干完回流 supervisor 再决策，
-                      直到 finish / 达到 MAX_HANDOFFS。
+  规则 workflow：input_guard → _route(if/else 按 action 硬分流) → worker...
+                 → critic → _should_revise(阈值) → 重出 or 收尾
+  LLM supervisor：input_guard → teaching_supervisor(LLM 动态编排) ⇄ worker...
+                  supervisor 每轮看"完整观察"（mode/turn/已完成 worker/批改/critique/轨迹）
+                  推理出"下一步派哪个 worker、做什么动作"，worker 干完回流 supervisor 再决策，
+                  直到 finish / 达到 MAX_HANDOFFS。
 
-灰度并存：Phase 1 只新建本模块 + tutor_graph，不动 orchestrator/worker/routers。
-通过 env MAS_SUPERVISOR_ENABLED 控制是否启用（默认 false），上层接线在 Phase 2/前端。
+通过 env MAS_SUPERVISOR_ENABLED 控制是否启用（默认 false），与现有
+orchestrator/worker/routers 链路灰度并存。
 
 健壮性（fail-soft，沿用 adaptive_loop 的精神）：
   supervisor_mode=="rule"（ablation）或 llm_parse 任何异常 → _rule_fallback_next 规则兜底，
@@ -33,8 +33,8 @@ MAX_HANDOFFS = 8                 # supervisor 最多 8 次 handoff，防 LLM 编
 MAX_REVISIONS = 2                # critic↔reviser 精修上限（复刻 orchestrator._should_revise 的 revision_count<2）
 
 # 合法枚举（_normalize_decision 用）
-# Phase 2：把 critic（质量门）/ reviser（精修）/ await_answers（等待作答 interrupt）
-# 纳入 supervisor 可调度范围。await_answers 是内部编排目标（不出题、不批改，
+# critic（质量门）/ reviser（精修）/ await_answers（等待作答 interrupt）均纳入
+# supervisor 可调度范围。await_answers 是内部编排目标（不出题、不批改，
 # 仅声明"quiz 已过审 → 去等学生作答"），不会暴露给 LLM 让它乱填。
 _AGENTS = {"diagnostic", "planner", "quiz", "grader", "tutor", "assistant",
            "critic", "reviser", "await_answers", "finish"}
@@ -191,7 +191,7 @@ def _rule_fallback_next(state: dict) -> SupervisorDecision:
 
     复刻来源：
       1) orchestrator._route：按 action 字段硬分流（plan→planner / grade→grader）
-      2) Phase 2 质量门：quiz 出题后 → critic 审核；critic 低分(overall<0.7/high severity)且
+      2) 质量门：quiz 出题后 → critic 审核；critic 低分(overall<0.7/high severity)且
          revision_count<MAX_REVISIONS → reviser 精修后回 critic 重审；通过 → await_answers 等作答
       3) orchestrator._should_revise：critic↔reviser 精修上限 revision_count<2
       4) adaptive_loop._rule_fallback：开场 medium 巩固；有结果时 score<0.5 降难度补薄弱点，否则升难度
@@ -251,7 +251,7 @@ def _rule_fallback_next(state: dict) -> SupervisorDecision:
         )
 
     # (E) 开场（还没诊断过）→ 先诊断学情（对应 orchestrator quiz 流先走 adapt_reader）
-    #   用 diagnosed 标记防反复诊断；兼容旧测试用 history 模拟"已诊断"。
+    #   用 diagnosed 标记防反复诊断；history 非空也视为已诊断。
     if not state.get("diagnosed") and not history:
         return SupervisorDecision(
             next_agent="diagnostic", action="continue", topic=goal,
@@ -307,7 +307,7 @@ def _rule_fallback_next(state: dict) -> SupervisorDecision:
 
 
 def _oneshot_next(state: dict) -> SupervisorDecision:
-    """oneshot 模式单跳路由（Phase 3）：按 state["action"] 单跳到对应 worker 后 finish。
+    """oneshot 模式单跳路由：按 state["action"] 单跳到对应 worker 后 finish。
 
     与 guided 的 _rule_fallback_next 不同：oneshot 不进 supervisor⇄worker 循环、不 interrupt、
     不批改作答；action 已经明确，纯规则即可（不调 LLM）。worker 干完回流 supervisor 后，
@@ -377,7 +377,7 @@ def _oneshot_quiz_critic_enabled() -> bool:
 
 
 def _assist_next(state: dict) -> SupervisorDecision:
-    """assist 模式路由（Phase 4）：assistant 未收尾 → goto assistant；已 finalize → finish。
+    """assist 模式路由：assistant 未收尾 → goto assistant；已 finalize → finish。
 
     assistant worker 内部跑 ReAct 多轮并用 interrupt 处理 ask_user；finalize/截断时
     置 assistant_done=True 回流 supervisor，此处据此单调推进到 finish。
@@ -480,7 +480,7 @@ async def teaching_supervisor(state: dict) -> Command:
         logger.warning(f"[supervisor] handoff_count {handoffs} >= MAX_HANDOFFS={MAX_HANDOFFS} → finish")
         return Command(goto=_FINISH_NODE, update=_terminate_update(state, "max_handoffs"))
 
-    # ②a oneshot 模式（Phase 3）：按 action 单跳到对应 worker → finish，纯规则不调 LLM。
+    # ②a oneshot 模式：按 action 单跳到对应 worker → finish，纯规则不调 LLM。
     #     不进 guided 的 supervisor⇄worker 循环、不 interrupt、不 reviser 循环。
     #     置于 mastery 兜底之前：oneshot grade/quiz 始终以 agent_finish 单跳收尾（确定性语义）。
     decision: SupervisorDecision
@@ -490,7 +490,7 @@ async def teaching_supervisor(state: dict) -> Command:
         decision = _normalize_decision(decision)
         return _oneshot_command(state, decision, handoffs)
 
-    # ②b assist 模式（Phase 4）：路由到 assistant ReAct worker；finalize 后 finish。
+    # ②b assist 模式：路由到 assistant ReAct worker；finalize 后 finish。
     #     assistant 内部用 interrupt 处理 ask_user（HITL）；assistant_done 置位 → 收尾。
     if state.get("mode") == "assist":
         decision = _assist_next(state)

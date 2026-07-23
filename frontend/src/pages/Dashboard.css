@@ -24,6 +24,11 @@
   animation: spin 0.8s linear infinite;
 }
 
+.dash-partial-error {
+  margin-bottom: 24px;
+  padding: 24px 20px;
+}
+
 @keyframes spin { to { transform: rotate(360deg); } }
 
 /* ── Empty State ──────────────────────────────────────────────────── */

@@ -5,9 +5,11 @@ from openai import AsyncOpenAI
 from models.chat import ChatResponse, StructuredResponse
 
 from services.provider_config import (
+    PROVIDER_REQUEST_DEADLINE_SECONDS,
     PROVIDER_TIMEOUT,
     build_managed_async_openai,
     load_provider_configs,
+    run_with_provider_deadline,
 )
 from services.retry import with_retry
 
@@ -33,7 +35,7 @@ structured_client = build_managed_async_openai(_structured_config)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 统一 LLM 入口（D1）：把 services/retry.py 的退避重试横切到所有裸 LLM 调用。
+# 统一 LLM 入口：为经本模块发起的调用应用退避重试和总时间预算。
 #
 # 设计：
 #   - llm_chat  → chat.completions.create（普通对话 / function calling）
@@ -41,8 +43,7 @@ structured_client = build_managed_async_openai(_structured_config)
 #   - 两者都 client 注入：默认用模块级 _client，传入 client 则用传入的，
 #     保留 adaptive / routers 既有的 mock 能力。
 #   - with_retry 要求 fn 是「无参 callable 返回新 coroutine」，故用 lambda 包裹。
-#   - max_retries 默认 2（routers/adaptive 的裸调用此前无重试，这里给一层薄保护）；
-#     调用方可传 max_retries=0 退回「只调一次」的旧语义。
+#   - max_retries 默认 2；调用方可传 max_retries=0 禁用重试。
 # ═══════════════════════════════════════════════════════════════════════════
 async def llm_chat(
     messages: list,
@@ -51,20 +52,24 @@ async def llm_chat(
     max_retries: int = 2,
     base_delay: float = 1.0,
     timeout: Optional[float] = None,
+    total_timeout: Optional[float] = PROVIDER_REQUEST_DEADLINE_SECONDS,
     **kwargs,
 ):
-    """统一 chat.completions.create 入口，带退避重试 + 可选 per-call 超时。
+    """统一 chat.completions.create 入口，带重试和端到端时间预算。
 
     透传 model 之外的全部 kwargs（tools / tool_choice / temperature / max_tokens / stream...）。
     model 默认取模块级配置，可被 kwargs 覆盖。
     """
     use_client = client or _client
     kwargs.setdefault("model", model)
-    return await with_retry(
-        lambda: use_client.chat.completions.create(messages=messages, **kwargs),
-        max_retries=max_retries,
-        base_delay=base_delay,
-        timeout=timeout,
+    return await run_with_provider_deadline(
+        lambda: with_retry(
+            lambda: use_client.chat.completions.create(messages=messages, **kwargs),
+            max_retries=max_retries,
+            base_delay=base_delay,
+            timeout=timeout,
+        ),
+        total_timeout=total_timeout,
     )
 
 
@@ -76,21 +81,25 @@ async def llm_parse(
     max_retries: int = 2,
     base_delay: float = 1.0,
     timeout: Optional[float] = None,
+    total_timeout: Optional[float] = PROVIDER_REQUEST_DEADLINE_SECONDS,
     **kwargs,
 ):
-    """统一 beta.chat.completions.parse 入口（结构化输出），带退避重试。
+    """统一结构化输出入口，带重试和端到端时间预算。
 
     默认走 structured_client / structured_model：chat 与结构化输出可分属不同厂商。
     """
     use_client = client or structured_client
     kwargs.setdefault("model", structured_model)
-    return await with_retry(
-        lambda: use_client.beta.chat.completions.parse(
-            messages=messages, response_format=response_format, **kwargs
+    return await run_with_provider_deadline(
+        lambda: with_retry(
+            lambda: use_client.beta.chat.completions.parse(
+                messages=messages, response_format=response_format, **kwargs
+            ),
+            max_retries=max_retries,
+            base_delay=base_delay,
+            timeout=timeout,
         ),
-        max_retries=max_retries,
-        base_delay=base_delay,
-        timeout=timeout,
+        total_timeout=total_timeout,
     )
 
 

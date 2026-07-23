@@ -1,5 +1,5 @@
 """
-A/B 评测服务（Phase 7 工程补洞 #3）
+A/B 评测服务
 
 ── 架构 ─────────────────────────────────────────────────────────────────────
 两层设计：
@@ -10,17 +10,11 @@ A/B 评测服务（Phase 7 工程补洞 #3）
   experiment="ce"  → 同一检索结果，对比有/无 Context Engineering
   experiment="rag" → 同一 query，对比纯向量 vs Hybrid 检索
 
-── 面试表述 ─────────────────────────────────────────────────────────────────
-"评测流水线分两步：先用 structured output 让 LLM 对每道题打分（相关性、清晰度、
- 忠实度、知识点覆盖），再聚合为 A/B 两组的覆盖率和难度分布差异。控制变量通过
- 共用 chunks（CE 实验）或共用 query（RAG 实验）实现。"
 """
 import asyncio
 import logging
-import os
 from pathlib import Path
 
-from openai import AsyncOpenAI
 from dotenv import load_dotenv
 
 from models.eval import (
@@ -29,15 +23,16 @@ from models.eval import (
 )
 from models.quiz import QuizResponse
 from services.rag import generate_question_from_chunks
+from services.llm import (
+    llm_parse,
+    structured_client as _client,
+    structured_model as _model,
+)
 from services.vectorstore import hybrid_query_document, query_document
 from services.tracing import traceable
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 logger = logging.getLogger(__name__)
-
-# judge 用 json_schema 结构化输出 → 走 structured 供应商
-from services.llm import structured_client as _client, structured_model as _model
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 1. LLM-as-Judge
@@ -68,9 +63,7 @@ async def judge_question(
     避免自由文本解析错误和幻觉评分。
     """
     try:
-        resp = await _client.beta.chat.completions.parse(
-            model=_model,
-            max_tokens=512,
+        resp = await llm_parse(
             messages=[
                 {"role": "system", "content": JUDGE_SYSTEM},
                 {"role": "user", "content": (
@@ -82,6 +75,9 @@ async def judge_question(
                 )},
             ],
             response_format=JudgeScore,
+            client=_client,
+            model=_model,
+            max_tokens=512,
         )
         score = resp.choices[0].message.parsed
         if score is None:

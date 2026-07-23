@@ -1,5 +1,5 @@
 """
-retrieve_with_rewrite 单测(Phase 9 P0-5 生产接入)
+retrieve_with_rewrite 单测
 
 验证生产检索入口的改写编排逻辑,全部 mock 掉 LLM(query_rewriter)与 ChromaDB(hybrid_query_document),
 只测纯编排:单 query 直连 / 多 query RRF 合并 / 去重 / 全失败兜底 / 双开关关闭零行为变化。

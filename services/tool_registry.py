@@ -1,5 +1,5 @@
 """
-Tool Registry + Audit Trail（Phase 8 P1-2 升级）
+Tool Registry + Audit Trail
 
 面向 StudyLoop 异步工具调用路径的统一注册表：
   - 超时机制：用 asyncio.wait_for（cooperative cancel），不用 ThreadPoolExecutor（伪超时）
@@ -7,7 +7,7 @@ Tool Registry + Audit Trail（Phase 8 P1-2 升级）
   - 元数据：每个 tool 单独声明 timeout / retry / permission / effect_mode
   - 审计：内存 LRU 记录每次 invoke 的输入/输出/耗时/状态，可按 run_id/user_id 查询
 
-设计选择（面试讲点）：
+设计选择：
   1. 单例：ToolRegistry 全局唯一，避免 tool 重复注册和 audit 数据分裂
   2. 内存 LRU audit：1000 条上限，零依赖。生产里换 PostgreSQL 只改这一个类
      （Strategy Pattern + Open/Closed）
@@ -377,7 +377,7 @@ class ToolRegistry:
         )
 
     def audit_summary(self) -> dict:
-        """整体审计摘要：tool 调用计数、平均时长、错误率。便于面试演示。"""
+        """整体审计摘要：tool 调用计数、平均时长、错误率。"""
         from collections import Counter
         by_tool: dict[str, list[ToolCallRecord]] = {}
         for r in self._audit_log:

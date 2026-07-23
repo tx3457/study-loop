@@ -66,7 +66,13 @@ example configuration.
 - The standalone API currently has no trusted authentication subject. A
   `conversation_id` is therefore a high-entropy bearer capability, not an
   authorization boundary, and deployments must be treated as single-user or
-  placed behind authentication. The ID is no longer logged in full.
+  placed behind authentication. The default Compose file binds the Web and API
+  ports to loopback and does not publish PostgreSQL; preserve an equivalent
+  boundary when adapting it. The ID is no longer logged in full.
+- Audit responses are redacted by default. Full tool arguments, output previews,
+  and retrieved text remain unavailable unless a trusted deployment explicitly
+  sets `AUDIT_PAYLOAD_ENABLED=true`; this switch is not a substitute for
+  authentication.
 - Session transitions and idempotency receipts share the configured database by
   default; `AUTONOMOUS_SESSION_DB_PATH` may override the local session file.
   They are still separate transactions. This is fail-closed at-most-once

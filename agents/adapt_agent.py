@@ -1,17 +1,13 @@
 """
-AdaptAgent（Phase 8 P3 升级：精准 bank 读取 + decision_log）
+AdaptAgent：精准 bank 读取 + decision_log
 
 两个 subgraph：
   adapt_reader  → 出题前：精准读 mastery / weak_points / preferences 三个 bank
                   + 写一条 decision_log 记录"为什么选这个难度"
-  adapt_writer  → 批改后：write_episodic_memory + update_semantic_memory（旧 API 内部分发到新 bank）
+  adapt_writer  → 批改后：write_episodic_memory + update_semantic_memory（兼容 API 内部分发到语义 bank）
 
-升级前：调用 get_user_profile 拉一坨 profile（O(全部字段) 的内存读 + 反序列化）
-升级后：分别调 get_mastery / get_weak_points / get_preferences——按需取，每次只读必要 bank
-
-为什么写 decision_log（面试讲点）：
-  把 Adapt 的"推理过程"持久化成可审计的事件，复用 P1-2 audit 的精神到记忆层。
-  后续 critic / 评估系统可以查 decision_log 看"为什么是这个难度而不是别的"。
+decision_log 将 Adapt 的"推理过程"持久化成可审计事件。
+critic / 评估系统可以查 decision_log 看"为什么是这个难度而不是别的"。
 """
 from langgraph.graph import END, START, StateGraph
 
@@ -44,7 +40,7 @@ async def _read_profile(state: OrchestratorState) -> dict:
     document_id = state["document_id"]
 
     # 精准 3 bank 读，不再拉一坨 profile
-    # weak_points 按当前文档隔离（2026-06-03 跨学科改进），避免别领域薄弱点污染本文档出题
+    # weak_points 按当前文档隔离，避免别领域薄弱点污染本文档出题
     mastery_val = await get_mastery(user_id, document_id)
     weak_points = await get_weak_points(user_id, document_id)
     prefs = await get_preferences(user_id)
@@ -84,7 +80,7 @@ _rb.add_edge("read_profile", END)
 adapt_reader = _rb.compile()
 
 
-# ── adapt_writer：批改后写回（旧 API 内部已分发到新 bank）────────────────────
+# ── adapt_writer：批改后写回语义 bank ──────────────────────────────────────
 @traceable(name="adapt_agent.write_profile", run_type="chain")
 async def _write_profile(state: OrchestratorState) -> dict:
     """批改后：session_briefs + error_log + mastery + weak_points 全部更新。"""

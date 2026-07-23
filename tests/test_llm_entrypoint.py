@@ -1,16 +1,18 @@
 """
-统一 LLM 入口测试（D1）
+统一 LLM 入口测试
 
 验证 services/llm.py 的 llm_chat / llm_parse：
   1. client 注入：传入的 mock client 被使用（不碰模块级 _client）
   2. kwargs 透传：tools / response_format / model override 正确传递
   3. 重试横切：transient 错误（RateLimitError）会触发 with_retry 重试后成功
-  4. max_retries=0 退回「只调一次」旧语义
+  4. max_retries=0 时只调用一次
   5. 4xx 客户端错误不重试，直接抛出
 
 全程 mock，无网络。跑：
-  python -m pytest test/test_llm_entrypoint.py -q
+  python -m pytest tests/test_llm_entrypoint.py -q
 """
+import asyncio
+import ast
 import sys
 import unittest
 from pathlib import Path
@@ -23,6 +25,18 @@ from openai import APIStatusError, RateLimitError
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import services.llm as llm
+from services.provider_config import ProviderDeadlineExceeded
+
+
+def _attribute_chain(node):
+    parts = []
+    current = node
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    if isinstance(current, ast.Name):
+        parts.append(current.id)
+    return tuple(reversed(parts))
 
 
 def _resp(content="ok"):
@@ -101,6 +115,23 @@ class TestLlmChat(unittest.IsolatedAsyncioTestCase):
                                client=mock_client, base_delay=0.0)
         self.assertEqual(mock_client.chat.completions.create.await_count, 1)
 
+    async def test_total_timeout_cancels_the_retry_budget(self):
+        async def never_returns(**_kwargs):
+            await asyncio.Event().wait()
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(side_effect=never_returns)
+
+        with self.assertRaises(ProviderDeadlineExceeded) as raised:
+            await llm.llm_chat(
+                [{"role": "user", "content": "hi"}],
+                client=mock_client,
+                total_timeout=0.01,
+            )
+
+        self.assertEqual(raised.exception.deadline_seconds, 0.01)
+        self.assertEqual(mock_client.chat.completions.create.await_count, 1)
+
 
 class TestLlmParse(unittest.IsolatedAsyncioTestCase):
 
@@ -130,6 +161,61 @@ class TestLlmParse(unittest.IsolatedAsyncioTestCase):
                                   response_format=dict, client=mock_client, base_delay=0.0)
         self.assertEqual(out.choices[0].message.parsed, "ok")
         self.assertEqual(mock_client.beta.chat.completions.parse.await_count, 2)
+
+    async def test_total_timeout_applies_to_structured_output(self):
+        async def never_returns(**_kwargs):
+            await asyncio.Event().wait()
+
+        mock_client = MagicMock()
+        mock_client.beta.chat.completions.parse = AsyncMock(side_effect=never_returns)
+
+        with self.assertRaises(ProviderDeadlineExceeded):
+            await llm.llm_parse(
+                [{"role": "user", "content": "hi"}],
+                response_format=dict,
+                client=mock_client,
+                total_timeout=0.01,
+            )
+
+        self.assertEqual(mock_client.beta.chat.completions.parse.await_count, 1)
+
+
+class TestProviderCallRouting(unittest.TestCase):
+    def test_business_code_does_not_bypass_the_bounded_provider_entrypoints(self):
+        repo_root = Path(__file__).parent.parent
+        allowed = {
+            Path("services/llm.py"),
+            Path("services/provider_capabilities.py"),
+            Path("services/vectorstore.py"),
+        }
+        forbidden_suffixes = {
+            ("chat", "completions", "create"),
+            ("beta", "chat", "completions", "parse"),
+            ("embeddings", "create"),
+        }
+        violations = []
+
+        for directory in ("agents", "routers", "services"):
+            for path in (repo_root / directory).rglob("*.py"):
+                relative = path.relative_to(repo_root)
+                if relative in allowed:
+                    continue
+                tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+                for node in ast.walk(tree):
+                    if not isinstance(node, ast.Call):
+                        continue
+                    chain = _attribute_chain(node.func)
+                    if any(
+                        chain[-len(suffix):] == suffix
+                        for suffix in forbidden_suffixes
+                    ):
+                        violations.append(f"{relative}:{node.lineno}")
+
+        self.assertEqual(
+            violations,
+            [],
+            "business provider calls must use llm_chat/llm_parse/_embed",
+        )
 
 
 if __name__ == "__main__":

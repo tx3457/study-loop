@@ -1,5 +1,5 @@
 """
-单测:Cross-Encoder Reranker(借鉴 kotaemon rerankings/cohere.py:35-66)
+单测：Cross-Encoder Reranker
 
 不下载真实模型(2.27GB),全部 mock CrossEncoder.predict。
 
@@ -11,7 +11,7 @@
 
 跑法:
   cd study-loop
-  /path/to/python test/test_reranker.py -v
+  python -m pytest tests/test_reranker.py -q
 """
 import asyncio
 import os

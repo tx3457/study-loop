@@ -1,11 +1,7 @@
 """
-Autonomous Agent 端点（Phase 8 P2 升级：Plan-and-Execute → 真 ReAct + HITL）
+Autonomous Agent 端点：ReAct + HITL
 
-── 升级前 ──────────────────────────────────────────────────────────────────
-- Plan-and-Execute：强制生成 plan → 强制 LLM 第一轮调工具 → 检测无 tool_calls 判结束
-- 缺陷：剥夺 LLM 决策权、退出靠"猜"、无 HITL、LLM 健忘
-
-── 升级后 ──────────────────────────────────────────────────────────────────
+── 设计 ────────────────────────────────────────────────────────────────────
 - 真 ReAct：LLM 全权决定每轮动作（含"不调工具"）
 - finalize(reason, final_answer)：LLM 主动声明结束 + 给理由（explicit > implicit）
 - ask_user(question)：LLM 卡住时求助用户，触发两段式 HITL
@@ -19,12 +15,6 @@ Autonomous Agent 端点（Phase 8 P2 升级：Plan-and-Execute → 真 ReAct + H
   Step 3: POST /agent/autonomous/continue
           → 携带 conversation_id + user_reply → 后端恢复 messages 继续 ReAct loop
 
-── 面试讲点 ────────────────────────────────────────────────────────────────
-1. 范式升级：Plan-and-Execute → 真 ReAct（参考 Yao et al. 2022）
-2. Explicit > implicit：finalize 工具取代"无 tool_calls 即结束"的脆弱信号
-3. Web HITL：共享数据库保存暂停点，支持重启与多 worker，替代文件 IPC
-4. State summary injection：context engineering 让 LLM 不健忘
-5. 复用 P1-2 的 ToolRegistry，dispatch_tool 自带超时 / 重试 / audit
 """
 import logging
 import uuid
@@ -261,12 +251,12 @@ class AutonomousResponse(BaseModel):
     truncated: bool = Field(default=False, description="是否触发 max_rounds 强制收尾")
     tools_called: list[str] = Field(default_factory=list, description="所有被调用的工具名（去重）")
 
-    # HITL 字段（P2 新增）
+    # HITL 字段
     awaiting_user_input: bool = Field(default=False, description="是否在等用户回答 ask_user")
     user_question: Optional[str] = Field(default=None, description="ask_user 的具体问题")
     conversation_id: Optional[str] = Field(default=None, description="续跑用 ID")
 
-    # 范式标记（P2 新增）
+    # 范式标记
     finalize_reason: Optional[str] = Field(default=None, description="LLM 调用 finalize 时给的结束理由")
 
     # 可验证引用字段（向后兼容：旧客户端可忽略）
@@ -391,7 +381,7 @@ async def _run_react_loop(
             {"role": "system", "content": build_react_decision_prompt(state_summary)}
         ]
 
-        # ── 单轮：复用 run_tool_round（D4）。控制工具交回本函数处理。──
+        # ── 单轮：run_tool_round 处理业务工具，控制工具交回本函数处理。──
         rr = await run_tool_round(
             messages,
             tools=get_tool_definitions() + _CONTROL_TOOLS,
@@ -597,7 +587,7 @@ async def _execute_autonomous(
     run_id: str,
     idempotency_key: Optional[str],
 ) -> AutonomousResponse:
-    """Autonomous ReAct Agent 端点（P2 升级版）。
+    """Autonomous ReAct Agent 端点。
 
     范式：真 ReAct（LLM 全权决策）
     可选 plan：短 query 跳过，长 query 生成 plan 作为 hint
@@ -626,7 +616,7 @@ async def _execute_autonomous(
         plan = await _generate_plan(req.query, context_hint)
         logger.info(f"[autonomous] plan ({len(plan)} steps): {plan}")
 
-    # 构造初始 messages（去掉旧版的"强制调工具" coercion）
+    # 构造初始 messages；工具调用由 ReAct 自主决策
     messages: list = [
         {"role": "system", "content": _REACT_SYSTEM + context_hint},
         {"role": "user", "content": req.query},

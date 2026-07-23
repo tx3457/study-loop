@@ -1,8 +1,8 @@
 """
-Supervisor-based Multi-Agent 决策模型（Phase 1 骨架）
+Supervisor-based Multi-Agent 决策模型
 
-把现有"规则路由 workflow"（orchestrator._route 的 if/else + _should_revise 阈值）
-升级为 TeachingSupervisor（LLM 动态编排）+ 专职 worker 的真 Multi-Agent。
+TeachingSupervisor 使用 LLM 动态编排专职 worker；规则路由 workflow
+（orchestrator._route + _should_revise）作为并行保留的确定性路径。
 
 和 NextStepDecision（services/adaptive_loop.decide_next_step 产出）的关系：
   - NextStepDecision 只回答"下一步教什么"（action / difficulty / topic ...）；

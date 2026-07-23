@@ -1,8 +1,8 @@
 """
-Assistant Worker：把 autonomous.py 的 ReAct 自由问答能力收编为 supervisor 麾下的图节点（Phase 4）
+Assistant Worker：将 autonomous.py 的 ReAct 自由问答能力接入 supervisor 图节点
 
-和 routers/autonomous.py 的关系（autonomous.py 源码不改，灰度并存）：
-  - autonomous.py：独立端点，HITL 用内存 _sessions dict + /continue 两段式 HTTP
+和 routers/autonomous.py 的关系：
+  - autonomous.py：独立端点，HITL 用 AutonomousSessionStore + /continue 两段式 HTTP
   - assistant_agent.py：作为 tutor_graph 的 assistant 节点，HITL 改用 LangGraph interrupt
     （checkpointer 持久化中断点，崩溃可恢复），由 supervisor 在 mode="assist" 时调度。
 
@@ -20,8 +20,8 @@ interrupt 重放语义（langgraph：节点从头重跑，已解决的 interrupt
   ask_user 命中 → interrupt({"question"})；resume 时 interrupt 返回 user_reply，
   作为该 ask_user tool_call 的 tool response 回灌 messages 后续跑。
   该节点只向模型暴露 READ_ONLY/IDEMPOTENT 工具，并把同一集合传给 dispatch
-  allowlist；未知 MCP 与画像写入不会进入可重放的 interrupt 路径。若未来开放
-  副作用工具，仍需先提供持久幂等键，不能只依赖进程内 audit。
+  allowlist；未知 MCP 与画像写入不会进入可重放的 interrupt 路径。
+  副作用工具必须提供持久幂等键，不能只依赖进程内 audit。
 """
 import logging
 import os

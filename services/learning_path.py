@@ -1,19 +1,16 @@
 """
-Learning Path 多阶段流水线（Phase 8 P4，借鉴 DeepTutor SourceExplorer + open_deep_research compress）
+Learning Path 多阶段流水线
 
-升级前：单步——取全文 join → LLM → LearningPath
-  问题：长文档塞爆 context；planning 没结构化输入；失败无 fallback
-
-升级后：4 阶段流水线 + 可选 critique-revise
+4 阶段流水线 + 可选 critique-revise：
   brief_extraction → explore → compress → synthesize → (critique → revise)?
 
 每个阶段都是纯函数：方便单测 + LangGraph 节点直接复用。
 
-面试讲点：
+设计目标：
   - 解决长文档塞 LLM 爆 context 的硬伤（compress 阶段）
-  - brief 改写让 synthesize 输入稳定（借 open_deep_research write_research_brief）
-  - explore 并行多 query RAG sweep（借 DeepTutor SourceExplorer）
-  - critique-revise 把"双门"模式从出题扩展到规划（借 DeepTutor SpineSynthesizer）
+  - brief 改写让 synthesize 输入稳定
+  - explore 并行多 query RAG sweep
+  - critique-revise 为规划结果增加质量门
 """
 
 import asyncio
@@ -57,16 +54,17 @@ async def extract_brief(document_id: str, user_intent: str = "") -> PathBrief:
     """A 阶段：从文档 id + 可选用户意图 → 结构化 brief。"""
     intent = user_intent.strip() or f"为文档 {document_id} 生成通用学习路径"
     try:
-        resp = await _client.beta.chat.completions.parse(
-            model=_model,
-            messages=[
+        resp = await llm_parse(
+            [
                 {"role": "system", "content": _BRIEF_SYSTEM},
                 {
                     "role": "user",
                     "content": f"文档 ID：{document_id}\n用户意图：{intent}",
                 },
             ],
-            response_format=PathBrief,
+            PathBrief,
+            client=_client,
+            model=_model,
         )
         brief = resp.choices[0].message.parsed
         # 安全限位：阶段数和关键词数
@@ -149,9 +147,8 @@ async def compress(report: ExplorationReport, brief: PathBrief) -> CompressedRep
         )
 
     try:
-        resp = await _client.beta.chat.completions.parse(
-            model=_model,
-            messages=[
+        resp = await llm_parse(
+            [
                 {"role": "system", "content": _COMPRESS_SYSTEM},
                 {
                     "role": "user",
@@ -161,7 +158,9 @@ async def compress(report: ExplorationReport, brief: PathBrief) -> CompressedRep
                     ),
                 },
             ],
-            response_format=CompressedReport,
+            CompressedReport,
+            client=_client,
+            model=_model,
         )
         return resp.choices[0].message.parsed
     except Exception as e:
@@ -232,9 +231,8 @@ async def critique(path: LearningPath, compressed: CompressedReport) -> PathCrit
     """E 阶段：critique LearningPath，决定是否触发 revise。"""
     path_dump = path.model_dump_json()
     try:
-        resp = await _client.beta.chat.completions.parse(
-            model=_model,
-            messages=[
+        resp = await llm_parse(
+            [
                 {"role": "system", "content": _CRITIQUE_SYSTEM},
                 {
                     "role": "user",
@@ -244,7 +242,9 @@ async def critique(path: LearningPath, compressed: CompressedReport) -> PathCrit
                     ),
                 },
             ],
-            response_format=PathCritique,
+            PathCritique,
+            client=_client,
+            model=_model,
         )
         return resp.choices[0].message.parsed
     except Exception as e:
@@ -257,7 +257,7 @@ async def critique(path: LearningPath, compressed: CompressedReport) -> PathCrit
         )
 
 
-# ── 顶层入口（向后兼容旧 API）────────────────────────────────────────────
+# ── 兼容入口 ─────────────────────────────────────────────────────────────
 async def generate_learning_path(
     document_id: str,
     user_intent: str = "",

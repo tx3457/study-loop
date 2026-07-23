@@ -3,10 +3,8 @@ services:
     image: postgres:15
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-studyloop}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-for-shared-environments}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: ${POSTGRES_DB:-studyloop}
-    ports:
-      - "5434:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -18,10 +16,11 @@ services:
   backend:
     build: .
     ports:
-      - "8001:8001"
+      - "127.0.0.1:8001:8001"
     env_file: ${ENV_FILE:-.env}
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-studyloop}:${POSTGRES_PASSWORD:-change-me-for-shared-environments}@postgres:5432/${POSTGRES_DB:-studyloop}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-studyloop}@postgres:5432/${POSTGRES_DB:-studyloop}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     volumes:
       - chromadata:/app/chroma_db
     depends_on:
@@ -31,7 +30,7 @@ services:
   frontend:
     build: ./frontend
     ports:
-      - "4001:80"
+      - "127.0.0.1:4001:80"
     depends_on:
       - backend
 

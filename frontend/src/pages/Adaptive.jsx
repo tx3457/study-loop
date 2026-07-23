@@ -1,15 +1,14 @@
 /**
- * Adaptive Learning 页面（Direction A：Agent 驱动的自适应学习闭环）
+ * Agent 驱动的自适应学习闭环：
  *
- * 演示"会教书"的闭环 agent：
  *   start → agent 决策开场 + 出题 → 用户作答 → submit → 批改 + agent 决策下一步
  *   → 不达标则按决策(advance/remediate/continue)出下一轮 → 直到掌握度达标/练够/转规划
  *
- * 看点：每轮展示 agent 的 decision(action + reason)，以及掌握度/得分轨迹曲线。
+ * 每轮展示 agent 的 decision(action + reason) 以及掌握度/得分轨迹。
  *
  * 状态机：idle → starting → answering → (submitting → answering)* → done | error
  */
-import { useState, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   createIdempotencyKey,
   getDocuments,
@@ -44,21 +43,32 @@ export default function Adaptive() {
   const [error, setError] = useState(null)
   const sid = useRef(null)
   const submitIdempotencyKey = useRef(null)
+  const docsRequestId = useRef(0)
 
   const busy = phase === 'starting' || phase === 'submitting'
 
-  async function loadDocs() {
+  const loadDocs = useCallback(async () => {
+    const requestId = ++docsRequestId.current
     setDocsLoading(true)
     setDocsError(null)
     try {
       const data = await getDocuments()
+      if (requestId !== docsRequestId.current) return
       setDocuments(data.documents || [])
     } catch (err) {
+      if (requestId !== docsRequestId.current) return
       setDocsError(err.message)
     } finally {
-      setDocsLoading(false)
+      if (requestId === docsRequestId.current) setDocsLoading(false)
     }
-  }
+  }, [])
+
+  useEffect(() => {
+    loadDocs()
+    return () => {
+      docsRequestId.current += 1
+    }
+  }, [loadDocs])
 
   /** 统一处理一轮响应:done / 讲解轮(reading)/ 出题轮(answering) */
   function applyTurn(r) {
@@ -252,7 +262,7 @@ export default function Adaptive() {
         </section>
       )}
 
-      {/* ── Agent 决策卡片(核心看点)──────────────────────────────── */}
+      {/* ── Agent 决策卡片 ───────────────────────────────────────── */}
       {d && (
         <div className="decision-card">
           <div className="decision-head">

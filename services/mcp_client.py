@@ -1,10 +1,9 @@
 """
-MCP(Model Context Protocol)客户端 + ToolRegistry 桥接(Phase 9 P0-3)
+MCP(Model Context Protocol)客户端 + ToolRegistry 桥接
 
-设计来源:借鉴 letta/services/mcp/base_client.py:55-113 + stdio_client.py
 精简范围:
   - 只实现 stdio transport(MCP 主流模式,本地子进程,无网络/OAuth)
-  - 不实现 SSE / HTTP / OAuth(后续按需扩展,现阶段单机 demo 不需要)
+  - 不实现 SSE / HTTP / OAuth
 
 集成方式:
   1. MCPClient.connect() 建立 stdio 子进程连接

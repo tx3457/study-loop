@@ -1,8 +1,7 @@
 """
-可复用的单轮 tool-calling（D4）
+可复用的单轮 tool-calling
 
-chat（N≤3）和 autonomous（N≤8 + 控制工具）此前各写一份「LLM→tool_calls→dispatch→回灌」
-循环，内容高度重复且白名单各硬编码一份。这里抽出单轮逻辑 run_tool_round：
+run_tool_round 供 chat（N≤3）和 autonomous（N≤8 + 控制工具）共同调用：
 
   一轮 = 调一次 LLM → 若有 tool_calls 则逐个：
          白名单内业务工具 → dispatch_tool 回灌 tool message；
@@ -10,8 +9,8 @@ chat（N≤3）和 autonomous（N≤8 + 控制工具）此前各写一份「LLM�
          autonomous 的控制工具（finalize/ask_user）必须单独成批，交回调用方处理
          （见 control_tools）。
 
-调用方拿到 ToolRoundResult 后自己决定：继续下一轮 / 结束 / 暂停。
-这样既消除重复，又不把 autonomous 专有的 finalize/ask_user 语义塞进 chat。
+调用方拿到 ToolRoundResult 后自行决定继续下一轮、结束或暂停；
+autonomous 专有的 finalize/ask_user 语义仍由调用方处理。
 
 white-list 默认来自 services.tools.allowed_tool_names()（registry 派生）；
 interrupt-capable 调用方可传更窄的 business_tool_allowlist。

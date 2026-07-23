@@ -1,5 +1,5 @@
 """
-Tutor Graph 闭环单测（Phase 2 里程碑 A：闭环逻辑，不含 interrupt）
+Tutor Graph 闭环逻辑单测（不含 interrupt）
 
 覆盖：
   1) supervisor rule-mode 确定性路由：cold→diagnostic→quiz→critic→(reviser↔critic)→await_answers

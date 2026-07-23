@@ -1,13 +1,13 @@
 """
-偏好学习（启发式 consolidation，零 LLM）——借鉴 claw-code 的 heuristic compaction。
+偏好学习（启发式 consolidation，零 LLM）。
 
 填补 services/memory.py 的 update_preferences "零调用方"缺口：preferences bank 一直只读
 不写（adapt_reader 读它做 difficulty fallback，但从没人写 → 永远空、fallback 永不命中）。
 本模块从批改报告 + 历史轨迹用纯规则推断用户学习偏好，供 grader_worker 在会话结束写回。
 
-为什么用规则而非 LLM（面试讲点）：
+为什么用规则而非 LLM：
   偏好信号是统计性的（得分趋势 / 题型表现 / 盲点复现），规则可解释、确定性、零成本，
-  比让 LLM "猜偏好"更稳——对齐 claw-code 用启发式而非模型做 session 压缩的思路。
+  比让 LLM "猜偏好"更稳。
 
 推断三个偏好（保守：样本不足或信号弱 → 不写该字段，避免污染 preferences）：
   - preferred_difficulty：近期得分趋势 → easy/medium/hard（均分 <0.5 易 / >=0.8 难 / 居中）

@@ -1,5 +1,5 @@
 """
-自适应学习闭环测试(Direction A)
+自适应学习闭环测试
 
 两部分:
   1) 大脑(services.adaptive_loop):归一化 / 规则兜底 / 终止判定 / LLM mock / 失败回退

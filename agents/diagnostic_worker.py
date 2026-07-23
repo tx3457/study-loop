@@ -1,16 +1,15 @@
 """
 Diagnostic Worker：supervisor 专用诊断节点（跨会话记忆增强）
 
-灰度并存：不改 adapt_agent.adapt_reader（旧 orchestrator/adaptive 链路继续用它）。
+灰度并存：adapt_agent.adapt_reader 继续服务 orchestrator/adaptive 链路。
 本 worker 仅在 supervisor MAS 的 tutor_graph 里替换 diagnostic 节点：
   ① 复用 adapt_reader：算 difficulty_score（ZPD = mastery+0.15）+ weak_points + decision_log
      —— 直接 ainvoke 它，不重写那套 mastery/preferences fallback 逻辑。
-  ② 额外（本次新增）：build_returning_context（跨会话"欢迎回来"）+ build_profile_card（画像卡）
+  ② build_returning_context（跨会话"欢迎回来"）+ build_profile_card（画像卡）
      + build_memory_context_block（<memory-context> 栅栏），写回 TutorState 供 supervisor
-     冷启动后第一轮个性化决策（续上次 / 复习薄弱点），让助手真正"记得你"。
+     冷启动后第一轮个性化决策（续上次 / 复习薄弱点）。
 
-为什么单独写一条 decision_log（面试讲点）：
-  把"是否识别为回访用户、欢迎语素材"持久化成可审计事件，复用 decision_log 的审计精神。
+decision_log 将"是否识别为回访用户、欢迎语素材"持久化成可审计事件。
 """
 import logging
 

@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Path,Query,Depends,HTTPException,Request
 from fastapi.responses import HTMLResponse,JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from openai import APIError
+from openai import APIError, APITimeoutError, RateLimitError
 from pydantic import BaseModel, Field
 from routers.chat import router as chat_router
 from routers.documents import router as document_router
@@ -24,6 +24,7 @@ from routers.health import router as health_router
 from services.memory_persist import load_snapshot
 from services.idempotency import IdempotencyConflictError
 from services.provider_config import (
+    ProviderDeadlineExceeded,
     ProviderConfigurationError,
     close_managed_provider_clients,
 )
@@ -107,7 +108,7 @@ app.include_router(eval_router)
 app.include_router(autonomous_router)
 app.include_router(adaptive_router)
 app.include_router(audit_router)
-app.include_router(tutor_router)   # Phase 2: supervisor-based MAS guided 辅导（灰度，默认 503）
+app.include_router(tutor_router)   # Supervisor-based MAS guided 辅导（灰度，默认 503）
 app.include_router(health_router)
 
 
@@ -162,10 +163,60 @@ async def idempotency_conflict_handler(
 @app.exception_handler(RetryExhausted)
 async def retry_exhausted_handler(request: Request, exc: RetryExhausted):
     logging.getLogger(__name__).warning("provider retries exhausted: %s", exc)
+    return _provider_failure_response(exc)
+
+
+def _exception_chain(exc: BaseException):
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
+
+
+def _provider_failure_response(exc: BaseException) -> JSONResponse:
+    chain = tuple(_exception_chain(exc))
+    if any(isinstance(item, RateLimitError) for item in chain):
+        return JSONResponse(
+            status_code=429,
+            content={
+                "error": "模型服务请求过于频繁",
+                "detail": "模型服务当前限流，请稍后重试",
+                "code": "provider_rate_limited",
+            },
+        )
+    if any(
+        isinstance(item, (ProviderDeadlineExceeded, APITimeoutError))
+        for item in chain
+    ):
+        return JSONResponse(
+            status_code=504,
+            content={
+                "error": "模型服务请求超时",
+                "detail": "模型服务未在时间预算内响应",
+                "code": "provider_timeout",
+            },
+        )
     return JSONResponse(
         status_code=503,
-        content={"error": "服务暂时不可用", "detail": "模型服务请求失败"},
+        content={
+            "error": "服务暂时不可用",
+            "detail": "模型服务请求失败",
+            "code": "provider_unavailable",
+        },
     )
+
+
+@app.exception_handler(ProviderDeadlineExceeded)
+async def provider_deadline_handler(
+    request: Request, exc: ProviderDeadlineExceeded
+):
+    logging.getLogger(__name__).warning(
+        "provider request exceeded %.1fs deadline",
+        exc.deadline_seconds,
+    )
+    return _provider_failure_response(exc)
 
 
 @app.exception_handler(ProviderConfigurationError)
@@ -179,7 +230,11 @@ async def provider_configuration_handler(
     )
     return JSONResponse(
         status_code=503,
-        content={"error": "服务暂时不可用", "detail": "模型服务尚未正确配置"},
+        content={
+            "error": "服务暂时不可用",
+            "detail": "模型服务尚未正确配置",
+            "code": "provider_not_configured",
+        },
     )
 
 
@@ -188,7 +243,4 @@ async def provider_error_handler(request: Request, exc: APIError):
     logging.getLogger(__name__).warning(
         "provider request failed: %s", type(exc).__name__
     )
-    return JSONResponse(
-        status_code=503,
-        content={"error": "服务暂时不可用", "detail": "模型服务请求失败"},
-    )
+    return _provider_failure_response(exc)

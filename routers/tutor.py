@@ -1,5 +1,5 @@
 """
-Supervisor-based MAS guided 辅导端点（Phase 2，灰度并存）
+Supervisor-based MAS guided 辅导端点（灰度并存）
 
 和 orchestrator(规则工作流)、autonomous(自由 ReAct)、adaptive(闭环 agent) 并列的第四条路径：
 一个由 TeachingSupervisor(LLM 动态编排) 驱动的真 Multi-Agent 辅导闭环——
@@ -15,11 +15,6 @@ Supervisor-based MAS guided 辅导端点（Phase 2，灰度并存）
 
 灰度：MAS_SUPERVISOR_ENABLED=false（默认）时端点返回 503，旧链路完全不受影响。
 
-面试讲点：
-  1. supervisor 范式：把"教学决策"与"agent 编排"合并成一次 LLM 推理（next_agent + action）
-  2. 质量门：出题后必过 critic（三维评分），低分走 reviser 精修后重审，通过才下发
-  3. HITL durable interrupt：wait_for_answers 用 interrupt 暂停，checkpointer 持久化中断点，
-     进程崩溃后同 thread_id 可恢复（不丢多轮 state）
 """
 import logging
 import uuid
@@ -56,7 +51,7 @@ class TutorSubmitRequest(BaseModel):
 
 
 class TutorOneshotRequest(BaseModel):
-    """oneshot 单跳请求（Phase 3）：action 明确，supervisor 单跳到对应 worker → finish。"""
+    """oneshot 单跳请求：action 明确，supervisor 单跳到对应 worker → finish。"""
     action: str = Field(default="quiz", description="quiz / grade / plan")
     user_id: str = Field(default="default", description="用户 ID")
     document_id: str = Field(..., description="已建库的文档 ID")
@@ -78,7 +73,7 @@ class TutorOneshotResponse(BaseModel):
 
 
 class TutorAssistRequest(BaseModel):
-    """assist 自由问答请求（Phase 4）：supervisor 路由到 assistant ReAct worker。"""
+    """assist 自由问答请求：supervisor 路由到 assistant ReAct worker。"""
     query: str = Field(..., description="用户自然语言问题 / 学习目标")
     user_id: str = Field(default="default", description="用户 ID")
     document_id: str | None = Field(default=None, description="可选文档 ID")
@@ -251,7 +246,7 @@ async def tutor_submit(req: TutorSubmitRequest) -> TutorTurnResponse:
 
 @router.post("/agent/tutor/oneshot", response_model=TutorOneshotResponse)
 async def tutor_oneshot(req: TutorOneshotRequest) -> TutorOneshotResponse:
-    """oneshot 单跳端点（Phase 3）：supervisor 按 action 单跳到对应 worker → finish。
+    """oneshot 单跳端点：supervisor 按 action 单跳到对应 worker → finish。
 
     与 start/submit 不同：mode="oneshot" 不进 guided 循环、不 interrupt，一次 ainvoke 跑到收尾。
     无需 checkpointer（无中断点），用默认 tutor_graph 即可。
@@ -310,7 +305,7 @@ def _assist_response(thread_id: str, result: dict) -> TutorAssistResponse:
 
 @router.post("/agent/tutor/assist", response_model=TutorAssistResponse)
 async def tutor_assist(req: TutorAssistRequest) -> TutorAssistResponse:
-    """assist 自由问答端点（Phase 4）：supervisor 路由到 assistant ReAct worker。
+    """assist 自由问答端点：supervisor 路由到 assistant ReAct worker。
 
     mode="assist"，带 checkpointer + thread_id（assistant 的 ask_user 用 interrupt 暂停需要）。
     跑到 finalize（done + final_answer）或 ask_user interrupt（awaiting_user_input + user_question）。

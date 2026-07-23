@@ -1,5 +1,5 @@
 """
-Multi-Agent 共享状态定义（Phase 4 Day 15）
+Multi-Agent 共享状态定义
 
 OrchestratorState  → 所有 Agent 共享的父状态
 QuizAgentState     → QuizAgent 内部状态（extra 字段不传回 Orchestrator）
@@ -35,16 +35,16 @@ class OrchestratorState(TypedDict, total=False):
     # ── PlannerAgent 输出 ──────────────────────────────────
     learning_path: dict | None
 
-    # ── CriticAgent 输出（T2 美团 JD 改造）─────────────────
+    # ── CriticAgent 输出 ───────────────────────────────────
     critique_history: list[dict]   # 每轮 CritiqueReport.model_dump() 累积
     revision_count: int            # Tutor 重出次数（上限 2）
 
-    # ── Reflection 回灌（借鉴 aider/coders/base_coder.py:933-944 的 reflected_message）
+    # ── Reflection 回灌 ────────────────────────────────────
     # critic 触发重出时,把 critique 格式化为反思文本塞给下一轮 quiz_agent.generate,
     # 让 LLM 知道"上一轮被拒的具体原因",而不只是简单重出。
     reflected_message: str
 
-    # ── Sufficiency Check（P1-1 升级）──────────────────────
+    # ── Sufficiency Check ──────────────────────────────────
     # 上游检测到证据不充分时被设为 True，传给 critic 让 LLM judge 更严格
     insufficient_evidence: bool
 
@@ -60,14 +60,14 @@ class QuizAgentState(OrchestratorState, total=False):
     generate_count: int    # 生成计数（审核不通过时重出，最多 2 次）
     review_passed: bool    # 审核结果
 
-    # ── Sufficiency Check（P1-1 升级）───────────────────────
+    # ── Sufficiency Check ───────────────────────────────────
     sufficiency_passed: bool         # 当前 chunks 是否够生成高质题
     sufficiency_reason: str          # passed / passed_low_coverage / too_few_chunks / low_diversity
     rewrite_count: int               # query 改写次数（上限 MAX_REWRITES=1）
 
 
 class TutorState(OrchestratorState, total=False):
-    """Supervisor-based Multi-Agent 共享状态（Phase 1 骨架，灰度并存于旧 OrchestratorState 流之外）
+    """Supervisor-based Multi-Agent 共享状态，与 OrchestratorState 流灰度并存。
 
     继承 OrchestratorState 的所有字段（action/user_id/document_id/description/count/
     difficulty/difficulty_score/weak_points/quiz/session_id/grading_report/learning_path/
@@ -75,8 +75,8 @@ class TutorState(OrchestratorState, total=False):
     额外增加 supervisor 编排所需的会话级字段。这些字段只在 tutor_graph 内部流转。
     """
 
-    # ── 会话级（Phase 2 接 checkpointer 用 thread_id 续跑）──────
-    thread_id: str               # 会话线程 ID（Phase 2 checkpointer key）
+    # ── 会话级（checkpointer 用 thread_id 续跑）────────────
+    thread_id: str               # 会话线程 ID（checkpointer key）
     goal: str                    # 学习目标（语义同 adaptive_loop 的 goal）
     mode: str                    # 编排模式：guided（引导式辅导）/ assist（开放问答）/ oneshot（单次）
 
@@ -97,7 +97,7 @@ class TutorState(OrchestratorState, total=False):
     # ── supervisor 进度标记（避免空 history 时 cold-start 死循环）──────────────
     diagnosed: bool              # diagnostic 是否已跑过（supervisor 派 diagnostic 时置位，防反复诊断）
 
-    # ── critic 质量门（Phase 2 纳入 supervisor 调度）────────────────────────────
+    # ── critic 质量门 ─────────────────────────────────────────────────────────
     critic_passed: bool          # 当前 quiz 是否已通过 critic 审核（True 后 supervisor 才放行等待作答）
     quiz_served: bool            # 当前 quiz 是否已下发给学生并等过作答（防 grader 后又被当未审核 quiz 卡住）
     quiz_served_graded: bool     # 本轮下发题目是否已批改完成（grader_worker 置位，防 answers 残留触发重复批改）

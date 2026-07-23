@@ -1,17 +1,15 @@
 """
-本机记忆快照持久化（仅 InMemoryStore 兜底）——借鉴 claw-code 的 JSONL 原子落盘。
+本机记忆快照持久化（仅 InMemoryStore 兜底）。
 
 问题：services/memory.py 无 DATABASE_URL 时用 InMemoryStore（进程内 dict），重启即丢，
-本机 demo "跨会话记得你" 会失忆——所谓"跨会话记忆"在本机就只在同一 server 进程内成立。
+跨会话记忆默认只在同一 server 进程内成立。
 生产用 PostgresStore 本身持久，无需快照。
 
-方案（对标 claw-code session.rs 的原子写）：
+方案：
   - save_snapshot()：遍历 store.list_namespaces() + search(ns) 导出全部 6-bank 到 JSON，
     原子写（写临时文件 + os.replace 原子 rename，避免写一半崩溃腐坏旧快照）。
   - load_snapshot()：启动时回灌 store.put(ns, key, value)。
   - 仅 InMemoryStore 时启用；有 DATABASE_URL（PostgresStore）时 no-op（本身持久）。
-
-面试答"记忆存哪、重启丢不丢"：本机 JSON 快照兜底（原子写防腐坏）/ 生产 Postgres 持久。
 
 路径 env MEMORY_SNAPSHOT_PATH（默认 ./.memory_snapshot.json，已加入 .gitignore）。
 """

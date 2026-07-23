@@ -200,7 +200,7 @@ export async function getAudit(runId) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════
-   Adaptive Learning Loop（Direction A：Agent 驱动的自适应学习闭环）
+   Adaptive Learning Loop
    ═══════════════════════════════════════════════════════════════════ */
 
 /** 开启自适应辅导会话（agent 决策开场 + 出第一轮题） */

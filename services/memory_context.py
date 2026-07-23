@@ -1,10 +1,10 @@
 """
-记忆召回 / 呈现层（与 memory.py 存储层分离）——借鉴 hermes-agent。
+记忆召回 / 呈现层（与 memory.py 存储层分离）。
 
 三件事：
   - build_returning_context：跨会话"欢迎回来"上下文（最近 session_brief + mastery 趋势 + 优先薄弱点）
-  - build_profile_card：可读"学习者画像卡"（hermes USER.md 风格，容量上限 + 规则整合）
-  - build_memory_context_block：<memory-context> 栅栏包裹（hermes 防 prompt injection）
+  - build_profile_card：可读"学习者画像卡"（容量上限 + 规则整合）
+  - build_memory_context_block：<memory-context> 栅栏包裹，防 prompt injection
 
 零 LLM：全部规则聚合。注入用栅栏标签防止记忆内容里夹带的指令被当系统指令执行
 （如 weak_points 里混进 "ignore previous instructions"，栅栏 + 免责声明把它降格为背景资料）。
@@ -30,7 +30,7 @@ MEMORY_FENCE_CLOSE = "</memory-context>"
 
 
 def build_memory_context_block(text: str) -> str:
-    """用栅栏标签包裹记忆文本，防 prompt injection（借鉴 hermes memory_manager）。空文本返回空串。"""
+    """用栅栏标签包裹记忆文本，防 prompt injection。空文本返回空串。"""
     clean = (text or "").strip()
     if not clean:
         return ""
@@ -125,7 +125,7 @@ async def build_returning_context(user_id: str, document_id: str) -> dict:
 
 
 async def build_profile_card(user_id: str) -> str:
-    """构建可读"学习者画像卡"（hermes USER.md 风格）。无数据返回空串。容量上限截断。"""
+    """构建可读"学习者画像卡"。无数据返回空串，结果按容量上限截断。"""
     try:
         prefs = await get_preferences(user_id)
         mastery_all = await get_mastery(user_id, None) or {}

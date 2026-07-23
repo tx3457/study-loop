@@ -48,7 +48,7 @@ async def llm_service_history(request:HistoryRequest):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Function Calling 端点（Phase 7 #4）
+# Function Calling 端点
 # ═══════════════════════════════════════════════════════════════════════════
 
 _TOOL_SYSTEM = (
@@ -68,7 +68,7 @@ _TOOL_SYSTEM = (
 MAX_TOOL_ROUNDS = 3  # 防止无限 tool calling 循环
 
 # ── 第 3 层：工具白名单（权限隔离）──
-# 白名单单一数据源：从 ToolRegistry 派生（D4），不再硬编码。
+# 白名单单一数据源：从 ToolRegistry 派生，不在端点中硬编码。
 # run_tool_round 内部也用 allowed_tool_names()，端点侧无需再各维护一份。
 
 
@@ -105,7 +105,7 @@ async def _execute_chat_with_tools(
 
     tools_called: list[str] = []
     for _ in range(MAX_TOOL_ROUNDS):
-        # 复用 run_tool_round（D4）：单轮 LLM→tool_calls→dispatch→回灌。
+        # run_tool_round 负责单轮 LLM→tool_calls→dispatch→回灌。
         # 传 client=_client 保留测试注入；白名单从 registry 派生。
         round_result = await run_tool_round(
             messages,
@@ -125,7 +125,7 @@ async def _execute_chat_with_tools(
                 content = "回复内容包含敏感信息，已拦截。请重新提问。"
             return ToolChatResponse(response=content, tools_called=tools_called)
 
-        # 记录实际派发（非白名单的不计入 tools_called，与旧行为一致）
+        # 只记录实际派发的白名单工具
         for oc in round_result.outcomes:
             if oc.kind == "dispatched":
                 tools_called.append(oc.name)

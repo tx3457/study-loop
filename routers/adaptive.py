@@ -1,9 +1,8 @@
 """
-自适应学习闭环端点(Direction A)
+自适应学习闭环端点
 
-和 orchestrator(规则工作流)、autonomous(自由 ReAct)并列的第三条路径:
-一个"会教书"的 agent,跑多轮「出题 → 作答 → 批改 → 决策」闭环,每一步由 LLM 根据
-学生表现自主决定教什么 / 出多难,直到掌握度达标或练够。
+该端点运行多轮「出题 → 作答 → 批改 → 决策」闭环，由 LLM 根据学生表现
+决定下一步主题和难度，直到掌握度达标或达到轮次上限。
 
 两段式 HTTP(复用 autonomous 的 HITL 思路,前端无状态):
   POST /agent/adaptive/start  {user_id, document_id, goal}
@@ -13,11 +12,6 @@
             是 → {done:true, summary, trajectory}
             否 → {questions, decision, turn+1, last_report}
 
-面试讲点:
-  1. 真·自适应:下一步难度/主题由 LLM 推理决定(decide_next_step),不是 mastery+0.15 公式
-  2. 闭环 agent:assess → decide → act → observe(grade)→ re-decide,多轮 stateful
-  3. 复用既有能力:出题/批改/画像/学习路径,agent 只加"决策"这一层(组合优于重写)
-  4. fail-soft:LLM 决策失败回退规则;轨迹/掌握度全程可观测(trajectory 返回前端可画曲线)
 """
 
 import asyncio

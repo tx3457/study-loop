@@ -1,5 +1,5 @@
 """
-Orchestrator：多 Agent 编排入口（Phase 4 Day 15-16；Phase 7 美团 JD T2 增 critic）
+Orchestrator：多 Agent 编排入口
 
 完整 Resilience 流程（容错维度的 defense-in-depth；非完整 Agent Harness）：
   input_guard → route → agents... → (critic_adapter)? → output_guard → END
@@ -9,7 +9,7 @@ Orchestrator：多 Agent 编排入口（Phase 4 Day 15-16；Phase 7 美团 JD T2
   "grade" → grader_agent → adapt_writer → output_guard → END
   "plan"  → planner_agent → output_guard → END
 
-T2 改造：
+Critic 质量门：
   quiz_agent 完成后插入独立 critic_agent subgraph 节点（critic_adapter）。
   critic 输出 CritiqueReport → 若 overall<0.7 或含 high severity 建议
   且 revision_count<2 → 回 quiz_agent 重出；否则 → output_guard。
@@ -45,19 +45,16 @@ def _critic_enabled() -> bool:
 
 
 def _reviser_enabled() -> bool:
-    """REVISER_ENABLED=true → critic 不通过走 reviser 精修(gpt-researcher 范式)
-    false → 回退老路径(critic 不通过走 quiz_agent 整轮重跑)"""
+    """REVISER_ENABLED=true → critic 不通过走 reviser 精修
+    false → critic 不通过走 quiz_agent 整轮重跑"""
     return os.getenv("REVISER_ENABLED", "true").lower() in ("1", "true", "yes")
 
 
 def _format_reflected_message(critique: dict) -> str:
     """把 CritiqueReport 格式化为给下一轮 quiz_agent 的反思文本。
 
-    借鉴 aider/coders/base_coder.py:1606-1622 的 reflected_message 机制:
-    lint/test 错误回灌时不只是"重跑",而是把具体错误塞进下一轮 prompt,
-    让 LLM 知道上一轮为什么被拒。
-
-    StudyLoop 版本:把三维度低分原因 + suggestions 拼成结构化反思文本。
+    将三维度低分原因 + suggestions 拼成结构化反思文本，让 LLM 知道上一轮
+    为什么被拒，而不只是机械重跑。
     """
     if not critique:
         return ""
@@ -144,7 +141,7 @@ async def _critic_adapter(state: OrchestratorState) -> dict:
         "document_id": document_id,
         "difficulty_score": state.get("difficulty_score", 0.5),
         "weak_points": state.get("weak_points", []),
-        # P1-1：把上游 sufficiency_check 的诊断传给 critic，让它对 relevance 维度更严格
+        # 把上游 sufficiency_check 的诊断传给 critic，让它对 relevance 维度更严格
         "insufficient_evidence": state.get("insufficient_evidence", False),
     }
 
@@ -209,8 +206,8 @@ _builder = StateGraph(OrchestratorState)
 _builder.add_node("input_guard",     input_guard)      # Resilience：输入校验
 _builder.add_node("adapt_reader",    adapt_reader)     # 读画像 → difficulty_score / weak_points
 _builder.add_node("quiz_agent",      quiz_agent)        # Hybrid检索 + CE出题 + 审核 → quiz
-_builder.add_node("critic_adapter",  _critic_adapter)   # T2：包装 critic_agent subgraph
-_builder.add_node("reviser",         reviser_agent)    # P0-6: reviewer↔reviser 循环子图(gpt-researcher 范式)
+_builder.add_node("critic_adapter",  _critic_adapter)   # 包装 critic_agent subgraph
+_builder.add_node("reviser",         reviser_agent)    # reviewer↔reviser 循环子图
 _builder.add_node("grader_agent",    grader_agent)     # AI批改 → grading_report
 _builder.add_node("adapt_writer",    adapt_writer)     # 写回画像（EMA更新掌握度）
 _builder.add_node("planner_agent",   planner_agent)    # 学习路径生成 → learning_path
@@ -224,11 +221,11 @@ _builder.add_conditional_edges("input_guard", _route, {
     "planner_agent": "planner_agent",
 })
 
-# ── Quiz 流 + reviewer↔reviser 循环子图(P0-6 升级,gpt-researcher editor.py:138 范式)──
+# ── Quiz 流 + reviewer↔reviser 循环子图 ─────────────────────────────────────
 #   adapt_reader → quiz_agent → critic_adapter
 #                                    │
 #                ┌───────────────────┼─────────────────────┐
-#                │ pass               │ revise(REVISER_ENABLED)│ revise(老路径)
+#                │ pass               │ revise(REVISER_ENABLED)│ full regenerate
 #                ↓                    ↓                     ↓
 #           output_guard          reviser              quiz_agent
 #                                    │                     │
@@ -236,8 +233,8 @@ _builder.add_conditional_edges("input_guard", _route, {
 _builder.add_edge("adapt_reader",   "quiz_agent")
 _builder.add_edge("quiz_agent",     "critic_adapter")
 _builder.add_conditional_edges("critic_adapter", _should_revise, {
-    "quiz_agent":    "quiz_agent",     # 老路径:critic 低分 → 回 quiz_agent 整轮重跑
-    "reviser":       "reviser",        # 新路径:critic 低分 → reviser 精修(只改题)
+    "quiz_agent":    "quiz_agent",     # critic 低分 → 回 quiz_agent 整轮重跑
+    "reviser":       "reviser",        # critic 低分 → reviser 精修（只改题）
     "output_guard":  "output_guard",   # critic 通过 → 收尾
 })
 _builder.add_edge("reviser",        "critic_adapter")  # reviser → critic 重审,形成循环
@@ -255,7 +252,7 @@ _builder.add_edge("output_guard", END)
 orchestrator = _builder.compile()
 
 
-# ── Durable Checkpointer 工厂(Phase 9 P0-4)─────────────────────────────────
+# ── Durable Checkpointer 工厂 ───────────────────────────────────────────────
 # 同步 orchestrator 单例向后兼容(无 checkpointer);新代码可用 factory 接 sqlite
 # checkpointer 实现进程崩溃恢复。生命周期由调用方管理(async with)。
 def compile_with_checkpointer(checkpointer):

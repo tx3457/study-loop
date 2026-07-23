@@ -1,5 +1,5 @@
 """
-GraderAgent：AI 批改 + 个性化讲解（Phase 4 Day 15-17）
+GraderAgent：AI 批改 + 个性化讲解
 
 直接复用 services/grader.py::grade_session，该函数从内存 sessions 读取答案并调用 LLM。
 GraderAgent 的职责是将批改结果写入共享状态（grading_report），

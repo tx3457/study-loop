@@ -1,5 +1,5 @@
 """
-单测:HyDE + Multi-query 改写(借鉴 llama_index query_transform/base.py + fusion_retriever.py)
+单测：HyDE + Multi-query 改写
 
 不消耗真实 LLM API,全 mock client.chat.completions.create。
 
@@ -11,7 +11,7 @@
 5. RRF 合并多路检索结果按 rrf_score 降序
 
 跑法:
-  /path/to/python test/test_query_rewriter.py -v
+  python -m pytest tests/test_query_rewriter.py -q
 """
 import asyncio
 import os

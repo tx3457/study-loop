@@ -1,13 +1,11 @@
 """
-Query Rewriting:HyDE + Multi-query(Phase 9 P0-5)
+Query Rewriting：HyDE + Multi-query
 
-借鉴 llama_index 两个独立技术(我们组合使用):
+组合使用两个独立技术：
   - HyDE(Hypothetical Document Embeddings, arXiv:2212.10496)
-    :indices/query/query_transform/base.py:96-120
     用 LLM 生成"假设性答案",再用这段答案做向量召回。
     适用场景:用户 query 太短/太抽象,直接向量召回精度低。
   - Multi-query / QueryFusion
-    :retrievers/fusion_retriever.py:15-21
     用 LLM 生成 N 个 query 变体,分别检索后用 RRF 合并。
     适用场景:用户 query 表达单一,容易漏召回同义/近义文档。
 
@@ -22,7 +20,6 @@ env 开关:
   MULTIQUERY_ENABLED=false       单独关 multi-query
   MULTIQUERY_N=3                 multi-query 生成几个变体(默认 3)
 """
-import asyncio
 import logging
 import os
 from pathlib import Path
@@ -30,7 +27,7 @@ from typing import Optional
 
 from dotenv import load_dotenv
 from openai import AsyncOpenAI
-from services.llm import _client, model as _model
+from services.llm import _client, llm_chat, model as _model
 
 logger = logging.getLogger(__name__)
 load_dotenv(Path(__file__).parent.parent / ".env")
@@ -80,14 +77,15 @@ async def hyde_rewrite(query: str, *, client: Optional[AsyncOpenAI] = None) -> s
 
     use_client = client or _client
     try:
-        resp = await use_client.chat.completions.create(
-            model=_model,
-            max_tokens=256,
-            temperature=0.3,
-            messages=[
+        resp = await llm_chat(
+            [
                 {"role": "system", "content": HYDE_SYSTEM_PROMPT},
                 {"role": "user", "content": query},
             ],
+            client=use_client,
+            model=_model,
+            max_tokens=256,
+            temperature=0.3,
         )
         hypothesis = (resp.choices[0].message.content or "").strip()
         if not hypothesis:
@@ -132,14 +130,15 @@ async def multi_query_rewrite(
     use_client = client or _client
 
     try:
-        resp = await use_client.chat.completions.create(
-            model=_model,
-            max_tokens=512,
-            temperature=0.5,
-            messages=[
+        resp = await llm_chat(
+            [
                 {"role": "system", "content": MULTIQUERY_SYSTEM_PROMPT.format(n=n_variants)},
                 {"role": "user", "content": query},
             ],
+            client=use_client,
+            model=_model,
+            max_tokens=512,
+            temperature=0.5,
         )
         raw = (resp.choices[0].message.content or "").strip()
         variants = [

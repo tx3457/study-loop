@@ -1,8 +1,7 @@
 """
-autonomous ReAct tool 循环守护测试（D4 重构前先补，守护重构不改行为）
+autonomous ReAct tool 循环守护测试
 
-routers/autonomous.py 的 ~8 轮 ReAct 循环此前零单测。
-本测试 mock 掉 _client（LLM）和 dispatch_tool，覆盖：
+测试 mock 掉 _client（LLM）和 dispatch_tool，覆盖：
   1. 正常轮转：业务工具 → dispatch → 回灌 → finalize 结束
   2. finalize 路径：explicit 结束 + final_answer/finalize_reason
   3. ask_user 路径：暂停 + awaiting_user_input + conversation_id + session 落表
@@ -13,7 +12,7 @@ routers/autonomous.py 的 ~8 轮 ReAct 循环此前零单测。
   8. injection 短路
 
 全程 mock，无网络。跑：
-  python -m pytest test/test_autonomous_loop.py -q
+  python -m pytest tests/test_autonomous_loop.py -q
 """
 import json
 import asyncio

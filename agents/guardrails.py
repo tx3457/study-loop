@@ -1,10 +1,9 @@
 """
-Agent Guardrails（Phase 4 Day 16 + Phase 7 #6 Prompt Injection 防御）
+Agent Guardrails：Prompt Injection 防御
 
 Resilience 三件套（容错维度的 defense-in-depth）：
   input_guard（输入校验 + 注入检测）→ Agent 执行 → output_guard（输出校验 + 泄露检测）
-  注：这里只是容错维度。完整 Agent Harness（如 Anthropic Claude Agent SDK / LangChain
-  Deep Agents）还包含 planning / subagent / virtual filesystem / HITL 等能力。
+  这里只覆盖输入与输出校验，不构成完整的 Agent 运行时。
 
 设计原则：
   Fail-fast：input_guard 在任何 LLM 调用之前运行，校验失败直接抛错 → 节省 token

@@ -1,25 +1,19 @@
 """
-PlannerAgent(Phase 9 P0-7:升级为完整 LangGraph 子图 + reviewer↔reviser 循环)
+PlannerAgent：LangGraph 多阶段子图 + reviewer↔reviser 循环
 
-升级前(Phase 8 P4):
-  - 薄壳子图:START → plan → END,plan 节点直接调 services/learning_path.generate_learning_path
-  - 行为正确但架构不一致:5 阶段是 services 里的串行 await,不是 LangGraph 节点
-
-升级后(本次):
+当前结构：
   - 5 阶段全部拆为 LangGraph 节点(extract_brief / explore / compress / synthesize / critique)
-  - critique 不通过时进入 path_reviser 精修节点(借鉴 Task 6 reviewer↔reviser 范式)
+  - critique 不通过时进入 path_reviser 精修节点
   - path_reviser → critique 形成循环子图(max 2 轮,与 quiz 流的 revision_count 上限对齐)
   - services/learning_path.py 的纯函数保持不动(routers/learning_path.py 等外部调用方向后兼容)
 
 为什么 path_reviser 而非 synthesize 重跑?
-  借鉴 Task 6 reviser_agent 思想:
-    - synthesize 重跑 = 整段重写 LearningPath,会改坏 critique 已认可的阶段
-    - path_reviser 精修 = 只改 critique.issues 涉及的阶段,保留其它阶段
-  对齐 gpt-researcher editor.py:138-142(reviewer↔reviser)+ Task 6 quiz 流 reviser
+  - synthesize 重跑 = 整段重写 LearningPath,会改坏 critique 已认可的阶段
+  - path_reviser 精修 = 只改 critique.issues 涉及的阶段,保留其它阶段
 
 env 开关:
   PATH_REVISER_ENABLED=true(默认)→ critique 不通过走 path_reviser
-  false → 回退老路径(critique 不通过走 synthesize 整段重写,与 Phase 8 P4 行为一致)
+  false → critique 不通过走 synthesize 整段重写
 """
 import json
 import logging
@@ -29,7 +23,6 @@ from typing import TypedDict
 
 from dotenv import load_dotenv
 from langgraph.graph import END, START, StateGraph
-from openai import AsyncOpenAI
 
 from agents.state import OrchestratorState
 from models.learning_path import (
@@ -46,13 +39,15 @@ from services.learning_path import (
     extract_brief,
     synthesize,
 )
+from services.llm import (
+    llm_parse,
+    structured_client as _client,
+    structured_model as _model,
+)
 from services.tracing import traceable
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 logger = logging.getLogger(__name__)
-
-# 路径规划用 json_schema 结构化输出 → 走 structured 供应商
-from services.llm import structured_client as _client, structured_model as _model
 
 # 与 quiz 流 revision_count 上限对齐
 _MAX_PATH_REVISIONS = 2
@@ -60,7 +55,7 @@ _MAX_PATH_REVISIONS = 2
 
 def _path_reviser_enabled() -> bool:
     """PATH_REVISER_ENABLED=true → critique 不通过走 path_reviser(精修)
-    false → 回退到 synthesize 整段重写(Phase 8 P4 老行为)"""
+    false → 回退到 synthesize 整段重写"""
     return os.getenv("PATH_REVISER_ENABLED", "true").lower() in ("1", "true", "yes")
 
 
@@ -118,7 +113,7 @@ async def _node_synthesize(state: PlannerState) -> dict:
     brief = PathBrief(**state["brief"])
     compressed = CompressedReport(**state["compressed_report"])
 
-    # path_reviser 关闭时,critique 不通过会回到这里整段重写(老行为)
+    # path_reviser 关闭时，critique 不通过会回到这里整段重写
     revision_hint = ""
     if not _path_reviser_enabled():
         crit = state.get("critique") or {}
@@ -162,7 +157,7 @@ _PATH_REVISER_SYSTEM = (
 
 @traceable(name="planner.path_reviser", run_type="llm")
 async def _node_path_reviser(state: PlannerState) -> dict:
-    """精修节点:只改 critique 指出的阶段,而非整段重写(借鉴 Task 6 reviser_agent)"""
+    """精修节点：只改 critique 指出的阶段，而非整段重写。"""
     path_dict = state.get("learning_path") or {}
     critique_dict = state.get("critique") or {}
 
@@ -178,13 +173,14 @@ async def _node_path_reviser(state: PlannerState) -> dict:
     )
 
     try:
-        resp = await _client.beta.chat.completions.parse(
-            model=_model,
-            messages=[
+        resp = await llm_parse(
+            [
                 {"role": "system", "content": _PATH_REVISER_SYSTEM},
                 {"role": "user", "content": user_msg},
             ],
             response_format=LearningPath,
+            client=_client,
+            model=_model,
         )
         revised = resp.choices[0].message.parsed
         # 保护:document_id 不允许被改
@@ -200,10 +196,10 @@ async def _node_path_reviser(state: PlannerState) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 条件路由:critique → END / path_reviser / synthesize(老路径)
+# 条件路由：critique → END / path_reviser / synthesize
 # ══════════════════════════════════════════════════════════════════════════
 def _route_after_critique(state: PlannerState) -> str:
-    """critique 后路由:通过→END;需要修订且未到上限→reviser(或 synthesize 老路径)"""
+    """critique 后路由：通过→END；需要修订且未到上限→reviser 或 synthesize。"""
     crit = state.get("critique") or {}
     if not crit.get("needs_revision"):
         return "end"
@@ -237,7 +233,7 @@ _builder.add_edge("synthesize",    "critique")
 _builder.add_conditional_edges("critique", _route_after_critique, {
     "end":          END,
     "path_reviser": "path_reviser",
-    "synthesize":   "synthesize",   # PATH_REVISER_ENABLED=false 时回退老路径
+    "synthesize":   "synthesize",   # PATH_REVISER_ENABLED=false 时整段重写
 })
 _builder.add_edge("path_reviser", "critique")  # 关键边:形成循环
 

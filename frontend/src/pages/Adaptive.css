@@ -58,7 +58,7 @@
   border-radius: 10px; padding: 10px 14px; margin-bottom: 14px; font-size: 14px;
 }
 
-/* ── Agent 决策卡片（核心看点）───────────────────────────────────── */
+/* ── Agent 决策卡片 ──────────────────────────────────────────────── */
 .adaptive-page .decision-card {
   background: linear-gradient(135deg, #fafaff, #f5f3ff);
   border: 1px solid #ddd6fe; border-left: 4px solid #7c3aed;

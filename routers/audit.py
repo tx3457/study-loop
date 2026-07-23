@@ -1,5 +1,5 @@
 """
-Audit 查询端点（Phase 8 P1-2；2026-06-03 加脱敏）
+Audit 查询端点
 
 暴露 ToolRegistry 的内存 audit_log 给调试 / 评估使用。
 
@@ -9,15 +9,19 @@ Audit 查询端点（Phase 8 P1-2；2026-06-03 加脱敏）
   GET /audit/summary/overview  整体摘要：平均时长、错误率、p95
 
 ⚠️ 安全：该端点当前无认证。output_preview(检索到的文档正文片段) 与 arguments(query/topic 原文)
-   若直接返回会造成跨用户信息泄露,故**默认脱敏**;排障时由可信环境用 include_payload=true 显式打开。
+   若直接返回会造成跨用户信息泄露，故默认脱敏。完整 payload 还要求可信环境显式设置
+   AUDIT_PAYLOAD_ENABLED=true；该开关不替代认证。
 """
+import os
 from typing import Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query, status
 
 from services.tool_registry import tool_registry
 
 router = APIRouter(prefix="/audit", tags=["audit"])
+_AUDIT_PAYLOAD_ENABLED_ENV = "AUDIT_PAYLOAD_ENABLED"
+_TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
 def _redact(d: dict) -> dict:
@@ -31,13 +35,31 @@ def _redact(d: dict) -> dict:
     return safe
 
 
+def _full_payload_enabled() -> bool:
+    return (
+        os.getenv(_AUDIT_PAYLOAD_ENABLED_ENV, "").strip().casefold()
+        in _TRUTHY_ENV_VALUES
+    )
+
+
 def _serialize(records, include_payload: bool) -> list[dict]:
+    if include_payload and not _full_payload_enabled():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "error": "audit_payload_disabled",
+                "message": (
+                    "完整审计 payload 默认关闭；仅可在受信环境显式启用 "
+                    f"{_AUDIT_PAYLOAD_ENABLED_ENV}=true"
+                ),
+            },
+        )
     return [r.to_dict() if include_payload else _redact(r.to_dict()) for r in records]
 
 
 @router.get("/{run_id}")
 def get_audit_by_run(run_id: str, limit: int = 50, include_payload: bool = False):
-    """按 run_id 查全链路工具调用。默认脱敏；include_payload=true 返回完整 payload（仅限可信环境）。"""
+    """按 run_id 查询工具调用；完整 payload 受环境开关保护。"""
     records = tool_registry.get_audit(run_id=run_id, limit=limit)
     return {
         "run_id": run_id,
@@ -53,7 +75,7 @@ def query_audit(
     limit: int = Query(50, ge=1, le=500),
     include_payload: bool = Query(False),
 ):
-    """按 user_id / tool_name 灵活过滤。默认脱敏。"""
+    """按 user_id / tool_name 过滤；完整 payload 同时要求查询参数与环境开关。"""
     records = tool_registry.get_audit(user_id=user_id, tool_name=tool_name, limit=limit)
     return {
         "filters": {"user_id": user_id, "tool_name": tool_name, "limit": limit},

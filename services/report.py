@@ -1,15 +1,11 @@
-import os
 from pathlib import Path
 from dotenv import load_dotenv
-from openai import AsyncOpenAI
 from models.report import LearningReport, _ReportCore
 from services.session import sessions
 from services.grader import grade_session
+from services.llm import llm_parse, structured_client as client, structured_model as model
 
 load_dotenv(Path(__file__).parent.parent / ".env")
-
-# 报告核心生成用 json_schema 结构化输出 → 走 structured 供应商
-from services.llm import structured_client as client, structured_model as model
 
 REPORT_SYSTEM_PROMPT = """
 你是学习评估专家。根据学生的答题记录，生成一份结构化学习评估报告。
@@ -44,8 +40,7 @@ async def generate_report(session_id: str) -> LearningReport:
         records.append(record)
     records_text = "\n".join(records)
 
-    response = await client.beta.chat.completions.parse(
-        model=model,
+    response = await llm_parse(
         messages=[
             {"role": "system", "content": REPORT_SYSTEM_PROMPT},
             {"role": "user", "content": f"""
@@ -57,6 +52,8 @@ async def generate_report(session_id: str) -> LearningReport:
 """},
         ],
         response_format=_ReportCore,
+        client=client,
+        model=model,
     )
     core = response.choices[0].message.parsed
 

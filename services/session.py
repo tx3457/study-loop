@@ -22,7 +22,7 @@ from services.vectorstore import ensure_document_available as _ensure_document_a
 
 logger = logging.getLogger(__name__)
 
-# 内存会话存储（服务重启后清空，Phase 3 升级为持久化）
+# 内存会话存储（服务重启后清空）
 sessions: dict[str, QuizSession] = {}
 
 # 文字难度 → 连续值（无用户画像时的兜底）
@@ -174,9 +174,7 @@ async def submit_answer(
     is_last = len(session.user_answers) == len(session.questions)
     if is_last:
         session.status = "completed"
-        # 画像写回：此前只有 orchestrator 轨道（adapt_writer）写画像，
-        # /session/* 轨道答完即丢 → 学习报告恒空、自适应难度永远冷启动。
-        # 这里复用同一套 bank API 写回，fail-soft 不影响答题结果返回。
+        # 画像写回统一使用 memory bank API；失败时不影响答题结果返回。
         if not any(question.type == "short_answer" for question in session.questions):
             try:
                 await _write_back_profile(session, session_id)

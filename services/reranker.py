@@ -1,21 +1,19 @@
 """
 Cross-Encoder Reranker(第二阶段精排)
 
-借鉴 kotaemon/libs/kotaemon/kotaemon/rerankings/cohere.py:35-66 的接口设计,
-但用本地 BGE-reranker-v2-m3(免 API key)替代 Cohere API。
+使用本地 BGE-reranker-v2-m3，无需 API key。
 
 设计原则:
   1. 懒加载:首次调用才下载模型,启动不阻塞(~2.27GB 一次)
   2. 单例缓存:lru_cache 装饰 _get_reranker(),进程内复用
   3. env 开关:RERANKER_ENABLED=false 时跳过(ablation 对照用)
   4. GPU 自适应:RERANKER_DEVICE env 可显式指定;未指定则 torch.cuda 自动检测
-                 GPU(fp32)推理比 CPU 快约 10x,16GB 显存绰绰有余(模型仅占 ~2.5GB)
   5. 失败安全:模型加载或推理失败 → raise RerankerUnavailable,上游决定降级
 
 为什么是 cross-encoder 不是 RRF?
   - RRF 只融合 rank 而忽略 query-document 语义相似度
-  - cross-encoder 真正读 (query, doc) 对,给出 0-1 相关性分数,精度显著高
-  - 工业实践:bi-encoder/BM25 召回 top-N → cross-encoder 精排 top-K(N>>K)
+  - cross-encoder 对 (query, doc) 对进行语义评分
+  - 两阶段流程先召回 top-N，再由 cross-encoder 精排 top-K（N>>K）
 """
 import asyncio
 import logging

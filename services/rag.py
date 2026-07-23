@@ -51,7 +51,7 @@ async def generate_question_from_chunks(
 ):
     """接受预取的 chunks，直接生成题目。供评估脚本对比不同检索策略使用。
 
-    reflected_message:借鉴 aider 的反思回灌机制,上一轮被 critic 拒绝时,
+    reflected_message:上一轮被 critic 拒绝时,
     把格式化的拒绝原因注入下一轮 prompt,让 LLM 明确改进方向。
     """
     chunks_text = "\n\n".join(chunks)

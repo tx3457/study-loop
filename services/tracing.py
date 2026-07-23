@@ -1,5 +1,5 @@
 """
-双路 Tracing：LangSmith + Langfuse（Phase 4 Day 18 / Phase 7 扩展）
+双路 Tracing：LangSmith + Langfuse
 
 ── 为什么双路 ──────────────────────────────────────────────────────────────
 LangSmith：LangChain 原生栈，项目开发期默认启用，UI 深度适配 LangGraph。
@@ -31,10 +31,6 @@ Langfuse 针对 LangGraph 的自动追踪走 CallbackHandler（不是装饰器�
   LANGFUSE_SECRET_KEY=sk-lf-xxx
   LANGFUSE_HOST=https://cloud.langfuse.com          # 自托管可改
 
-── 面试表述 ─────────────────────────────────────────────────────────────────
-"我用 LangSmith + Langfuse 双路可观测性。LangSmith 负责开发期 LangChain 栈
-深度集成；Langfuse 走 OpenTelemetry 兼容层，生产环境可自托管。统一
-`@traceable` 装饰器让业务代码零修改，两者都支持 no-op 退化。"
 """
 import os
 import logging

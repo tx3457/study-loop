@@ -1,5 +1,5 @@
 """
-TeachingSupervisor 单测（Phase 1 骨架）
+TeachingSupervisor 单测
 
 覆盖：
   1) LLM 模式下各 next_agent 决策 → Command.goto 正确路由（mock llm_parse 经注入假 client）
@@ -132,7 +132,7 @@ class TestRuleFallback(unittest.TestCase):
         self.assertEqual(d.next_agent, "grader")
 
     def test_critic_low_score_routes_reviser(self):
-        # Phase 2：有未下发 quiz + critic 低分(overall<0.7) + 未到精修上限 → reviser 精修（不再整轮重出）
+        # 有未下发 quiz + critic 低分(overall<0.7) + 未到精修上限 → reviser 精修（不再整轮重出）
         d = _rule_fallback_next({
             "history": [{"agent": "quiz"}],
             "quiz": {"questions": [{"question": "q", "answer": "a"}]},
@@ -143,7 +143,7 @@ class TestRuleFallback(unittest.TestCase):
         self.assertIn("critic", d.reason)
 
     def test_critic_high_severity_routes_reviser(self):
-        # Phase 2：含 high severity → reviser 精修
+        # 含 high severity → reviser 精修
         d = _rule_fallback_next({
             "history": [{"agent": "quiz"}],
             "quiz": {"questions": [{"question": "q", "answer": "a"}]},
@@ -154,7 +154,7 @@ class TestRuleFallback(unittest.TestCase):
         self.assertEqual(d.next_agent, "reviser")
 
     def test_critic_not_yet_run_routes_critic(self):
-        # Phase 2：刚出完题（有 quiz、无 critique）→ 先过质量门 critic
+        # 刚出完题（有 quiz、无 critique）→ 先过质量门 critic
         d = _rule_fallback_next({
             "history": [{"agent": "quiz"}],
             "quiz": {"questions": [{"question": "q", "answer": "a"}]},
@@ -163,7 +163,7 @@ class TestRuleFallback(unittest.TestCase):
         self.assertEqual(d.next_agent, "critic")
 
     def test_critic_pass_routes_await_answers(self):
-        # Phase 2：critic 通过（高分无 high）→ 下发题目等学生作答（await_answers→wait_for_answers）
+        # critic 通过（高分无 high）→ 下发题目等学生作答（await_answers→wait_for_answers）
         d = _rule_fallback_next({
             "history": [{"agent": "quiz"}],
             "quiz": {"questions": [{"question": "q", "answer": "a"}]},
@@ -174,7 +174,7 @@ class TestRuleFallback(unittest.TestCase):
         self.assertEqual(d.next_agent, "await_answers")
 
     def test_revision_cap_passes_through_to_await(self):
-        # Phase 2：精修到上限仍低分 → 放行下发（避免无限 reviser↔critic 循环）
+        # 精修到上限仍低分 → 放行下发（避免无限 reviser↔critic 循环）
         d = _rule_fallback_next({
             "history": [{"agent": "quiz"}],
             "quiz": {"questions": [{"question": "q", "answer": "a"}]},

@@ -1,7 +1,7 @@
 /**
  * Autonomous Agent 页面
  *
- * 演示真 ReAct + HITL：
+ * ReAct + HITL 流程：
  *   - 用户输入学习目标
  *   - Agent 自主决定调工具 / finalize / 问用户
  *   - LLM 调 ask_user → 弹框让用户答 → 提交后调 /continue 续跑
@@ -9,7 +9,7 @@
  * 状态机：
  *   idle → running → (awaiting → continuing)* → done | error
  */
-import { useEffect, useState, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   createIdempotencyKey,
   runAutonomous,
@@ -126,7 +126,9 @@ export default function Autonomous() {
   } : initialState)
   const [askReply, setAskReply] = useState(restoredAwaiting?.draft || '')
   const [documents, setDocuments] = useState([])
+  const [documentsLoading, setDocumentsLoading] = useState(false)
   const [documentsError, setDocumentsError] = useState(null)
+  const documentsRequestId = useRef(0)
   const lastConversationId = useRef(restoredAwaiting?.conversation_id || null)
   const startIdempotencyKey = useRef(null)
   const continueIdempotencyKey = useRef(
@@ -141,6 +143,29 @@ export default function Autonomous() {
     state.phase === 'awaiting' || state.phase === 'continuing'
   ) && Boolean(state.response?.user_question)
   const formLocked = ['running', 'awaiting', 'continuing'].includes(state.phase)
+
+  const loadDocs = useCallback(async () => {
+    const requestId = ++documentsRequestId.current
+    setDocumentsLoading(true)
+    setDocumentsError(null)
+    try {
+      const data = await getDocuments()
+      if (requestId !== documentsRequestId.current) return
+      setDocuments(data.documents || [])
+    } catch (err) {
+      if (requestId !== documentsRequestId.current) return
+      setDocumentsError(err.message)
+    } finally {
+      if (requestId === documentsRequestId.current) setDocumentsLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    loadDocs()
+    return () => {
+      documentsRequestId.current += 1
+    }
+  }, [loadDocs])
 
   function persistCurrentAwaiting(
     draft = askReply,
@@ -358,16 +383,6 @@ export default function Autonomous() {
     continueIdempotencyKey.current = null
   }
 
-  async function loadDocs() {
-    setDocumentsError(null)
-    try {
-      const data = await getDocuments()
-      setDocuments(data.documents || [])
-    } catch (err) {
-      setDocumentsError(err.message)
-    }
-  }
-
   const r = state.response
 
   return (
@@ -417,7 +432,15 @@ export default function Autonomous() {
           <div className="doc-input">
             <div className="field-label-row">
               <label htmlFor="autonomous-document">文档 ID（可选）</label>
-              <button type="button" className="btn-link" onClick={loadDocs}>刷新文档</button>
+              <button
+                type="button"
+                className="btn-link"
+                onClick={loadDocs}
+                disabled={documentsLoading}
+                aria-busy={documentsLoading}
+              >
+                {documentsLoading ? '刷新中...' : '刷新文档'}
+              </button>
             </div>
             <input
               id="autonomous-document"
