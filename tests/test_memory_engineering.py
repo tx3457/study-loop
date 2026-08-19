@@ -145,6 +145,33 @@ class TestPrioritizedWeak(unittest.IsolatedAsyncioTestCase):
 # 4) consolidate_session_extras
 # ═══════════════════════════════════════════════════════════════════════════
 class TestConsolidate(unittest.IsolatedAsyncioTestCase):
+    async def test_session_replay_does_not_double_count_type_performance(self):
+        import services.memory as m
+
+        uid, doc = "cons_replay_user", "doc-replay"
+        report = _report(0.8, session_id="replay-session")
+        history = [{"score": 0.8, "knowledge_gaps": []}]
+        await m.consolidate_session_extras(
+            uid,
+            report,
+            doc,
+            history=history,
+            question_type="choice",
+            session_id=report.session_id,
+        )
+        await m.consolidate_session_extras(
+            uid,
+            report,
+            doc,
+            history=history,
+            question_type="choice",
+            session_id=report.session_id,
+        )
+
+        prefs = await m.get_preferences(uid)
+        self.assertEqual(prefs["type_perf"]["choice"]["n"], 1)
+        self.assertEqual(prefs["_consolidated_sessions"], ["replay-session"])
+
     async def test_consolidate_writes_preferences_and_card(self):
         import services.memory as m
         os.environ["MEMORY_SNAPSHOT_PATH"] = os.path.join(tempfile.gettempdir(), "cons_snap_test.json")

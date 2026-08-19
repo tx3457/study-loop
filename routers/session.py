@@ -9,6 +9,7 @@ from models.session import (
     SessionStartRequest,
     AnswerRequest,
     AnswerResult,
+    QuizSession,
     SessionResult,
     QuestionView,
 )
@@ -160,28 +161,31 @@ def _require_completed_session(session_id: str):
     return session
 
 
+async def _ensure_grading_and_memory(
+    session_id: str,
+    session: QuizSession,
+) -> GradingReport:
+    """Create grading once, then make its learner-memory effect retryable."""
+    report = await grade_session(session_id)
+    if not session.profile_written:
+        await commit_learning_memory(
+            session.user_id,
+            report,
+            session.document_id,
+            questions=session.questions,
+            on_core_written=lambda: setattr(session, "profile_written", True),
+        )
+    return report
+
+
 @router.post("/{session_id}/grade", response_model=GradingReport)
 async def grade(session_id: str):
+    _require_completed_session(session_id)
     lock = _answer_locks.setdefault(session_id, asyncio.Lock())
     async with lock:
         session = _require_completed_session(session_id)
         try:
-            report = await grade_session(session_id)
-
-            # 选择题在答完最后一题时已写画像；简答题必须等语义批改完成后再写。
-            # 与 answer 共用 session lock，避免完成瞬间并发 /grade 重复累计画像。
-            if not session.profile_written:
-                await commit_learning_memory(
-                    session.user_id,
-                    report,
-                    session.document_id,
-                    questions=session.questions,
-                    on_core_written=lambda: setattr(
-                        session, "profile_written", True
-                    ),
-                )
-
-            return report
+            return await _ensure_grading_and_memory(session_id, session)
         except ValidationError as exc:
             logger.warning("grader provider returned invalid structured output")
             raise HTTPException(
@@ -195,10 +199,17 @@ async def grade(session_id: str):
 @router.post("/{session_id}/report", response_model=LearningReport)
 async def report(session_id: str):
     _require_completed_session(session_id)
-    try:
-        return await generate_report(session_id)
-    except ValidationError as exc:
-        logger.warning("report provider returned invalid structured output")
-        raise HTTPException(status_code=503, detail="模型返回的报告格式无效") from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    lock = _answer_locks.setdefault(session_id, asyncio.Lock())
+    async with lock:
+        session = _require_completed_session(session_id)
+        try:
+            grading = await _ensure_grading_and_memory(session_id, session)
+            return await generate_report(session_id, grading=grading)
+        except ValidationError as exc:
+            logger.warning("report provider returned invalid structured output")
+            raise HTTPException(
+                status_code=503,
+                detail="模型返回的报告格式无效",
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc

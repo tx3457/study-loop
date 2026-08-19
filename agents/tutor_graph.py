@@ -23,9 +23,7 @@ guided 模式闭环：
   - 入口/出口用轻量 tutor guard（不复用 orchestrator 的 input_guard/output_guard，
     后者按 quiz/grade/plan action 语义设计，会对 guided 流误报）。
 """
-import json
 import logging
-import uuid
 from typing import Literal
 
 from langgraph.graph import StateGraph, START, END
@@ -40,10 +38,8 @@ from agents.quiz_agent import quiz_agent
 from agents.reviser_agent import reviser_agent
 from agents.state import TutorState
 from agents.supervisor import teaching_supervisor
-from models.quiz import Question
-from models.session import QuizSession
 from services.injection import check_injection, check_output_leak
-from services.session import sessions
+from services.tutor_sessions import ensure_tutor_session, tutor_quiz_view
 from services.tools import dispatch_tool
 
 logger = logging.getLogger(__name__)
@@ -164,19 +160,7 @@ def _ensure_session(state: TutorState) -> str:
 
     quiz 是 QuizResponse.model_dump()，questions 是 dict 列表，需还原为 Question 对象建 session。
     """
-    session_id = state.get("session_id") or f"tutor_{uuid.uuid4().hex[:16]}"
-    if session_id not in sessions:
-        quiz = state.get("quiz") or {}
-        questions = [Question(**q) for q in quiz.get("questions", []) if isinstance(q, dict)]
-        sessions[session_id] = QuizSession(
-            session_id=session_id,
-            document_id=state.get("document_id", ""),
-            user_id=state.get("user_id", ""),
-            questions=questions,
-            user_answers=[],
-            status="active",
-        )
-    return session_id
+    return ensure_tutor_session(state).session_id
 
 
 async def wait_for_answers(state: TutorState) -> dict:
@@ -190,18 +174,17 @@ async def wait_for_answers(state: TutorState) -> dict:
 
     # interrupt 暂停：把题目/轮次暴露给前端；恢复时返回 Command(resume=...) 的 answers
     answers = interrupt({
-        "quiz": state.get("quiz"),
+        "quiz": tutor_quiz_view(ensure_tutor_session(state).questions),
         "turn": state.get("turn", 0),
         "session_id": session_id,
         "supervisor_reason": state.get("supervisor_reason", ""),
     })
 
     # ── 恢复后续跑：把学生作答写进 session，标记完成，供 grader 批改 ──
-    qs = sessions.get(session_id)
-    answers = list(answers or [])
-    if qs is not None:
-        qs.user_answers = answers
-        qs.status = "completed"
+    # Validate the complete payload before mutating the session. This keeps an
+    # invalid submission retryable instead of poisoning the session as completed.
+    qs = ensure_tutor_session(state, completed_answers=answers)
+    answers = list(qs.user_answers)
 
     return {
         "answers": answers,

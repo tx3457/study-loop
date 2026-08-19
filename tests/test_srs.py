@@ -16,6 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from services.srs import get_due_reviews, sm2_update, update_after_session
+from services.memory import read_bank_state
 
 
 class TestSM2(unittest.TestCase):
@@ -47,6 +48,39 @@ class TestSM2(unittest.TestCase):
 
 
 class TestSchedule(unittest.IsolatedAsyncioTestCase):
+    async def test_session_replay_is_idempotent_and_later_session_persists(self):
+        uid, doc = "srs_replay_user", "doc-replay"
+        first = await update_after_session(
+            uid,
+            doc,
+            reviewed_points=[],
+            wrong_gaps=["递归"],
+            today=date(2026, 6, 5),
+            session_id="session-1",
+        )
+        replay = await update_after_session(
+            uid,
+            doc,
+            reviewed_points=[],
+            wrong_gaps=["递归"],
+            today=date(2026, 6, 5),
+            session_id="session-1",
+        )
+        self.assertEqual(replay, first)
+
+        await update_after_session(
+            uid,
+            doc,
+            reviewed_points=[],
+            wrong_gaps=["指针"],
+            today=date(2026, 6, 6),
+            session_id="session-2",
+        )
+        stored = await read_bank_state(uid, "review_schedule")
+        self.assertEqual(stored["_applied_sessions"], ["session-1", "session-2"])
+        self.assertIn(f"{doc}::递归", stored["items"])
+        self.assertIn(f"{doc}::指针", stored["items"])
+
     async def test_new_gap_due_tomorrow(self):
         uid, doc = "srs_u1", "docA"
         today = date(2026, 6, 5)

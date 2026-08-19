@@ -41,6 +41,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import nullcontext
 from datetime import date, datetime
 from pathlib import Path
+from typing import TypeVar
 
 from dotenv import load_dotenv
 
@@ -71,6 +72,7 @@ _MEMORY_COMMIT_CANCEL_DRAIN_TIMEOUT_SECONDS = 15.0
 _WRONG_QUESTION_SOURCE_PREFIX = "wrong-question:"
 _STORE_LOCK = threading.RLock()
 _BACKGROUND_MEMORY_COMMITS: set[asyncio.Task] = set()
+_T = TypeVar("_T")
 
 
 class PostgresStoreSetupLockTimeoutError(TimeoutError):
@@ -246,6 +248,41 @@ async def write_bank_state(user_id: str, bank: str, payload: dict) -> None:
     _write_bank_state_sync(user_id, bank, payload)
 
 
+async def mutate_bank_state(
+    user_id: str,
+    bank: str,
+    mutator: Callable[[dict | None], tuple[dict, _T]],
+) -> _T:
+    """Atomically read/modify/write one user's bank.
+
+    PostgreSQL workers share the existing per-user advisory lock; the local
+    fallback uses the snapshot/store RLock. The mutator must be synchronous and
+    side-effect free apart from changing the returned state.
+    """
+
+    result: list[_T] = []
+
+    def operation() -> None:
+        with _store_access_lock():
+            current = _read_bank_state_sync(user_id, bank)
+            before = copy.deepcopy(current)
+            updated, value = mutator(copy.deepcopy(current))
+            if updated != before:
+                _write_bank_state_sync(user_id, bank, updated)
+            result.append(value)
+
+    if DATABASE_URL:
+        await asyncio.to_thread(
+            _run_with_postgres_session_archive_lock,
+            user_id,
+            DATABASE_URL,
+            operation,
+        )
+    else:
+        operation()
+    return result[0]
+
+
 async def append_bank_event(user_id: str, bank: str, key: str, payload: dict) -> None:
     """append 单条事件到 episodic bank。"""
     stored_payload = copy.deepcopy(payload)
@@ -273,10 +310,13 @@ async def get_preferences(user_id: str) -> dict:
 
 async def update_preferences(user_id: str, patch: dict) -> None:
     """partial update：只覆盖 patch 里的字段，其他保留。"""
-    current = await get_preferences(user_id)
-    current.update(patch)
-    current["last_updated"] = _now_iso()
-    await write_bank_state(user_id, "preferences", current)
+    def apply_patch(current: dict | None) -> tuple[dict, None]:
+        updated = current or {}
+        updated.update(copy.deepcopy(patch))
+        updated["last_updated"] = _now_iso()
+        return updated, None
+
+    await mutate_bank_state(user_id, "preferences", apply_patch)
 
 
 async def get_mastery(user_id: str, document_id: str | None = None):
@@ -874,7 +914,8 @@ async def commit_learning_memory(
 
 async def consolidate_session_extras(user_id: str, report: GradingReport, document_id: str,
                                      history: list[dict] | None = None,
-                                     question_type: str | None = None) -> dict:
+                                     question_type: str | None = None,
+                                     session_id: str | None = None) -> dict:
     """会话结束的增量 consolidation（adapt_writer 之外），全程零 LLM。
 
     与 adapt_writer 分工（避免重复写）：
@@ -893,14 +934,47 @@ async def consolidate_session_extras(user_id: str, report: GradingReport, docume
     from services.preference_learning import infer_preferences
 
     patch: dict = {}
-    # ① 偏好推断 → 填 preferences 只读不写缺口
+    applied = True
+    # ① 偏好推断 → 填 preferences 只读不写缺口。Tutor 重放按 session 幂等。
     try:
-        current = await get_preferences(user_id)
-        patch = infer_preferences(report, history or [], current, question_type=question_type)
-        if patch:
-            await update_preferences(user_id, patch)
+        if session_id:
+            def apply_once(current: dict | None) -> tuple[dict, tuple[dict, bool]]:
+                current = current or {}
+                applied_sessions = list(current.get("_consolidated_sessions") or [])
+                if session_id in applied_sessions:
+                    return current, ({}, False)
+                inferred = infer_preferences(
+                    report,
+                    history or [],
+                    current,
+                    question_type=question_type,
+                )
+                updated = {**current, **inferred}
+                applied_sessions.append(session_id)
+                updated["_consolidated_sessions"] = applied_sessions
+                updated["last_updated"] = _now_iso()
+                return updated, (inferred, True)
+
+            patch, applied = await mutate_bank_state(
+                user_id,
+                "preferences",
+                apply_once,
+            )
+        else:
+            current = await get_preferences(user_id)
+            patch = infer_preferences(
+                report,
+                history or [],
+                current,
+                question_type=question_type,
+            )
+            if patch:
+                await update_preferences(user_id, patch)
     except Exception as e:
         logger.warning(f"[consolidate] infer/update preferences 失败: {e}")
+
+    if not applied:
+        return patch
 
     # ② 刷新画像卡（在偏好更新之后构建，含最新 preferred_*）
     try:

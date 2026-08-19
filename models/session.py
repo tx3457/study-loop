@@ -1,13 +1,18 @@
-from pydantic import BaseModel, Field
+from typing import Literal
+
+from pydantic import BaseModel, Field, field_validator
+
+from models.grader import GradingReport, QuestionGrade
 from models.quiz import Question
+from models.report import LearningReport
 
 
 class SessionStartRequest(BaseModel):
     document_id: str
     description: str
-    count: int = 5
-    difficulty: str = "medium"  # easy / medium / hard
-    type: str = "choice"  # choice / true_false / short_answer
+    count: int = Field(default=5, ge=1, le=10)
+    difficulty: Literal["easy", "medium", "hard"] = "medium"
+    type: Literal["choice", "true_false", "short_answer"] = "choice"
     user_id: str = "default_user"
 
 
@@ -21,16 +26,35 @@ class QuestionView(BaseModel):
 
 
 class AnswerRequest(BaseModel):
-    answer: str
+    answer: str = Field(min_length=1, max_length=4000)
     question_index: int = Field(ge=0)
+
+    @field_validator("answer")
+    @classmethod
+    def reject_blank_answer(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("answer must not be blank")
+        return value
 
 
 class AnswerResult(BaseModel):
-    correct: bool
-    correct_answer: str
-    explanation: str
+    evaluation_status: Literal["final", "pending_ai"] = "final"
+    correct: bool | None
+    correct_answer: str | None
+    explanation: str | None
     is_last: bool
     next_index: int | None = None
+
+
+class SessionResultDetail(BaseModel):
+    index: int
+    question: str
+    user_answer: str
+    correct_answer: str | None
+    correct: bool | None
+    explanation: str | None
+    evaluation_status: Literal["final", "pending_ai"]
 
 
 class SessionResult(BaseModel):
@@ -38,8 +62,10 @@ class SessionResult(BaseModel):
     document_id: str
     total: int
     correct: int
-    score: float  # 0.0 – 1.0
-    details: list[dict]  # 逐题明细
+    incorrect: int
+    pending: int = 0
+    score: float | None  # 0.0 – 1.0; None while semantic grading is pending
+    details: list[SessionResultDetail]
 
 
 class QuizSession(BaseModel):
@@ -49,6 +75,11 @@ class QuizSession(BaseModel):
     questions: list[Question]
     user_answers: list[str]
     status: str  # "active" / "completed"
+    question_grades: dict[int, QuestionGrade] = Field(default_factory=dict)
+    grading_report: GradingReport | None = None
+    learning_report: LearningReport | None = None
     profile_written: bool = (
         False  # 画像写回幂等标记（submit_answer 与 /grade 两条路径去重）
     )
+    extras_written: bool = False
+    review_schedule_written: bool = False

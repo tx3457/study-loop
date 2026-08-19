@@ -168,7 +168,8 @@ async def submit_answer(
         await before_commit()
     session.user_answers.append(answer)
 
-    correct = answers_match(question, answer)
+    requires_semantic_grading = question.type == "short_answer"
+    correct = None if requires_semantic_grading else answers_match(question, answer)
 
     is_last = len(session.user_answers) == len(session.questions)
     if is_last:
@@ -182,9 +183,10 @@ async def submit_answer(
                 logger.warning(f"[session] 画像写回失败（不影响答题结果）: {e}")
 
     return AnswerResult(
+        evaluation_status=("pending_ai" if requires_semantic_grading else "final"),
         correct=correct,
-        correct_answer=question.answer,
-        explanation=question.explanation,
+        correct_answer=None if requires_semantic_grading else question.answer,
+        explanation=None if requires_semantic_grading else question.explanation,
         is_last=is_last,
         next_index=current_index + 1 if not is_last else None,
     )
@@ -239,18 +241,40 @@ async def get_result(session_id: str) -> SessionResult:
 
     details = []
     correct_count = 0
+    incorrect_count = 0
+    pending_count = 0
+    cached_grades = (
+        {grade.index: grade for grade in session.grading_report.grades}
+        if session.grading_report is not None
+        else {}
+    )
     for i, (q, user_ans) in enumerate(zip(session.questions, session.user_answers)):
-        is_correct = answers_match(q, user_ans)
-        if is_correct:
+        cached_grade = cached_grades.get(i)
+        if cached_grade is not None:
+            is_correct: bool | None = cached_grade.is_correct
+            evaluation_status = "final"
+        elif q.type == "short_answer":
+            is_correct = None
+            evaluation_status = "pending_ai"
+        else:
+            is_correct = answers_match(q, user_ans)
+            evaluation_status = "final"
+
+        if is_correct is True:
             correct_count += 1
+        elif is_correct is False:
+            incorrect_count += 1
+        else:
+            pending_count += 1
         details.append(
             {
                 "index": i,
                 "question": q.question,
                 "user_answer": user_ans,
-                "correct_answer": q.answer,
+                "correct_answer": q.answer if evaluation_status == "final" else None,
                 "correct": is_correct,
-                "explanation": q.explanation,
+                "explanation": q.explanation if evaluation_status == "final" else None,
+                "evaluation_status": evaluation_status,
             }
         )
 
@@ -260,6 +284,14 @@ async def get_result(session_id: str) -> SessionResult:
         document_id=session.document_id,
         total=total,
         correct=correct_count,
-        score=round(correct_count / total, 2) if total > 0 else 0.0,
+        incorrect=incorrect_count,
+        pending=pending_count,
+        score=(
+            session.grading_report.score
+            if session.grading_report is not None
+            else round(correct_count / total, 2)
+            if total > 0 and pending_count == 0
+            else None
+        ),
         details=details,
     )

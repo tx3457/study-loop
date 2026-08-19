@@ -368,6 +368,11 @@
   border: 1px solid rgba(220, 38, 38, 0.15);
 }
 
+.feedback-box.pending {
+  background: var(--accent-blue-soft);
+  border: 1px solid rgba(37, 99, 235, 0.18);
+}
+
 .feedback-header {
   margin-bottom: 10px;
 }
@@ -383,6 +388,10 @@
 
 .feedback-box.wrong .feedback-icon {
   color: var(--accent-danger);
+}
+
+.feedback-box.pending .feedback-icon {
+  color: var(--accent-blue);
 }
 
 .feedback-answer {
@@ -439,6 +448,12 @@
 .next-btn:hover {
   background: #B8943F;
   transform: translateY(-1px);
+}
+
+.next-btn:disabled {
+  opacity: 0.6;
+  cursor: wait;
+  transform: none;
 }
 
 /* ── Results ───────────────────────────────────────────────────────── */
@@ -500,6 +515,10 @@
   font-weight: 700;
   color: var(--accent-blue);
   line-height: 1;
+}
+
+.score-number.pending {
+  font-size: 30px;
 }
 
 .score-unit {

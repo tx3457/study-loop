@@ -21,6 +21,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import agents.tutor_graph as tg
 from agents.supervisor import _oneshot_next, teaching_supervisor
+from models.quiz import Question
+from models.session import QuizSession
+from services.session import sessions
 
 
 _QUIZ = {"questions": [
@@ -137,6 +140,22 @@ class TestOneshotSupervisorRouting(unittest.IsolatedAsyncioTestCase):
 # ═══════════════════════════════════════════════════════════════════════════
 class TestOneshotClosedLoop(unittest.IsolatedAsyncioTestCase):
 
+    def setUp(self):
+        self.original_sessions = dict(sessions)
+        sessions.clear()
+        sessions["s"] = QuizSession(
+            session_id="s",
+            document_id="doc1",
+            user_id="u1",
+            questions=[Question.model_validate(_QUIZ["questions"][0])],
+            user_answers=["A"],
+            status="completed",
+        )
+
+    def tearDown(self):
+        sessions.clear()
+        sessions.update(self.original_sessions)
+
     def _base_state(self, action: str, **extra):
         return {
             "action": action, "user_id": "u1", "document_id": "doc1",
@@ -187,7 +206,9 @@ class TestOneshotClosedLoop(unittest.IsolatedAsyncioTestCase):
         with patch.object(tg, "check_injection", AsyncMock(return_value=(False, ""))), \
              patch.object(gw.grader_agent, "ainvoke", AsyncMock(return_value={"grading_report": _REPORT})), \
              patch.object(gw.adapt_writer, "ainvoke", AsyncMock(return_value={})), \
-             patch.object(gw, "get_mastery", AsyncMock(return_value=0.9)):
+             patch.object(gw, "get_mastery", AsyncMock(return_value=0.9)), \
+             patch.object(gw, "consolidate_session_extras", AsyncMock()), \
+             patch.object(gw, "update_after_session", AsyncMock()):
             result = await tg.tutor_graph.ainvoke(self._base_state("grade", session_id="s"))
 
         self.assertTrue(result.get("done"))
