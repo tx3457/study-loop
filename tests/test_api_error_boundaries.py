@@ -6,6 +6,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -75,7 +76,7 @@ class TestApiErrorBoundaries(unittest.TestCase):
         cls.client = TestClient(app, raise_server_exceptions=False)
 
     def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory(dir="/tmp")
+        self.temp_dir = tempfile.TemporaryDirectory()
         self.original_session_store = autonomous_router.autonomous_sessions
         self.session_db_path = str(Path(self.temp_dir.name) / "sessions.sqlite3")
         self.session_store = AutonomousSessionStore(
@@ -210,13 +211,19 @@ class TestApiErrorBoundaries(unittest.TestCase):
 
     def test_invalid_persisted_session_version_is_consumed_fail_closed(self):
         conversation_id = "invalid-session-version"
+        secret = "sk-123456789012345678901234"
         asyncio.run(self.session_store.save(
             conversation_id,
-            {"schema_version": 2, "messages": []},
+            {
+                "schema_version": 2,
+                "messages": [{"role": "system", "content": secret}],
+            },
         ))
         run_loop = AsyncMock()
 
-        with patch.object(
+        with self.assertLogs(
+            autonomous_router.logger, level="ERROR"
+        ) as captured, patch.object(
             autonomous_router,
             "check_injection",
             AsyncMock(return_value=(False, "")),
@@ -230,6 +237,7 @@ class TestApiErrorBoundaries(unittest.TestCase):
         self.assertIn("暂停会话数据无效", response.json()["detail"])
         self.assertIsNone(self._inspect_session(conversation_id))
         run_loop.assert_not_awaited()
+        self.assertNotIn(secret, "\n".join(captured.output))
 
     def test_semantically_invalid_pause_snapshots_are_consumed_fail_closed(self):
         valid = autonomous_router._session_to_payload(
@@ -270,7 +278,7 @@ class TestApiErrorBoundaries(unittest.TestCase):
     def test_corrupt_pause_json_is_consumed_before_provider_execution(self):
         conversation_id = "corrupt-session-json"
         self._seed_session(conversation_id)
-        with sqlite3.connect(self.session_db_path) as connection:
+        with closing(sqlite3.connect(self.session_db_path)) as connection:
             connection.execute(
                 """
                 UPDATE studyloop_autonomous_sessions
@@ -279,6 +287,7 @@ class TestApiErrorBoundaries(unittest.TestCase):
                 """,
                 (conversation_id,),
             )
+            connection.commit()
         run_loop = AsyncMock()
 
         with patch.object(

@@ -25,15 +25,18 @@ _FINALIZE_TOOL = {
             "properties": {
                 "final_answer": {
                     "type": "string",
+                    "maxLength": 20000,
                     "description": "面向用户的最终自然语言回复，要简洁可读。",
                 },
                 "reason": {
                     "type": "string",
+                    "maxLength": 1000,
                     "description": "为什么这里可以结束？例如 '已完成 plan 所有步骤' / '已获取学习路径'",
                 },
                 "citation_ids": {
                     "type": "array",
-                    "items": {"type": "string"},
+                    "maxItems": 50,
+                    "items": {"type": "string", "minLength": 1, "maxLength": 1024},
                     "description": "回答所依据的 search_document observation 中真实 chunk_ids。",
                     "default": [],
                 },
@@ -44,6 +47,7 @@ _FINALIZE_TOOL = {
                 },
             },
             "required": ["final_answer"],
+            "additionalProperties": False,
         },
     },
 }
@@ -65,10 +69,13 @@ def build_control_tools(*, ask_user_resume_hint: str) -> list[dict]:
                 "properties": {
                     "question": {
                         "type": "string",
+                        "minLength": 1,
+                        "maxLength": 4000,
                         "description": "你想问用户的具体问题。例如 '请告诉我你想学习的文档 ID'",
                     },
                 },
                 "required": ["question"],
+                "additionalProperties": False,
             },
         },
     }

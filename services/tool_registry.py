@@ -175,7 +175,7 @@ class ToolRegistry:
         """
         tool = self._tools.get(name)
         if not tool:
-            err = f"未知工具: {name}"
+            err = "unknown_tool"
             self._record(ToolCallRecord(
                 tool_call_id=uuid.uuid4().hex,
                 tool_name=name,
@@ -186,7 +186,7 @@ class ToolRegistry:
                 run_id=run_id, user_id=user_id,
                 error_message=err,
             ))
-            return f'{{"error": "{err}"}}'
+            return '{"error": "未知工具"}'
 
         tool_call_id = uuid.uuid4().hex
         effect_mode = tool.metadata.effect_mode
@@ -204,14 +204,14 @@ class ToolRegistry:
         )
         binding_error = None
         if missing:
-            binding_error = f"缺少必填参数: {', '.join(missing)}"
+            binding_error = "missing_required_arguments"
         elif unknown:
-            binding_error = f"未知参数: {', '.join(unknown)}"
+            binding_error = "unknown_arguments"
         else:
             try:
                 tool._handler_signature.bind(**arguments)
-            except TypeError as exc:
-                binding_error = str(exc)
+            except TypeError:
+                binding_error = "signature_mismatch"
 
         if binding_error:
             message = f"工具 {name} 参数无效"
@@ -308,8 +308,14 @@ class ToolRegistry:
                 if effect_mode in _NON_REPLAYABLE_EFFECTS
                 else "timeout" if "exceeded" in str(e) else "error"
             )
-            error_message = str(e)
-            logger.error(f"[tool_registry] {name} retries exhausted: {e}")
+            cause = e.__cause__
+            cause_type = type(cause).__name__ if cause is not None else type(e).__name__
+            error_message = f"retry_exhausted:{cause_type}"
+            logger.error(
+                "[tool_registry] retries exhausted: tool=%s error_type=%s",
+                name,
+                cause_type,
+            )
             if effect_mode in _NON_REPLAYABLE_EFFECTS:
                 raise SideEffectAmbiguousError(name) from e
             raise
@@ -327,8 +333,13 @@ class ToolRegistry:
                 if effect_mode in _NON_REPLAYABLE_EFFECTS
                 else "error"
             )
-            error_message = str(e)
-            logger.exception(f"[tool_registry] {name} unexpected error: {e}")
+            error_type = type(e).__name__
+            error_message = f"handler_error:{error_type}"
+            logger.error(
+                "[tool_registry] handler failed: tool=%s error_type=%s",
+                name,
+                error_type,
+            )
             if effect_mode in _NON_REPLAYABLE_EFFECTS:
                 raise SideEffectAmbiguousError(name) from e
             raise

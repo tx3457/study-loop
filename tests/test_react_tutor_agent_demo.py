@@ -230,7 +230,9 @@ class TestReactTutorAgentDemo(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(
             isinstance(m, dict)
             and m.get("role") == "tool"
-            and "grader unavailable" in m.get("content", "")
+            and "工具执行失败" in m.get("content", "")
+            and "RuntimeError" in m.get("content", "")
+            and "grader unavailable" not in m.get("content", "")
             for m in out["messages"]
         ))
 

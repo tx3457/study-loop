@@ -333,6 +333,11 @@ class TestAutonomousIdempotencyBoundary(unittest.TestCase):
             "user_reply": "第三章",
         }
         headers = {"Idempotency-Key": "browser-continue-retry-1"}
+        run_loop = AsyncMock(return_value=autonomous_router.AutonomousResponse(
+            final_answer="continued",
+            rounds_used=2,
+            finalize_reason="explicit_finalize",
+        ))
 
         with patch.object(
             autonomous_router, "request_idempotency", self.store
@@ -345,9 +350,10 @@ class TestAutonomousIdempotencyBoundary(unittest.TestCase):
                 side_effect=[
                     RuntimeError("classifier unavailable"),
                     (True, "blocked"),
+                    (False, ""),
                 ]
             ),
-        ):
+        ), patch.object(autonomous_router, "_run_react_loop", run_loop):
             first = self.client.post(
                 "/agent/autonomous/continue",
                 headers=headers,
@@ -358,10 +364,18 @@ class TestAutonomousIdempotencyBoundary(unittest.TestCase):
                 headers=headers,
                 json=payload,
             )
+            safe_retry = self.client.post(
+                "/agent/autonomous/continue",
+                headers=headers,
+                json={**payload, "user_reply": "安全回答"},
+            )
 
         self.assertEqual(first.status_code, 500)
-        self.assertEqual(retry.status_code, 200)
-        self.assertIn("安全检查未通过", retry.json()["final_answer"])
+        self.assertEqual(retry.status_code, 422)
+        self.assertIn("安全检查未通过", retry.json()["detail"])
+        self.assertEqual(safe_retry.status_code, 200)
+        self.assertEqual(safe_retry.json()["final_answer"], "continued")
+        self.assertEqual(run_loop.await_count, 1)
 
     def test_completed_continue_replays_after_session_is_consumed(self):
         conversation_id = "continue-replay-session"

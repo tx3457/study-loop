@@ -10,7 +10,7 @@ StudyLoop 是一个基于个人学习材料的 AI 自适应学习系统。它支
 - 使用 Chroma 与 BM25 检索学习材料
 - 生成学习路径、练习题和学习报告
 - 自动批改答案并记录错题与掌握度
-- 提供有轮次上限、工具白名单和人工确认的 Autonomous Agent
+- 提供有轮次上限、工具白名单、人工确认和可选检索引用约束的 Autonomous Agent
 - 保存学习记忆和工作流 checkpoint
 
 ### 功能边界
@@ -21,6 +21,12 @@ Autonomous。`/agent/tutor/*` supervisor 图属于 API-only Lab：默认不注�
 `MAS_SUPERVISOR_ENABLED=true` 并重启后端才会暴露这些实验接口；它不作为当前
 简历的已完成功能。其他未进入 Web 主线的 `/agent/run`、`/agent/stream`、
 `/eval/ab` 与 `/audit` 也应视为开发者接口，而不是独立产品入口。
+
+Autonomous 选择文档后，Web 默认要求最终回复携带本轮检索得到的片段 ID；
+严格模式会把检索限制在所选文档，并要求全部引用 ID 都属于本轮检索；引用缺失
+或任一 ID 无效时都会安全拒答。这里校验的是引用来源与本轮检索的一致性，
+不代表已经逐条验证回复中的事实是否被片段支持；
+评测边界见 [`docs/EVALUATION.md`](docs/EVALUATION.md)。
 
 ## 环境要求
 

@@ -21,7 +21,12 @@ import './Autonomous.css'
 
 const initialState = {
   phase: 'idle',     // idle | running | awaiting | continuing | done | error
-  request: { query: '', user_id: 'default_user', document_id: '' },
+  request: {
+    query: '',
+    user_id: 'default_user',
+    document_id: '',
+    grounding_required: false,
+  },
   response: null,
   error: null,
   retryBlocked: false,
@@ -62,6 +67,10 @@ function readAwaitingRecovery() {
       && typeof request.document_id === 'string'
       && request.document_id.length <= 1024
       && (
+        request.grounding_required == null
+        || typeof request.grounding_required === 'boolean'
+      )
+      && (
         value.continue_idempotency_key == null
         || (
           typeof value.continue_idempotency_key === 'string'
@@ -79,6 +88,8 @@ function readAwaitingRecovery() {
         query: request.query,
         user_id: request.user_id,
         document_id: request.document_id,
+        // Older v1 recovery records did not include this additive field.
+        grounding_required: request.grounding_required === true,
       },
       continue_idempotency_key: value.continue_idempotency_key || null,
     }
@@ -122,6 +133,11 @@ export default function Autonomous() {
       steps: [],
       tools_called: ['ask_user'],
       truncated: false,
+      grounding_status: restoredAwaiting.request.grounding_required
+        ? 'pending'
+        : 'not_requested',
+      grounding_required: restoredAwaiting.request.grounding_required,
+      grounding_document_id: restoredAwaiting.request.document_id || null,
     },
   } : initialState)
   const [askReply, setAskReply] = useState(restoredAwaiting?.draft || '')
@@ -313,6 +329,7 @@ export default function Autonomous() {
         query: state.request.query,
         user_id: state.request.user_id || 'default_user',
         document_id: state.request.document_id || null,
+        grounding_required: state.request.grounding_required,
         idempotency_key: idempotencyKey,
       })
       startIdempotencyKey.current = null
@@ -384,6 +401,27 @@ export default function Autonomous() {
   }
 
   const r = state.response
+  const citations = Array.isArray(r?.citations)
+    ? r.citations.filter(citation => (
+      citation
+      && typeof citation.chunk_id === 'string'
+      && typeof citation.document_id === 'string'
+      && typeof citation.snippet === 'string'
+    ))
+    : []
+  const invalidCitationCount = Number.isInteger(r?.invalid_citation_count)
+    ? r.invalid_citation_count
+    : Array.isArray(r?.invalid_citation_ids) ? r.invalid_citation_ids.length : 0
+  const effectiveGroundingRequired = typeof r?.grounding_required === 'boolean'
+    ? r.grounding_required
+    : state.request.grounding_required
+  const groundingStatus = r?.grounding_status
+    || (state.phase === 'awaiting' && effectiveGroundingRequired
+      ? 'pending'
+      : 'not_requested')
+  const isAbstained = r?.abstained === true || groundingStatus === 'abstained'
+  const isSafetyBlocked = ['input_safety_blocked', 'output_leak_blocked']
+    .includes(r?.finalize_reason)
 
   return (
     <div className="autonomous-page">
@@ -395,7 +433,8 @@ export default function Autonomous() {
       <header className="page-header">
         <h1 className="page-title">自主学习 Agent</h1>
         <p className="page-desc">
-          描述学习目标，Agent 会选择合适的工具，并在需要时向你确认信息。
+          描述学习目标，Agent 会选择合适的工具，并在需要时向你确认信息；
+          选择材料后可要求最终回答附上本轮实际检索到的片段。
         </p>
       </header>
 
@@ -448,7 +487,22 @@ export default function Autonomous() {
               value={state.request.document_id}
               onChange={e => {
                 startIdempotencyKey.current = null
-                setState(s => ({ ...s, request: { ...s.request, document_id: e.target.value } }))
+                const documentId = e.target.value
+                setState(s => {
+                  const hadDocument = Boolean(s.request.document_id.trim())
+                  return {
+                    ...s,
+                    request: {
+                      ...s.request,
+                      document_id: documentId,
+                      // A newly selected document is grounded by default. Keep
+                      // later explicit checkbox choices while the user edits it.
+                      grounding_required: !hadDocument && documentId.trim()
+                        ? true
+                        : documentId.trim() ? s.request.grounding_required : false,
+                    },
+                  }
+                })
               }}
               placeholder="留空让 Agent 主动询问"
               disabled={formLocked}
@@ -462,6 +516,34 @@ export default function Autonomous() {
               </p>
             )}
           </div>
+        </div>
+
+        <div className="grounding-row">
+          <label className="grounding-option" htmlFor="autonomous-grounding">
+            <input
+              id="autonomous-grounding"
+              type="checkbox"
+              checked={state.request.grounding_required}
+              onChange={e => {
+                startIdempotencyKey.current = null
+                setState(s => ({
+                  ...s,
+                  request: {
+                    ...s.request,
+                    grounding_required: e.target.checked,
+                  },
+                }))
+              }}
+              disabled={formLocked || !state.request.document_id.trim()}
+            />
+            <span>
+              <strong>要求可核验文档引用</strong>
+              <small>
+                选择文档后默认启用；服务端只接受本轮检索返回的片段 ID，
+                找不到有效片段时会明确拒答。
+              </small>
+            </span>
+          </label>
         </div>
 
         <div className="form-actions">
@@ -495,14 +577,65 @@ export default function Autonomous() {
         <div className="auto-result">
           {/* Final answer */}
           {r.final_answer && (
-            <section className="result-section result-final">
+            <section className={`result-section result-final ${isAbstained ? 'result-abstained' : ''}`}>
               <h3>最终回复</h3>
               <FormattedAnswer text={r.final_answer} />
+              {groundingStatus === 'citation_ids_valid' && (
+                <div className="grounding-banner grounding-valid" role="status">
+                  <strong>引用 ID 已核验</strong>
+                  <span>
+                    下列片段来自本轮工具检索；这不等同于已对回复中的每项事实做语义核验。
+                  </span>
+                </div>
+              )}
+              {isAbstained && isSafetyBlocked && (
+                <div className="grounding-banner grounding-abstained" role="status">
+                  <strong>输出已被安全策略拦截</strong>
+                  <span>本次执行没有向界面返回被识别为敏感或不安全的内容。</span>
+                </div>
+              )}
+              {isAbstained && !isSafetyBlocked && (
+                <div className="grounding-banner grounding-abstained" role="status">
+                  <strong>证据不足，已安全拒答</strong>
+                  <span>当前证据没有满足完整引用约束，未返回未经充分支持的答案。</span>
+                </div>
+              )}
+              {invalidCitationCount > 0 && (
+                <p className="grounding-note">
+                  已丢弃 {invalidCitationCount} 个不属于本轮检索结果的引用 ID。
+                </p>
+              )}
               {r.finalize_reason && (
                 <div className="final-meta">
                   完成说明：<code>{r.finalize_reason}</code>
                 </div>
               )}
+            </section>
+          )}
+
+          {!isAbstained && citations.length > 0 && (
+            <section className="result-section citation-section" aria-labelledby="autonomous-citations-title">
+              <h3 id="autonomous-citations-title">文档证据</h3>
+              <ol className="citation-list">
+                {citations.map((citation, index) => (
+                  <li className="citation-item" key={`${citation.chunk_id}-${index}`}>
+                    <div className="citation-head">
+                      <strong>证据 {index + 1}</strong>
+                      {Number.isInteger(citation.rank) && (
+                        <span>检索排名 {citation.rank}</span>
+                      )}
+                    </div>
+                    <blockquote className="citation-snippet">{citation.snippet}</blockquote>
+                    <div className="citation-meta">
+                      <span>文档 <code>{citation.document_id}</code></span>
+                      {Number.isInteger(citation.chunk_index) && (
+                        <span>片段序号 <code>{citation.chunk_index}</code></span>
+                      )}
+                      <span>片段 ID <code>{citation.chunk_id}</code></span>
+                    </div>
+                  </li>
+                ))}
+              </ol>
             </section>
           )}
 
@@ -553,6 +686,16 @@ export default function Autonomous() {
                   <div><span className="meta-key">轮次</span><span>{r.rounds_used}</span></div>
                   <div><span className="meta-key">是否截断</span><span>{r.truncated ? '是' : '否'}</span></div>
                   <div><span className="meta-key">工具调用</span><span>{(r.tools_called || []).join(', ') || '无'}</span></div>
+                  <div>
+                    <span className="meta-key">引用约束</span>
+                    <span>{effectiveGroundingRequired ? '已要求' : '未要求'}</span>
+                  </div>
+                  {r.grounding_document_id && (
+                    <div>
+                      <span className="meta-key">检索范围</span>
+                      <span>{r.grounding_document_id}</span>
+                    </div>
+                  )}
                 </div>
               </section>
             </div>
@@ -580,6 +723,11 @@ export default function Autonomous() {
           >
             <h2 id="autonomous-dialog-title" className="modal-header">Agent 想问你</h2>
             <div id="autonomous-dialog-question" className="modal-question">{r.user_question}</div>
+            {groundingStatus === 'pending' && (
+              <div className="grounding-pending" role="status">
+                本轮已启用引用约束；最终回复会在续跑完成后校验检索片段 ID。
+              </div>
+            )}
             <textarea
               ref={modalInputRef}
               className="modal-input"

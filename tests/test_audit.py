@@ -4,12 +4,15 @@ audit 端点无认证，_redact 负责移除可能泄露他人文档正文/查�
 完整 payload 仅在可信环境显式启用。
 """
 import os
+import json
 import unittest
 from unittest.mock import patch
 
 from fastapi import HTTPException
 
 from routers.audit import _redact, _serialize
+from services.tool_registry import EffectMode, Tool, ToolMetadata, logger, tool_registry
+from services.tools import dispatch_tool
 
 
 class _Record:
@@ -27,10 +30,28 @@ class TestAuditRedact(unittest.TestCase):
         self.assertEqual(out["tool_name"], "search_document")  # 非敏感元数据保留
 
     def test_arguments_values_masked(self):
-        out = _redact({"arguments": {"query": "用户的隐私查询内容", "document_id": "doc1"}})
+        out = _redact({
+            "tool_name": "search_document",
+            "arguments": {
+                "query": "用户的隐私查询内容",
+                "document_id": "doc1",
+            },
+        })
         self.assertNotIn("用户的隐私查询内容", str(out["arguments"]))  # 原文不外泄
         self.assertIn("query", out["arguments"])                      # 键名保留(可观测)
         self.assertTrue(out["arguments"]["query"].startswith("<str:"))
+        self.assertEqual(out["argument_count"], 2)
+
+    def test_model_supplied_unknown_argument_name_is_not_public(self):
+        secret_key = "sk-123456789012345678901234"
+        out = _redact({
+            "tool_name": "search_document",
+            "arguments": {"query": "safe", secret_key: "value"},
+        })
+
+        self.assertIn("query", out["arguments"])
+        self.assertNotIn(secret_key, str(out))
+        self.assertEqual(out["argument_count"], 2)
 
     def test_non_dict_arguments_untouched(self):
         out = _redact({"arguments": None})
@@ -61,6 +82,55 @@ class TestAuditPayloadGate(unittest.TestCase):
 
         self.assertEqual(out[0]["arguments"]["query"], "private query")
         self.assertEqual(out[0]["output_preview"], "private document text")
+
+
+class TestAuditFailureRedaction(unittest.IsolatedAsyncioTestCase):
+    async def test_real_handler_secret_is_absent_from_logs_and_default_audit(self):
+        secret = "sk-123456789012345678901234"
+        tool_name = "audit_secret_failure_test"
+        run_id = "audit-secret-failure-run"
+        original_audit = list(tool_registry._audit_log)
+
+        async def failing_handler(value: str) -> str:
+            raise RuntimeError(f"handler repeated {value}")
+
+        tool = Tool(
+            name=tool_name,
+            description="test-only failing tool",
+            parameters_schema={
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+                "additionalProperties": False,
+            },
+            handler=failing_handler,
+            metadata=ToolMetadata(
+                max_retries=0,
+                effect_mode=EffectMode.READ_ONLY,
+            ),
+        )
+        tool_registry.register(tool)
+        try:
+            with self.assertLogs(logger, level="ERROR") as captured:
+                with self.assertRaises(RuntimeError):
+                    await dispatch_tool(
+                        tool_name,
+                        {"value": secret},
+                        run_id=run_id,
+                    )
+
+            records = tool_registry.get_audit(run_id=run_id)
+            public_audit = _serialize(records, include_payload=False)
+            serialized = json.dumps(public_audit, ensure_ascii=False)
+            self.assertNotIn(secret, "\n".join(captured.output))
+            self.assertNotIn(secret, serialized)
+            self.assertEqual(
+                public_audit[-1]["error_message"],
+                "handler_error:RuntimeError",
+            )
+        finally:
+            tool_registry.unregister(tool_name, expected_tool=tool)
+            tool_registry._audit_log[:] = original_audit
 
 
 if __name__ == "__main__":

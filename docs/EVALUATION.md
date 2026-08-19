@@ -74,11 +74,12 @@ task success, production latency, or user impact.
 
 ## Citation contract and remaining measurement boundary
 
-The autonomous endpoint now registers retrieved chunk IDs server-side, accepts
-only citation IDs from the current run, expands snippets from that registry,
-and fails closed to an explicit abstention when grounding is required but no
-valid citation survives. Unit tests cover forged IDs, no-citation abstention,
-and evidence continuity across human-in-the-loop resume.
+The autonomous endpoint now registers retrieved chunk IDs server-side, binds
+document-scoped tool calls before dispatch, expands snippets only from that
+registry, and fails closed to an explicit abstention when grounding is required
+and citations are missing or any submitted ID is invalid. Unit tests cover
+mixed valid/forged IDs, no-citation abstention, document-scope violations, and
+evidence continuity across human-in-the-loop resume.
 
 This contract is implementation evidence, not a citation-accuracy result. A
 publishable percentage still requires a versioned answerable/unanswerable set,

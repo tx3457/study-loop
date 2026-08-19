@@ -28,10 +28,26 @@ def _redact(d: dict) -> dict:
     """脱敏:移除可能含他人文档正文/查询原文的字段,只保留可观测元数据。"""
     safe = dict(d)
     safe.pop("output_preview", None)
+    tool_name = safe.get("tool_name")
+    registered_tool = (
+        tool_registry.get(tool_name) if isinstance(tool_name, str) else None
+    )
+    if isinstance(tool_name, str) and registered_tool is None:
+        safe["tool_name"] = "blocked_tool"
     args = safe.get("arguments")
     if isinstance(args, dict):
-        # 保留键名,值用「类型:长度」占位,避免泄露 query/topic 等原文
-        safe["arguments"] = {k: f"<{type(v).__name__}:{len(str(v))}chars>" for k, v in args.items()}
+        declared = set(
+            registered_tool.parameters_schema.get("properties", {})
+            if registered_tool is not None
+            else {}
+        )
+        # 仅保留开发者声明的参数名。模型生成的未知 key 本身也可能承载秘密。
+        safe["arguments"] = {
+            key: f"<{type(value).__name__}:{len(str(value))}chars>"
+            for key, value in args.items()
+            if key in declared
+        }
+        safe["argument_count"] = len(args)
     return safe
 
 
