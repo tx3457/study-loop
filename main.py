@@ -30,6 +30,7 @@ from services.provider_config import (
 )
 from services.retry import RetryExhausted
 from services.tool_registry import SideEffectAmbiguousError
+from services.quiz_sessions import QuizSessionApiError
 
 
 async def _load_memory_snapshot():
@@ -144,6 +145,14 @@ async def root():
 @app.exception_handler(ValueError)
 async def deal(request: Request, exc: ValueError):
     return JSONResponse(status_code=400, content={"error": "参数错误", "detail": str(exc)})
+
+
+@app.exception_handler(QuizSessionApiError)
+async def quiz_session_error_handler(request: Request, exc: QuizSessionApiError):
+    content = {"detail": exc.detail, "code": exc.code}
+    if exc.reason is not None:
+        content["reason"] = exc.reason
+    return JSONResponse(status_code=exc.status_code, content=content)
 
 
 @app.exception_handler(SideEffectAmbiguousError)

@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel
 
 
@@ -6,7 +8,7 @@ class WrongEntry(BaseModel):
     document_id: str
     question: str
     options: list[str] | None = None
-    question_type: str = "short_answer"
+    question_type: Literal["choice", "true_false", "short_answer"] = "short_answer"
     correct_answer: str
     explanation: str
     user_answer: str       # 当时的错误答案

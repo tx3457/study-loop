@@ -76,8 +76,30 @@ async def start_repractice(
     document_id: str,
     user_id: str = "default_user",
 ) -> tuple[str, list[QuestionView]]:
-    """用持久错题创建一份可由标准 Quiz 流程作答的新会话。"""
+    """Legacy in-memory wrapper used by direct service callers."""
     sessions = _get_sessions()
+    session = await prepare_repractice_session(document_id, user_id=user_id)
+    sessions[session.session_id] = session
+    return session.session_id, _question_views(session)
+
+
+def _question_views(session: QuizSession) -> list[QuestionView]:
+    return [
+        QuestionView(
+            index=index,
+            question=question.question,
+            options=question.options,
+            type=question.type,
+        )
+        for index, question in enumerate(session.questions)
+    ]
+
+
+async def prepare_repractice_session(
+    document_id: str,
+    user_id: str = "default_user",
+) -> QuizSession:
+    """Build a wrong-question QuizSession without choosing its storage backend."""
     bank = await get_wrong_questions(document_id, user_id=user_id)
     if not bank.entries:
         raise ValueError(f"No wrong questions for document '{document_id}'")
@@ -94,23 +116,11 @@ async def start_repractice(
         for entry in bank.entries
     ]
 
-    session_id = str(uuid.uuid4())
-    sessions[session_id] = QuizSession(
-        session_id=session_id,
+    return QuizSession(
+        session_id=str(uuid.uuid4()),
         document_id=document_id,
         user_id=user_id,
         questions=questions,
         user_answers=[],
         status="active",
     )
-
-    questions_view = [
-        QuestionView(
-            index=index,
-            question=question.question,
-            options=question.options,
-            type=question.type,
-        )
-        for index, question in enumerate(questions)
-    ]
-    return session_id, questions_view

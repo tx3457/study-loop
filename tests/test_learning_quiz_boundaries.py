@@ -1,5 +1,7 @@
 """Regression coverage for document-grounded quiz and session boundaries."""
 
+import asyncio
+import tempfile
 import unittest
 import sys
 from pathlib import Path
@@ -22,7 +24,13 @@ from main import app
 from models.learning_path import PathBrief
 from models.grader import AIFeedback
 from models.quiz import Question, QuizResponse
-from models.session import QuizSession, SessionStartRequest
+from models.session import (
+    QuizSession,
+    QuizSessionAggregate,
+    SessionStartRequest,
+)
+from services.quiz_sessions import QuizSessionStore
+from services.session import answer_result_for_index
 
 
 def _brief() -> PathBrief:
@@ -474,12 +482,35 @@ class TestSessionHttpBoundaries(unittest.TestCase):
         cls.client = TestClient(app, raise_server_exceptions=False)
 
     def setUp(self):
-        self.original_sessions = dict(session_service.sessions)
-        session_service.sessions.clear()
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.now = [1000.0]
+        self.quiz_store = QuizSessionStore(
+            sqlite_path=str(Path(self.tempdir.name) / "quiz-sessions.sqlite3"),
+            ttl_seconds=60,
+            clock=lambda: self.now[0],
+        )
+        self.store_patch = patch.object(
+            session_router,
+            "quiz_sessions",
+            self.quiz_store,
+        )
+        self.store_patch.start()
 
     def tearDown(self):
-        session_service.sessions.clear()
-        session_service.sessions.update(self.original_sessions)
+        self.store_patch.stop()
+        self.tempdir.cleanup()
+
+    def _seed(self, session: QuizSession) -> None:
+        aggregate_kwargs = {"session": session}
+        if session.user_answers:
+            last_index = len(session.user_answers) - 1
+            aggregate_kwargs.update(
+                last_answer_index=last_index,
+                last_answer_result=answer_result_for_index(session, last_index),
+            )
+        asyncio.run(
+            self.quiz_store.create(QuizSessionAggregate(**aggregate_kwargs))
+        )
 
     @staticmethod
     def _start_payload() -> dict:
@@ -523,8 +554,73 @@ class TestSessionHttpBoundaries(unittest.TestCase):
         self.assertEqual(response.json(), {"detail": "文档存储暂时不可用"})
         self.assertNotIn("storage-secret", response.text)
 
+    def test_start_idempotency_key_replays_and_rejects_payload_mismatch(self):
+        prepared = _session("stable-start-session", status="active")
+        prepare = AsyncMock(return_value=prepared)
+        headers = {"Idempotency-Key": "web-quiz-start-key"}
+
+        with patch.object(session_router, "prepare_session", prepare):
+            first = self.client.post(
+                "/session/start",
+                json=self._start_payload(),
+                headers=headers,
+            )
+            replay = self.client.post(
+                "/session/start",
+                json=self._start_payload(),
+                headers=headers,
+            )
+            changed = self._start_payload()
+            changed["difficulty"] = "hard"
+            conflict = self.client.post(
+                "/session/start",
+                json=changed,
+                headers=headers,
+            )
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.json(), first.json())
+        prepare.assert_awaited_once()
+        self.assertEqual(conflict.status_code, 409, conflict.text)
+        self.assertEqual(conflict.json()["reason"], "payload_mismatch")
+
+    def test_snapshot_is_browser_safe_and_survives_store_reopen(self):
+        session = _session("safe-snapshot", status="active")
+        session.questions[0].answer = "PRIVATE-CORRECT-ANSWER"
+        session.questions[0].explanation = "PRIVATE-EXPLANATION"
+        session.questions[0].source = "PRIVATE-SOURCE-CHUNK"
+        self._seed(session)
+
+        first = self.client.get(f"/session/{session.session_id}")
+        reopened = QuizSessionStore(
+            sqlite_path=str(Path(self.tempdir.name) / "quiz-sessions.sqlite3"),
+            ttl_seconds=60,
+            clock=lambda: self.now[0],
+        )
+        with patch.object(session_router, "quiz_sessions", reopened):
+            after_reopen = self.client.get(f"/session/{session.session_id}")
+
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(after_reopen.status_code, 200, after_reopen.text)
+        self.assertEqual(after_reopen.json(), first.json())
+        payload = first.json()
+        self.assertEqual(payload["answered_count"], 0)
+        self.assertEqual(
+            set(payload["questions"][0]),
+            {"index", "question", "options", "type"},
+        )
+        for private_value in (
+            "PRIVATE-CORRECT-ANSWER",
+            "PRIVATE-EXPLANATION",
+            "PRIVATE-SOURCE-CHUNK",
+        ):
+            self.assertNotIn(private_value, first.text)
+        self.assertNotIn("user_answers", first.text)
+
     def test_missing_session_is_404_for_every_session_endpoint(self):
         requests = (
+            ("get", "/session/missing", None),
             (
                 "post",
                 "/session/missing/answer",
@@ -540,12 +636,33 @@ class TestSessionHttpBoundaries(unittest.TestCase):
                 request = getattr(self.client, method)
                 response = request(path, json=payload) if payload else request(path)
                 self.assertEqual(response.status_code, 404)
+                self.assertEqual(response.json()["code"], "quiz_session_not_found")
+
+    def test_expired_session_is_410_for_every_session_endpoint(self):
+        self._seed(_session("expired", status="active"))
+        self.now[0] += 61
+
+        requests = (
+            ("get", "/session/expired", None),
+            (
+                "post",
+                "/session/expired/answer",
+                {"answer": "A", "question_index": 0},
+            ),
+            ("get", "/session/expired/result", None),
+            ("post", "/session/expired/grade", None),
+            ("post", "/session/expired/report", None),
+        )
+        for method, path, payload in requests:
+            with self.subTest(path=path):
+                request = getattr(self.client, method)
+                response = request(path, json=payload) if payload else request(path)
+                self.assertEqual(response.status_code, 410, response.text)
+                self.assertEqual(response.json()["code"], "quiz_session_expired")
 
     def test_session_state_conflicts_are_409(self):
-        session_service.sessions["active"] = _session("active", status="active")
-        session_service.sessions["completed"] = _session(
-            "completed", status="completed"
-        )
+        self._seed(_session("active", status="active"))
+        self._seed(_session("completed", status="completed"))
 
         requests = (
             (
@@ -563,6 +680,23 @@ class TestSessionHttpBoundaries(unittest.TestCase):
                 request = getattr(self.client, method)
                 response = request(path, json=payload) if payload else request(path)
                 self.assertEqual(response.status_code, 409)
+
+    def test_claimed_session_returns_busy_409_without_mutation(self):
+        session = _session("busy", status="active")
+        self._seed(session)
+        claim = asyncio.run(self.quiz_store.claim(session.session_id, "other-worker"))
+        self.assertTrue(claim.claimed)
+
+        response = self.client.post(
+            f"/session/{session.session_id}/answer",
+            json={"answer": "A", "question_index": 0},
+        )
+
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["code"], "quiz_session_busy")
+        record = asyncio.run(self.quiz_store.inspect(session.session_id))
+        self.assertEqual(record.aggregate.session.user_answers, [])
+        asyncio.run(self.quiz_store.release(session.session_id, claim.token))
 
     def test_provider_validation_error_is_redacted(self):
         try:
@@ -586,7 +720,7 @@ class TestSessionHttpBoundaries(unittest.TestCase):
 
         with patch.object(
             session_router,
-            "start_session",
+            "prepare_session",
             AsyncMock(side_effect=provider_validation_error),
         ):
             response = self.client.post("/session/start", json=self._start_payload())

@@ -72,6 +72,10 @@ authorization or Pydantic-validation boundary; see `SECURITY.md`.
 - `services/memory_persist.py` is a local JSON snapshot fallback when PostgreSQL
   is not configured. This fallback is intentionally single-worker; multi-worker
   deployments must configure PostgreSQL rather than share one snapshot file.
+- `services/quiz_sessions.py` persists stable Web Quiz and wrong-question
+  practice sessions. SQLite supports local restart recovery; PostgreSQL adds
+  cross-worker claims and fencing. Adaptive and Tutor keep their separate,
+  explicitly in-process workflow state.
 
 Checkpoint state and learner memory solve different problems and should not be
 described as one generic “memory” feature.
