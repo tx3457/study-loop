@@ -178,7 +178,7 @@ async def _serve_turn(
         )
     )
     return [
-        QuestionView(index=i, question=q.question, options=q.options)
+        QuestionView(index=i, question=q.question, options=q.options, type=q.type)
         for i, q in enumerate(quiz.questions)
     ]
 
@@ -250,7 +250,10 @@ async def _grade_and_update(
         asess.user_id, report, asess.document_id
     )  # EMA mastery + weak_points
     await write_episodic_memory(
-        asess.user_id, report, asess.document_id
+        asess.user_id,
+        report,
+        asess.document_id,
+        questions=qs.questions,
     )  # session_briefs + error_log
     if asess.current_decision is not None:
         await append_decision(

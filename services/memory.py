@@ -39,6 +39,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from models.grader import GradingReport
+from models.quiz import Question
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
@@ -55,6 +56,7 @@ _POSTGRES_STORE_SETUP_LOCK_ID = 0x53545544594D454D
 _POSTGRES_STORE_SETUP_LOCK_TIMEOUT_ENV = "MEMORY_STORE_SETUP_LOCK_TIMEOUT_SECONDS"
 _POSTGRES_STORE_SETUP_LOCK_TIMEOUT_DEFAULT_SECONDS = 300.0
 _POSTGRES_STORE_SETUP_LOCK_POLL_SECONDS = 0.05
+_WRONG_QUESTION_SOURCE_PREFIX = "wrong-question:"
 
 
 class PostgresStoreSetupLockTimeoutError(TimeoutError):
@@ -280,7 +282,27 @@ async def append_session_brief(user_id: str, brief: dict) -> None:
 
 async def append_error(user_id: str, error: dict) -> None:
     key = error.get("error_id") or f"err_{uuid.uuid4().hex[:12]}"
-    await append_bank_event(user_id, "error_log", key, error)
+    payload = {**error, "error_id": key}
+    await append_bank_event(user_id, "error_log", key, payload)
+
+
+async def resolve_error(
+    user_id: str,
+    error_id: str,
+    resolved_session_id: str,
+) -> bool:
+    """把重练答对的错题标为已解决，同时保留原始事件供审计。"""
+    namespace = _bank_ns(user_id, "error_log")
+    item = store.get(namespace, error_id)
+    if item is None:
+        return False
+    payload = {
+        **item.value,
+        "resolved_at": _now_iso(),
+        "resolved_session_id": resolved_session_id,
+    }
+    store.put(namespace, error_id, payload)
+    return True
 
 
 async def append_decision(user_id: str, decision: dict) -> None:
@@ -290,10 +312,40 @@ async def append_decision(user_id: str, decision: dict) -> None:
 
 
 async def list_errors(user_id: str, document_id: str | None = None, limit: int = 50) -> list[dict]:
-    """错题本：可按文档过滤。"""
-    items = await list_bank_events(user_id, "error_log", limit=limit * 2)
-    if document_id is not None:
-        items = [e for e in items if e.get("document_id") == document_id]
+    """未解决错题：在存储层按文档过滤，分页读取后再按时间排序。"""
+    if limit <= 0:
+        return []
+
+    namespace = _bank_ns(user_id, "error_log")
+    event_filter = {"document_id": document_id} if document_id is not None else None
+    batch_size = max(100, limit)
+    offset = 0
+    items: list[dict] = []
+    while True:
+        results = store.search(
+            namespace,
+            filter=event_filter,
+            limit=batch_size,
+            offset=offset,
+        )
+        items.extend(
+            {
+                **result.value,
+                # 升级前 payload 没有 error_id；注入真实 store key 才能在
+                # 重练答对时回写同一条记录，而不是生成无法解析的展示 ID。
+                "error_id": result.value.get("error_id") or result.key,
+            }
+            for result in results
+            if not result.value.get("resolved_at")
+        )
+        if len(results) < batch_size:
+            break
+        offset += len(results)
+
+    items.sort(
+        key=lambda item: item.get("timestamp", item.get("date", "")),
+        reverse=True,
+    )
     return items[:limit]
 
 
@@ -360,7 +412,12 @@ async def get_user_sessions(user_id: str) -> list[dict]:
     return items
 
 
-async def write_episodic_memory(user_id: str, report: GradingReport, document_id: str) -> None:
+async def write_episodic_memory(
+    user_id: str,
+    report: GradingReport,
+    document_id: str,
+    questions: list[Question] | None = None,
+) -> None:
     """兼容 API：写入 session_briefs（聚合摘要）+ error_log（每错题单条）。"""
     knowledge_gaps = [g.knowledge_gap for g in report.grades
                       if not g.is_correct and g.knowledge_gap]
@@ -375,15 +432,52 @@ async def write_episodic_memory(user_id: str, report: GradingReport, document_id
 
     # 每个错题单独入 error_log（便于错题本 / 间隔重复）
     for g in report.grades:
-        if not g.is_correct:
-            await append_error(user_id, {
-                "session_id": report.session_id,
-                "document_id": document_id,
-                "question": g.question,
-                "user_answer": g.user_answer,
-                "correct_answer": g.correct_answer,
-                "knowledge_gap": g.knowledge_gap,
-            })
+        question = (
+            questions[g.index]
+            if questions is not None and 0 <= g.index < len(questions)
+            else None
+        )
+        source_error_id = None
+        if question and question.source.startswith(_WRONG_QUESTION_SOURCE_PREFIX):
+            source_error_id = question.source.removeprefix(
+                _WRONG_QUESTION_SOURCE_PREFIX
+            )
+
+        if g.is_correct:
+            if source_error_id:
+                resolved = await resolve_error(
+                    user_id,
+                    source_error_id,
+                    report.session_id,
+                )
+                if not resolved:
+                    logger.warning(
+                        "重练已答对，但源错题不存在: user=%s error_id=%s",
+                        user_id,
+                        source_error_id,
+                    )
+            continue
+
+        await append_error(user_id, {
+            # 同一份批改报告重试时覆盖原记录，不重复追加错题。
+            # 重练仍答错时覆盖原错题，使未解决列表不会分裂出副本。
+            "error_id": source_error_id or f"{report.session_id}:{g.index}",
+            "session_id": report.session_id,
+            "question_index": g.index,
+            "document_id": document_id,
+            "question": g.question,
+            "options": question.options if question else None,
+            "question_type": question.type if question else "short_answer",
+            "user_answer": g.user_answer,
+            "correct_answer": g.correct_answer,
+            "explanation": (
+                question.explanation
+                if question
+                else (g.ai_feedback or g.knowledge_gap or "")
+            ),
+            "knowledge_gap": g.knowledge_gap,
+            "source_error_id": source_error_id,
+        })
 
     await maybe_archive_session_briefs(user_id)
 

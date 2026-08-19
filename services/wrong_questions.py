@@ -1,56 +1,70 @@
+import hashlib
+import logging
 import uuid
-from models.wrong_questions import WrongEntry, WrongQuestionBank
-from models.grader import GradingReport
+
+from pydantic import ValidationError
+
 from models.quiz import Question
-from models.session import QuizSession, QuestionView, SessionStartRequest
+from models.session import QuestionView, QuizSession
+from models.wrong_questions import WrongEntry, WrongQuestionBank
+from services.memory import list_errors
 
-# 内存错题库：{document_id: {entry_id: WrongEntry}}
-wrong_bank: dict[str, dict[str, WrongEntry]] = {}
+logger = logging.getLogger(__name__)
 
-# 避免循环导入，在函数内部 import sessions
+
 def _get_sessions():
+    """延迟导入，避免 services.session 与错题服务循环导入。"""
     from services.session import sessions
+
     return sessions
 
 
-def collect_wrong_answers(session_id: str, report: GradingReport) -> int:
-    """从批改报告中提取错题，写入错题库。返回新增条数。"""
-    sessions = _get_sessions()
-    session = sessions.get(session_id)
-    if not session:
-        return 0
-
-    doc_id = session.document_id
-    if doc_id not in wrong_bank:
-        wrong_bank[doc_id] = {}
-
-    added = 0
-    for g in report.grades:
-        if not g.is_correct:
-            entry_id = str(uuid.uuid4())
-            wrong_bank[doc_id][entry_id] = WrongEntry(
-                entry_id=entry_id,
-                document_id=doc_id,
-                question=g.question,
-                options=next(
-                    (q.options for q in session.questions if q.question == g.question),
-                    None,
-                ),
-                correct_answer=g.correct_answer,
-                explanation=next(
-                    (q.explanation for q in session.questions if q.question == g.question),
-                    "",
-                ),
-                user_answer=g.user_answer,
-                knowledge_gap=g.knowledge_gap,
-                session_id=session_id,
-            )
-            added += 1
-    return added
+def _legacy_entry_id(item: dict) -> str:
+    """为升级前没有 error_id 的记录生成稳定标识。"""
+    identity = "\x1f".join(
+        str(item.get(field, ""))
+        for field in ("session_id", "question_index", "question", "correct_answer")
+    )
+    return f"legacy:{hashlib.sha256(identity.encode('utf-8')).hexdigest()[:20]}"
 
 
-def get_wrong_questions(document_id: str) -> WrongQuestionBank:
-    entries = list(wrong_bank.get(document_id, {}).values())
+def _to_wrong_entry(item: dict, document_id: str) -> WrongEntry:
+    options = item.get("options")
+    question_type = item.get("question_type") or (
+        "choice" if options else "short_answer"
+    )
+    return WrongEntry(
+        entry_id=item.get("error_id") or _legacy_entry_id(item),
+        document_id=document_id,
+        question=item.get("question", ""),
+        options=options,
+        question_type=question_type,
+        correct_answer=item.get("correct_answer", ""),
+        explanation=item.get("explanation") or item.get("knowledge_gap") or "",
+        user_answer=item.get("user_answer", ""),
+        knowledge_gap=item.get("knowledge_gap"),
+        session_id=item.get("session_id", "unknown"),
+    )
+
+
+async def get_wrong_questions(
+    document_id: str,
+    user_id: str = "default_user",
+) -> WrongQuestionBank:
+    """从持久学习记忆读取错题；无效的历史记录会被跳过而不拖垮整页。"""
+    items = await list_errors(user_id, document_id=document_id, limit=200)
+    entries: list[WrongEntry] = []
+    for item in items:
+        try:
+            entry = _to_wrong_entry(item, document_id)
+        except ValidationError:
+            logger.warning("忽略无法解析的错题记录: %s", item.get("error_id"))
+            continue
+        if not entry.question or not entry.correct_answer:
+            logger.warning("忽略缺少题干或答案的错题记录: %s", entry.entry_id)
+            continue
+        entries.append(entry)
+
     return WrongQuestionBank(
         document_id=document_id,
         total=len(entries),
@@ -58,36 +72,45 @@ def get_wrong_questions(document_id: str) -> WrongQuestionBank:
     )
 
 
-def start_repractice(document_id: str) -> tuple[str, list[QuestionView]]:
-    """用错题库里的题目创建一个新的答题会话。"""
+async def start_repractice(
+    document_id: str,
+    user_id: str = "default_user",
+) -> tuple[str, list[QuestionView]]:
+    """用持久错题创建一份可由标准 Quiz 流程作答的新会话。"""
     sessions = _get_sessions()
-    entries = list(wrong_bank.get(document_id, {}).values())
-    if not entries:
+    bank = await get_wrong_questions(document_id, user_id=user_id)
+    if not bank.entries:
         raise ValueError(f"No wrong questions for document '{document_id}'")
 
-    # WrongEntry → Question
     questions = [
         Question(
-            question=e.question,
-            options=e.options,
-            answer=e.correct_answer,
-            explanation=e.explanation,
-            source="wrong-question-bank",
+            question=entry.question,
+            options=entry.options,
+            answer=entry.correct_answer,
+            explanation=entry.explanation,
+            source=f"wrong-question:{entry.entry_id}",
+            type=entry.question_type,
         )
-        for e in entries
+        for entry in bank.entries
     ]
 
     session_id = str(uuid.uuid4())
     sessions[session_id] = QuizSession(
         session_id=session_id,
         document_id=document_id,
+        user_id=user_id,
         questions=questions,
         user_answers=[],
         status="active",
     )
 
     questions_view = [
-        QuestionView(index=i, question=q.question, options=q.options)
-        for i, q in enumerate(questions)
+        QuestionView(
+            index=index,
+            question=question.question,
+            options=question.options,
+            type=question.type,
+        )
+        for index, question in enumerate(questions)
     ]
     return session_id, questions_view

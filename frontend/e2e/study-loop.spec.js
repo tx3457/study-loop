@@ -929,7 +929,7 @@ test('late wrong-question responses cannot overwrite the selected document', asy
   await expect(page.getByText('B 文档错题')).toBeVisible()
 
   const firstResponse = page.waitForResponse(
-    response => response.url().endsWith('/wrong-questions/a.md')
+    response => new URL(response.url()).pathname.endsWith('/wrong-questions/a.md')
   )
   releaseFirstRequest()
   await firstResponse
@@ -1609,6 +1609,196 @@ test('Autonomous generates a request key without crypto.randomUUID', async ({ pa
 
   await expect(page.getByText('兼容模式提交成功。')).toBeVisible()
   expect(requestKey).toMatch(UUID_V4_PATTERN)
+  expect(unexpectedRequests).toEqual([])
+  expect(problems).toEqual([])
+})
+
+test('Dashboard starts a persisted wrong-question practice in Quiz', async ({ page }) => {
+  const problems = trackBrowserProblems(page)
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['retrieval.md'] } }
+    }
+    if (request.method() === 'GET' && path === '/user/default_user/sessions') {
+      return { body: [] }
+    }
+    if (request.method() === 'GET' && path === '/user/default_user/profile') {
+      return {
+        body: {
+          topic_mastery: { 'retrieval.md': 0.4 },
+          weak_points: ['混合检索'],
+          total_sessions: 1,
+        },
+      }
+    }
+    if (request.method() === 'GET' && path === '/wrong-questions/retrieval.md') {
+      return {
+        body: {
+          document_id: 'retrieval.md',
+          total: 2,
+          entries: [
+            {
+              entry_id: 'source-session:0',
+              document_id: 'retrieval.md',
+              question: 'RRF 的作用是什么？',
+              options: ['只做向量检索', '融合多路检索排名'],
+              question_type: 'choice',
+              correct_answer: '融合多路检索排名',
+              explanation: 'RRF 会融合多个有序结果集。',
+              user_answer: '只做向量检索',
+              knowledge_gap: '混合检索',
+              session_id: 'source-session',
+            },
+            {
+              entry_id: 'source-session:1',
+              document_id: 'retrieval.md',
+              question: '为什么 RRF 不直接比较原始分数？',
+              options: null,
+              question_type: 'short_answer',
+              correct_answer: '不同检索器的分数尺度不可直接比较',
+              explanation: '名次比不同检索器的原始分数更容易统一。',
+              user_answer: '因为计算更快',
+              knowledge_gap: '分数校准',
+              session_id: 'source-session',
+            },
+          ],
+        },
+      }
+    }
+    if (
+      request.method() === 'POST'
+      && path === '/wrong-questions/retrieval.md/practice'
+    ) {
+      return {
+        body: {
+          session_id: 'practice-session',
+          total: 2,
+          questions: [
+            {
+              index: 0,
+              question: 'RRF 的作用是什么？',
+              options: ['只做向量检索', '融合多路检索排名'],
+              type: 'choice',
+            },
+            {
+              index: 1,
+              question: '为什么 RRF 不直接比较原始分数？',
+              options: null,
+              type: 'short_answer',
+            },
+          ],
+        },
+      }
+    }
+    if (
+      request.method() === 'POST'
+      && path === '/session/practice-session/answer'
+    ) {
+      return {
+        body: {
+          correct: true,
+          correct_answer: '融合多路检索排名',
+          explanation: 'RRF 会融合多个有序结果集。',
+          is_last: false,
+          next_index: 1,
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/dashboard')
+  await page.getByLabel('错题文档').selectOption('retrieval.md')
+  await page.getByRole('button', { name: '开始重练（2）' }).click()
+
+  await expect(page).toHaveURL(/\/quiz$/)
+  await expect(page.getByText('RRF 的作用是什么？')).toBeVisible()
+  await page.getByRole('button', { name: '融合多路检索排名' }).click()
+  await page.getByRole('button', { name: '提交答案' }).click()
+  await page.getByRole('button', { name: '下一题' }).click()
+  await expect(
+    page.getByRole('textbox', { name: '为什么 RRF 不直接比较原始分数？' })
+  ).toBeVisible()
+  expect(unexpectedRequests).toEqual([])
+  expect(problems).toEqual([])
+})
+
+test('a late wrong-practice response cannot navigate away from a newly selected document', async ({ page }) => {
+  const problems = trackBrowserProblems(page)
+  let releasePractice
+  let markPracticeStarted
+  const practiceGate = new Promise(resolve => { releasePractice = resolve })
+  const practiceStarted = new Promise(resolve => { markPracticeStarted = resolve })
+  const entry = documentId => ({
+    entry_id: `${documentId}:0`,
+    document_id: documentId,
+    question: `${documentId} 的错题`,
+    options: ['错误', '正确'],
+    question_type: 'choice',
+    correct_answer: '正确',
+    explanation: '解析',
+    user_answer: '错误',
+    knowledge_gap: '测试',
+    session_id: `${documentId}-session`,
+  })
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['a.md', 'b.md'] } }
+    }
+    if (request.method() === 'GET' && path === '/user/default_user/sessions') {
+      return { body: [] }
+    }
+    if (request.method() === 'GET' && path === '/user/default_user/profile') {
+      return {
+        body: {
+          topic_mastery: { 'a.md': 0.3, 'b.md': 0.5 },
+          weak_points: [],
+          total_sessions: 2,
+        },
+      }
+    }
+    if (request.method() === 'GET' && path === '/wrong-questions/a.md') {
+      return { body: { document_id: 'a.md', total: 1, entries: [entry('a.md')] } }
+    }
+    if (request.method() === 'GET' && path === '/wrong-questions/b.md') {
+      return { body: { document_id: 'b.md', total: 1, entries: [entry('b.md')] } }
+    }
+    if (request.method() === 'POST' && path === '/wrong-questions/a.md/practice') {
+      markPracticeStarted()
+      await practiceGate
+      return {
+        body: {
+          session_id: 'late-a-practice',
+          total: 1,
+          questions: [{
+            index: 0,
+            question: 'a.md 的错题',
+            options: ['错误', '正确'],
+            type: 'choice',
+          }],
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/dashboard')
+  const documentSelect = page.getByLabel('错题文档')
+  await documentSelect.selectOption('a.md')
+  await page.getByRole('button', { name: '开始重练（1）' }).click()
+  await practiceStarted
+
+  await documentSelect.selectOption('b.md')
+  await expect(page.getByText('b.md 的错题')).toBeVisible()
+  const lateResponse = page.waitForResponse(
+    response => response.url().includes('/wrong-questions/a.md/practice')
+  )
+  releasePractice()
+  await lateResponse
+
+  await expect(page).toHaveURL(/\/dashboard$/)
+  await expect(page.getByText('b.md 的错题')).toBeVisible()
+  await expect(page.getByRole('alert')).toHaveCount(0)
   expect(unexpectedRequests).toEqual([])
   expect(problems).toEqual([])
 })

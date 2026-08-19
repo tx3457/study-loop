@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 import DocumentPrerequisite from '../components/DocumentPrerequisite'
 import {
   createIdempotencyKey,
@@ -66,6 +67,10 @@ function isCorrectOption(option, correctAnswer) {
 }
 
 export default function Quiz() {
+  const location = useLocation()
+  const navigate = useNavigate()
+  const practiceHydrated = useRef(false)
+
   /* ── 状态 ──────────────────────────────────────────────────────── */
   const [phase, setPhase] = useState('setup') // setup | loading | answering | feedback | results | grading | report
   const [documents, setDocuments] = useState([])
@@ -137,6 +142,32 @@ export default function Quiz() {
   }, [])
 
   useEffect(() => () => clearInterval(timerRef.current), [])
+
+  useEffect(() => {
+    const practice = location.state?.wrongQuestionPractice
+    if (practiceHydrated.current || !practice?.session_id || !practice?.questions?.length) {
+      return
+    }
+
+    practiceHydrated.current = true
+    answerIdempotencyKey.current = null
+    setSessionId(practice.session_id)
+    setQuestions(practice.questions)
+    setConfig(current => ({
+      ...current,
+      document_id: practice.document_id || current.document_id,
+      description: '错题重练',
+      count: practice.total || practice.questions.length,
+    }))
+    setCurrentIdx(0)
+    setSelectedAnswer('')
+    setFeedback(null)
+    setResult(null)
+    setError(null)
+    setPhase('answering')
+    startTimer()
+    navigate(location.pathname, { replace: true, state: null })
+  }, [location.pathname, location.state, navigate, startTimer])
 
   /* ── 开始答题 ──────────────────────────────────────────────────── */
   const handleStart = async () => {
@@ -280,6 +311,7 @@ export default function Quiz() {
   }
 
   const currentQ = questions[currentIdx]
+  const currentQuestionType = currentQ?.type || config.type
 
   return (
     <div className="quiz-page">
@@ -492,7 +524,7 @@ export default function Quiz() {
             )}
 
             {/* 简答题输入 */}
-            {config.type === 'short_answer' && (
+            {currentQuestionType === 'short_answer' && (
               <textarea
                 className="short-answer-input"
                 aria-labelledby={`quiz-question-${currentIdx}`}

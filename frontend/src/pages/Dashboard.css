@@ -284,6 +284,23 @@
   margin-bottom: 0;
 }
 
+.wrong-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.wrong-practice {
+  min-height: 36px;
+  padding: 8px 12px;
+  font-size: 13px;
+}
+
+.wrong-practice:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
 .wrong-select {
   padding: 8px 32px 8px 12px;
   border: 1px solid var(--border);
@@ -414,6 +431,12 @@
   }
 
   .wi-answers {
+    flex-direction: column;
+  }
+
+  .wrong-header,
+  .wrong-actions {
+    align-items: stretch;
     flex-direction: column;
   }
 }
