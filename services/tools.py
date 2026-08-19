@@ -436,7 +436,12 @@ async def dispatch_tool(
 
     可选 run_id / user_id 用于 audit 关联，省略时按无关联标识执行。
     """
-    logger.info(f"[tools] dispatch: {name}({arguments}) run_id={run_id}")
+    logger.info(
+        "[tools] dispatch tool=%s arg_count=%d run_id=%s",
+        name,
+        len(arguments),
+        run_id,
+    )
     return await tool_registry.invoke(
         name,
         arguments,

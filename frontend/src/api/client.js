@@ -176,6 +176,7 @@ export async function runAutonomous({
   query,
   user_id = 'default_user',
   document_id = null,
+  grounding_required = false,
   idempotency_key,
 }) {
   return request('/agent/autonomous', {
@@ -184,7 +185,7 @@ export async function runAutonomous({
       'Content-Type': 'application/json',
       ...(idempotency_key ? { 'Idempotency-Key': idempotency_key } : {}),
     },
-    body: JSON.stringify({ query, user_id, document_id }),
+    body: JSON.stringify({ query, user_id, document_id, grounding_required }),
   })
 }
 

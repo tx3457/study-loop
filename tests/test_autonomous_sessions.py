@@ -7,6 +7,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
@@ -36,7 +37,7 @@ def _payload(label: str) -> dict:
 
 class TestAutonomousSessionStore(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory(dir="/tmp")
+        self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = str(Path(self.temp_dir.name) / "sessions.sqlite3")
         self.now = [1_000.0]
 
@@ -266,7 +267,7 @@ class TestAutonomousSessionStore(unittest.IsolatedAsyncioTestCase):
     async def test_corrupt_json_can_be_claimed_only_for_fail_closed_cleanup(self):
         store = self._store()
         await store.save("conv-corrupt", _payload("valid-before-corruption"))
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection:
             connection.execute(
                 """
                 UPDATE studyloop_autonomous_sessions
@@ -274,6 +275,7 @@ class TestAutonomousSessionStore(unittest.IsolatedAsyncioTestCase):
                 WHERE conversation_id = 'conv-corrupt'
                 """
             )
+            connection.commit()
 
         self.assertEqual(await store.status("conv-corrupt"), "paused")
         claim = await store.claim("conv-corrupt")

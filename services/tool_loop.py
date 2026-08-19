@@ -63,6 +63,7 @@ async def run_tool_round(
     max_retries: int = 2,
     extra_call_messages: Optional[list] = None,
     on_before_tool_calls: Callable[[], Awaitable[None]] | None = None,
+    business_tool_guard: Callable[[str, dict], Optional[str]] | None = None,
     **llm_kwargs,
 ) -> ToolRoundResult:
     """跑单轮 tool-calling 并把结果回灌进 messages（原地 append）。
@@ -81,7 +82,9 @@ async def run_tool_round(
         extra_call_messages: 仅用于本次 LLM 调用、不持久化进 messages 的临时消息
                        （如 autonomous 每轮注入的 [Current state] 摘要）。
         on_before_tool_calls: provider 返回工具调用后、修改消息或执行工具前的
-                       持久化屏障。用于 interrupt 续跑路径记录不可重放进展。
+                        持久化屏障。用于 interrupt 续跑路径记录不可重放进展。
+        business_tool_guard: 可选的调用级范围检查。返回 reason 时，本轮工具调用
+                        会在 dispatch 前被拒绝并把结构化错误回灌给模型。
         其余 llm_kwargs 透传给 llm_chat（temperature/max_tokens...）。
 
     Returns:
@@ -140,23 +143,32 @@ async def run_tool_round(
     parsed_calls = []
     for tc in msg.tool_calls:
         name = tc.function.name
+        args_error = False
         try:
             args = json.loads(tc.function.arguments)
-        except json.JSONDecodeError as e:
-            logger.warning(f"[tool_loop] bad tool args for {name}: {e}")
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.warning(
+                "[tool_loop] invalid JSON tool arguments: error_type=%s",
+                type(e).__name__,
+            )
             args = {}
-        parsed_calls.append((tc, name, args))
+            args_error = True
+        if not isinstance(args, dict):
+            logger.warning("[tool_loop] non-object tool arguments blocked")
+            args = {}
+            args_error = True
+        parsed_calls.append((tc, name, args, args_error))
 
     outcomes: list[ToolCallOutcome] = []
 
     # OpenAI 的同轮 tool_calls 是一个并行决策批次，数组顺序不表示执行依赖。
     # control 与任何其他调用混用时整批拒绝，避免把 [write, ask_user/finalize]
     # 误解为“先写后暂停/结束”，也避免最终回答声称未实际发生的副作用。
-    has_control = any(name in control_tools for _, name, _ in parsed_calls)
+    has_control = any(name in control_tools for _, name, _, _ in parsed_calls)
     if has_control and len(parsed_calls) > 1:
         reason = "mixed_control_batch_rejected"
         logger.warning("[tool_loop] rejected multi-call batch containing control tool")
-        for tc, name, args in parsed_calls:
+        for tc, name, args, _ in parsed_calls:
             result = json.dumps({
                 "error": "控制工具必须单独调用，本轮所有工具均未执行",
                 "reason": reason,
@@ -178,7 +190,26 @@ async def run_tool_round(
             outcomes=outcomes,
         )
 
-    for tc, name, args in parsed_calls:
+    for tc, name, args, args_error in parsed_calls:
+        if args_error:
+            reason = "invalid_tool_arguments"
+            result = json.dumps({
+                "error": "工具参数必须是 JSON 对象",
+                "reason": reason,
+            }, ensure_ascii=False)
+            messages.append({
+                "role": "tool", "tool_call_id": tc.id, "content": result,
+            })
+            outcomes.append(ToolCallOutcome(
+                call_id=tc.id,
+                name=name,
+                arguments={},
+                kind="blocked",
+                result=result,
+                blocked_reason=reason,
+            ))
+            continue
+
         # 单独出现的控制工具交回调用方处理（不 dispatch，由调用方补 tool message）
         if name in control_tools:
             outcomes.append(ToolCallOutcome(
@@ -188,16 +219,47 @@ async def run_tool_round(
 
         # 白名单拦截：不 dispatch，回灌错误 message
         if name not in allowed:
-            logger.warning(f"[tool_loop] blocked tool: {name}")
+            logger.warning("[tool_loop] blocked unknown tool")
             messages.append({
                 "role": "tool", "tool_call_id": tc.id,
-                "content": json.dumps({"error": f"工具 {name} 不在允许列表"}, ensure_ascii=False),
+                "content": json.dumps({"error": "工具不在允许列表"}, ensure_ascii=False),
             })
             outcomes.append(ToolCallOutcome(
                 call_id=tc.id, name=name, arguments=args,
                 kind="blocked", blocked_reason="not_in_whitelist",
             ))
             continue
+
+        # 调用级范围约束必须发生在 dispatch 前，避免模型先看到越界工具输出，
+        # 再由上层在响应阶段被动丢弃。
+        if business_tool_guard is not None:
+            try:
+                guard_reason = business_tool_guard(name, args)
+            except Exception as exc:
+                logger.warning(
+                    "[tool_loop] business tool guard failed closed: "
+                    "tool=%s error_type=%s",
+                    name,
+                    type(exc).__name__,
+                )
+                guard_reason = "business_tool_guard_error"
+            if guard_reason:
+                result = json.dumps({
+                    "error": "工具调用超出当前请求允许范围，本轮未执行",
+                    "reason": guard_reason,
+                }, ensure_ascii=False)
+                messages.append({
+                    "role": "tool", "tool_call_id": tc.id, "content": result,
+                })
+                outcomes.append(ToolCallOutcome(
+                    call_id=tc.id,
+                    name=name,
+                    arguments=args,
+                    kind="blocked",
+                    result=result,
+                    blocked_reason=guard_reason,
+                ))
+                continue
 
         # interrupt-capable 调用方在 LLM await 前绑定 Tool 对象、handler 与
         # effect_mode。若等待期间同名工具被覆盖或原对象被改写，拒绝 dispatch，
@@ -231,7 +293,11 @@ async def run_tool_round(
                 continue
 
         # 业务工具：dispatch（自带超时/重试/audit）并回灌
-        logger.info(f"[tool_loop] dispatch {name}({args})")
+        logger.info(
+            "[tool_loop] dispatch tool=%s arg_count=%d",
+            name,
+            len(args),
+        )
         try:
             result = await dispatch_tool(
                 name,
@@ -242,11 +308,20 @@ async def run_tool_round(
             )
             blocked_reason = None
         except SideEffectAmbiguousError:
-            logger.exception(f"[tool_loop] side effect result ambiguous for {name}")
+            logger.warning(
+                "[tool_loop] side effect result ambiguous: tool=%s", name
+            )
             raise
         except Exception as e:
-            logger.exception(f"[tool_loop] dispatch failed for {name}: {e}")
-            result = json.dumps({"error": str(e)}, ensure_ascii=False)
+            logger.warning(
+                "[tool_loop] dispatch failed: tool=%s error_type=%s",
+                name,
+                type(e).__name__,
+            )
+            result = json.dumps({
+                "error": "工具执行失败",
+                "error_type": type(e).__name__,
+            }, ensure_ascii=False)
             blocked_reason = f"dispatch_exception: {type(e).__name__}"
         messages.append({"role": "tool", "tool_call_id": tc.id, "content": result})
         outcomes.append(ToolCallOutcome(

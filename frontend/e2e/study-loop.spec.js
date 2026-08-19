@@ -1011,6 +1011,122 @@ test('Autonomous loads documents on entry and refresh recovers without breaking 
   expect(unexpectedRequests).toEqual([])
 })
 
+test('Autonomous grounds a selected document and renders server evidence as plain text', async ({ page }) => {
+  const problems = trackBrowserProblems(page)
+  let startRequest
+  const snippet = '<img src=x onerror=alert(1)> RAG 先检索相关片段，再生成回答。'
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'POST' && path === '/agent/autonomous') {
+      startRequest = await request.postDataJSON()
+      return {
+        body: {
+          awaiting_user_input: false,
+          final_answer: 'RAG 会先检索材料，再基于检索内容生成回答。',
+          finalize_reason: 'evidence_ready',
+          rounds_used: 2,
+          steps: [],
+          tools_called: ['search_document'],
+          truncated: false,
+          citations: [{
+            chunk_id: 'notes.md_chunk_3',
+            document_id: 'notes.md',
+            chunk_index: 3,
+            rank: 1,
+            snippet,
+          }],
+          invalid_citation_ids: [],
+          invalid_citation_count: 0,
+          abstained: false,
+          grounding_status: 'citation_ids_valid',
+          grounding_required: true,
+          grounding_document_id: 'notes.md',
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/autonomous')
+  const grounding = page.getByRole('checkbox', { name: /要求可核验文档引用/ })
+  const documentId = page.getByLabel('文档 ID（可选）')
+  await expect(grounding).toBeDisabled()
+  await expect(grounding).not.toBeChecked()
+
+  await documentId.fill('notes.md')
+  await expect(grounding).toBeEnabled()
+  await expect(grounding).toBeChecked()
+  await documentId.fill('')
+  await expect(grounding).toBeDisabled()
+  await expect(grounding).not.toBeChecked()
+  await documentId.fill('notes.md')
+  await expect(grounding).toBeChecked()
+  await grounding.uncheck()
+  await expect(grounding).not.toBeChecked()
+  await grounding.check()
+
+  await page.getByLabel('你的学习目标').fill('解释这份材料里的 RAG')
+  await page.getByRole('button', { name: '开始执行' }).click()
+
+  expect(startRequest).toEqual({
+    query: '解释这份材料里的 RAG',
+    user_id: 'default_user',
+    document_id: 'notes.md',
+    grounding_required: true,
+  })
+  await expect(page.getByText('引用 ID 已核验')).toBeVisible()
+  await expect(page.getByText('文档证据')).toBeVisible()
+  await expect(page.locator('.citation-snippet')).toContainText(snippet)
+  await expect(page.locator('.citation-snippet img')).toHaveCount(0)
+  await expect(page.getByText('notes.md_chunk_3')).toBeVisible()
+  expect(unexpectedRequests).toEqual([])
+  expect(problems).toEqual([])
+})
+
+test('Autonomous shows a strict grounding refusal without fabricated evidence', async ({ page }) => {
+  let startRequest
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'POST' && path === '/agent/autonomous') {
+      startRequest = await request.postDataJSON()
+      return {
+        body: {
+          awaiting_user_input: false,
+          final_answer: '现有检索证据不足，无法提供满足完整引用约束的回答。',
+          finalize_reason: 'grounding_required_with_invalid_citation',
+          rounds_used: 2,
+          steps: [{
+            round_index: 0,
+            tool_name: 'search_document',
+            tool_args: null,
+            observation_preview: null,
+          }],
+          tools_called: ['search_document'],
+          truncated: false,
+          citations: [],
+          invalid_citation_ids: [],
+          invalid_citation_count: 1,
+          abstained: true,
+          grounding_status: 'abstained',
+          grounding_required: true,
+          grounding_document_id: 'notes.md',
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/autonomous')
+  await page.getByLabel('文档 ID（可选）').fill('notes.md')
+  await page.getByLabel('你的学习目标').fill('给出有引用的结论')
+  await page.getByRole('button', { name: '开始执行' }).click()
+
+  expect(startRequest.grounding_required).toBe(true)
+  await expect(page.getByText('证据不足，已安全拒答')).toBeVisible()
+  await expect(page.locator('.result-final')).toHaveClass(/result-abstained/)
+  await expect(page.getByText('文档证据')).toHaveCount(0)
+  await expect(page.getByText('已丢弃 1 个不属于本轮检索结果的引用 ID。')).toBeVisible()
+  expect(unexpectedRequests).toEqual([])
+})
+
 test('document delete control keeps a mobile-sized touch target', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   const unexpectedRequests = await mockApi(page, ({ path, request }) => {
@@ -1150,6 +1266,7 @@ test('Autonomous restores a pending HITL question and draft after reload', async
   await page.getByRole('button', { name: '开始执行' }).click()
 
   const dialog = page.getByRole('dialog', { name: 'Agent 想问你' })
+  await expect(dialog).toContainText('本轮已启用引用约束')
   await dialog.getByRole('textbox', { name: '你的回答' }).fill('保留这个回答草稿')
   const stored = await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), AUTONOMOUS_SESSION_KEY)
   expect(stored).toMatchObject({
@@ -1161,6 +1278,7 @@ test('Autonomous restores a pending HITL question and draft after reload', async
       query: '保留这个学习目标',
       user_id: 'reload-user',
       document_id: 'reload.md',
+      grounding_required: true,
     },
   })
   expect(stored).not.toHaveProperty('steps')
@@ -1168,6 +1286,7 @@ test('Autonomous restores a pending HITL question and draft after reload', async
   await page.reload()
   await expect(dialog).toBeVisible()
   await expect(dialog).toContainText('刷新后仍需回答的问题？')
+  await expect(dialog).toContainText('本轮已启用引用约束')
   await expect(dialog.getByRole('textbox', { name: '你的回答' })).toHaveValue('保留这个回答草稿')
   await expect(page.getByLabel('你的学习目标')).toHaveValue('保留这个学习目标')
 
@@ -1325,8 +1444,18 @@ test('Autonomous preserves the initial goal and focus when starting fails', asyn
 
   await expect(page.getByText('已在重试后开始执行。')).toBeVisible()
   expect(startRequests).toEqual([
-    { query: '帮我复习向量检索', user_id: 'default_user', document_id: null },
-    { query: '帮我复习向量检索', user_id: 'default_user', document_id: null },
+    {
+      query: '帮我复习向量检索',
+      user_id: 'default_user',
+      document_id: null,
+      grounding_required: false,
+    },
+    {
+      query: '帮我复习向量检索',
+      user_id: 'default_user',
+      document_id: null,
+      grounding_required: false,
+    },
   ])
   expect(startKeys[0]).toMatch(UUID_V4_PATTERN)
   expect(startKeys[1]).toBe(startKeys[0])
@@ -1482,7 +1611,7 @@ test('Autonomous preserves a HITL reply and retries after a continuation failure
   expect(unexpectedRequests).toEqual([])
 })
 
-test('Autonomous rotates a failed continuation key after editing the reply', async ({ page }) => {
+test('Autonomous keeps a 422 HITL draft and rotates its key after editing', async ({ page }) => {
   const continueAttempts = []
   const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
     if (request.method() === 'POST' && path === '/agent/autonomous') {
@@ -1504,7 +1633,7 @@ test('Autonomous rotates a failed continuation key after editing the reply', asy
         key: await request.headerValue('idempotency-key'),
       })
       if (continueAttempts.length === 1) {
-        return { status: 503, body: { detail: '模型服务暂时不可用' } }
+        return { status: 422, body: { detail: '用户回答安全检查未通过，请修改后重试' } }
       }
       return {
         body: {
@@ -1528,7 +1657,10 @@ test('Autonomous rotates a failed continuation key after editing the reply', asy
   const reply = dialog.getByRole('textbox', { name: '你的回答' })
   await reply.fill('第三章')
   await dialog.getByRole('button', { name: /回答/ }).click()
-  await expect(dialog.getByRole('alert')).toContainText('模型服务暂时不可用')
+  await expect(dialog).toBeVisible()
+  await expect(dialog.getByRole('alert')).toContainText('用户回答安全检查未通过')
+  await expect(dialog.getByRole('alert')).toContainText('你的回答已保留')
+  await expect(reply).toHaveValue('第三章')
 
   await reply.fill('第四章')
   await dialog.getByRole('button', { name: '重试回答' }).click()

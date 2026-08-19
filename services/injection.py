@@ -25,6 +25,10 @@ from services.llm import (
 
 logger = logging.getLogger(__name__)
 
+_REGEX_BLOCK_REASON = "检测到提示注入模式"
+_LLM_BLOCK_REASON = "语义安全检查未通过"
+_OUTPUT_BLOCK_REASON = "输出命中敏感信息规则"
+
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 第 1 层：正则/关键词检测
@@ -100,9 +104,15 @@ async def llm_detect(text: str) -> tuple[bool, str]:
             max_tokens=256,
         )
         result = resp.choices[0].message.parsed
-        return result.is_injection, result.reason
+        return (
+            result.is_injection,
+            _LLM_BLOCK_REASON if result.is_injection else "",
+        )
     except Exception as e:
-        logger.warning(f"[injection] LLM 检测失败，放行: {e}")
+        logger.warning(
+            "[injection] LLM detector failed open: error_type=%s",
+            type(e).__name__,
+        )
         return False, ""
 
 
@@ -117,16 +127,16 @@ async def check_injection(text: str) -> tuple[bool, str]:
         (is_injection, reason)
     """
     # 第 1 层：正则（始终执行）
-    hit, reason = regex_detect(text)
+    hit, _ = regex_detect(text)
     if hit:
-        logger.warning(f"[injection] 正则命中: {reason}")
-        return True, reason
+        logger.warning("[injection] regex policy matched")
+        return True, _REGEX_BLOCK_REASON
 
     # 第 2 层：LLM（按配置）
-    hit, reason = await llm_detect(text)
+    hit, _ = await llm_detect(text)
     if hit:
-        logger.warning(f"[injection] LLM 检测命中: {reason}")
-        return True, reason
+        logger.warning("[injection] semantic policy matched")
+        return True, _LLM_BLOCK_REASON
 
     return False, ""
 
@@ -151,5 +161,5 @@ def check_output_leak(text: str) -> tuple[bool, str]:
     for pattern in _COMPILED_SENSITIVE:
         match = pattern.search(text)
         if match:
-            return True, f"输出包含敏感信息: {match.group()}"
+            return True, _OUTPUT_BLOCK_REASON
     return False, ""

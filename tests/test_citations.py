@@ -57,6 +57,66 @@ def test_non_json_tool_result_is_not_treated_as_evidence():
     assert registry == {}
 
 
+def test_search_evidence_must_match_the_requested_document_scope():
+    registry = {}
+
+    accepted = collect_search_evidence(
+        json.dumps({
+            "document_id": "other.md",
+            "chunks": ["out-of-scope evidence"],
+            "chunk_ids": ["other.md_chunk_0"],
+        }),
+        registry,
+        expected_document_id="selected.md",
+    )
+
+    assert accepted == 0
+    assert registry == {}
+
+
+def test_blank_or_duplicate_chunks_fail_closed_atomically():
+    for chunks, chunk_ids in [
+        (["   "], ["doc_chunk_1"]),
+        (["first", "second"], ["doc_chunk_1", "doc_chunk_1"]),
+    ]:
+        registry = {}
+        accepted = collect_search_evidence(
+            json.dumps({
+                "document_id": "doc",
+                "chunks": chunks,
+                "chunk_ids": chunk_ids,
+            }),
+            registry,
+        )
+        assert accepted == 0
+        assert registry == {}
+
+
+def test_conflicting_registry_collision_rejects_the_whole_payload():
+    registry = {}
+    assert collect_search_evidence(
+        json.dumps({
+            "document_id": "doc",
+            "chunks": ["trusted text"],
+            "chunk_ids": ["doc_chunk_1"],
+        }),
+        registry,
+    ) == 1
+    original = registry.copy()
+
+    accepted = collect_search_evidence(
+        json.dumps({
+            "document_id": "other",
+            "chunks": ["conflicting text", "new text"],
+            "chunk_ids": ["doc_chunk_1", "other_chunk_2"],
+        }),
+        registry,
+    )
+
+    assert accepted == 0
+    assert registry == original
+
+
 def test_search_document_returns_aligned_server_chunk_ids():
     retrieval = {
         "documents": [["a", "b", "c", "d"]],

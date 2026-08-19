@@ -30,7 +30,12 @@ class CitationResolution:
 EvidenceRegistry = dict[str, EvidenceChunk]
 
 
-def collect_search_evidence(result: str, registry: EvidenceRegistry) -> int:
+def collect_search_evidence(
+    result: str,
+    registry: EvidenceRegistry,
+    *,
+    expected_document_id: str | None = None,
+) -> int:
     """Add aligned ``chunks/chunk_ids`` from a search observation.
 
     Malformed payloads fail closed and leave the registry unchanged.  The
@@ -50,12 +55,17 @@ def collect_search_evidence(result: str, registry: EvidenceRegistry) -> int:
     chunk_ids = payload.get("chunk_ids")
     if (
         not isinstance(document_id, str)
-        or not document_id
+        or not document_id.strip()
+        or (expected_document_id is not None and document_id != expected_document_id)
         or not isinstance(chunks, list)
         or not isinstance(chunk_ids, list)
         or len(chunks) != len(chunk_ids)
-        or any(not isinstance(chunk, str) for chunk in chunks)
-        or any(not isinstance(chunk_id, str) or not chunk_id for chunk_id in chunk_ids)
+        or any(not isinstance(chunk, str) or not chunk.strip() for chunk in chunks)
+        or any(
+            not isinstance(chunk_id, str) or not chunk_id.strip()
+            for chunk_id in chunk_ids
+        )
+        or len(set(chunk_ids)) != len(chunk_ids)
     ):
         return 0
 
@@ -68,6 +78,13 @@ def collect_search_evidence(result: str, registry: EvidenceRegistry) -> int:
         )
         for rank, (chunk_id, chunk) in enumerate(zip(chunk_ids, chunks), 1)
     }
+    for chunk_id, evidence in additions.items():
+        existing = registry.get(chunk_id)
+        if existing is not None and (
+            existing.document_id != evidence.document_id
+            or existing.text != evidence.text
+        ):
+            return 0
     for chunk_id, evidence in additions.items():
         registry.setdefault(chunk_id, evidence)
     return len(additions)
