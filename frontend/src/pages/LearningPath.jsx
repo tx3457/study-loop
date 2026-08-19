@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { useNavigate } from 'react-router-dom'
 import DocumentPrerequisite from '../components/DocumentPrerequisite'
 import { getDocuments, generateLearningPath } from '../api/client'
 import './LearningPath.css'
@@ -8,6 +9,7 @@ import './LearningPath.css'
    ═══════════════════════════════════════════════════════════════════ */
 
 export default function LearningPath() {
+  const navigate = useNavigate()
   const [documents, setDocuments] = useState([])
   const [selectedDoc, setSelectedDoc] = useState('')
   const [path, setPath] = useState(null)
@@ -56,6 +58,21 @@ export default function LearningPath() {
   }
 
   const totalMinutes = path?.stages.reduce((sum, s) => sum + s.estimated_minutes, 0) || 0
+
+  const handlePracticeStage = (stage) => {
+    const topics = Array.isArray(stage.topics)
+      ? stage.topics
+        .filter(topic => typeof topic === 'string')
+        .map(topic => topic.trim())
+        .filter(Boolean)
+      : []
+    const topic = (topics.join('、') || stage.title || '').trim()
+    const params = new URLSearchParams({
+      document_id: path.document_id,
+      topic,
+    })
+    navigate(`/quiz?${params.toString()}`)
+  }
 
   return (
     <div className="lp-page">
@@ -193,6 +210,17 @@ export default function LearningPath() {
                     {stage.topics.map((topic, i) => (
                       <span key={i} className="topic-tag">{topic}</span>
                     ))}
+                  </div>
+                  <div className="tc-actions">
+                    <button
+                      type="button"
+                      className="tc-practice-btn"
+                      aria-label={`练习阶段 ${stage.stage}：${stage.title}`}
+                      onClick={() => handlePracticeStage(stage)}
+                    >
+                      练习本阶段
+                      <span aria-hidden="true">→</span>
+                    </button>
                   </div>
                 </div>
               </div>

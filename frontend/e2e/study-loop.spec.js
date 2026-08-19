@@ -249,6 +249,114 @@ test('learning path selection clears results and errors from the previous docume
   expect(unexpectedRequests).toEqual([])
 })
 
+test('learning path stage opens a refresh-safe quiz preset without auto-starting', async ({ page }) => {
+  const problems = trackBrowserProblems(page)
+  const startBodies = []
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (request.method() === 'POST' && path === '/learning-path/notes.md') {
+      return {
+        body: {
+          document_id: 'notes.md',
+          title: '检索学习路径',
+          total_stages: 1,
+          stages: [{
+            stage: 1,
+            title: '混合检索',
+            topics: ['BM25', 'RRF'],
+            description: '理解稀疏检索与融合排序',
+            estimated_minutes: 20,
+          }],
+        },
+      }
+    }
+    if (request.method() === 'POST' && path === '/session/start') {
+      startBodies.push(await request.postDataJSON())
+      return {
+        body: {
+          session_id: 'quiz-from-path',
+          total: 1,
+          questions: [{
+            index: 0,
+            question: 'RRF 如何融合多路排序？',
+            options: ['A. 按倒数排名累加', 'B. 只保留单路结果'],
+            type: 'choice',
+          }],
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/learning-path')
+  await page.getByRole('combobox', { name: '学习文档' }).selectOption('notes.md')
+  await page.getByRole('button', { name: '生成学习路径' }).click()
+  await page.getByRole('button', { name: '练习阶段 1：混合检索' }).click()
+
+  await expect(page).toHaveURL(/\/quiz\?/)
+  let quizUrl = new URL(page.url())
+  expect(quizUrl.searchParams.get('document_id')).toBe('notes.md')
+  expect(quizUrl.searchParams.get('topic')).toBe('BM25、RRF')
+  await expect(page.getByRole('combobox', { name: '学习文档' })).toHaveValue('notes.md')
+  await expect(page.getByRole('textbox', { name: /出题主题/ })).toHaveValue('BM25、RRF')
+  expect(startBodies).toEqual([])
+
+  await page.reload()
+
+  quizUrl = new URL(page.url())
+  expect(quizUrl.searchParams.get('document_id')).toBe('notes.md')
+  expect(quizUrl.searchParams.get('topic')).toBe('BM25、RRF')
+  await expect(page.getByRole('combobox', { name: '学习文档' })).toHaveValue('notes.md')
+  await expect(page.getByRole('textbox', { name: /出题主题/ })).toHaveValue('BM25、RRF')
+  expect(startBodies).toEqual([])
+
+  await page.getByRole('button', { name: '开始答题' }).click()
+  await expect(page.getByText('RRF 如何融合多路排序？')).toBeVisible()
+  expect(startBodies).toEqual([{
+    document_id: 'notes.md',
+    description: 'BM25、RRF',
+    count: 5,
+    difficulty: 'medium',
+    type: 'choice',
+    user_id: 'default_user',
+  }])
+  expect(unexpectedRequests).toEqual([])
+  expect(problems).toEqual([])
+})
+
+test('quiz preset rejects a document that is no longer available', async ({ page }) => {
+  const problems = trackBrowserProblems(page)
+  let startRequests = 0
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (request.method() === 'POST' && path === '/session/start') {
+      startRequests += 1
+      return { status: 500, body: { detail: '不应发起出题请求' } }
+    }
+    return null
+  })
+
+  await page.goto('/quiz?document_id=deleted.md&topic=RRF')
+
+  await expect(page.getByRole('alert')).toContainText('学习文档不存在或已被删除')
+  await expect(page.getByRole('combobox', { name: '学习文档' })).toHaveValue('')
+  await expect(page.getByRole('textbox', { name: /出题主题/ })).toHaveValue('RRF')
+  await expect(page.getByRole('button', { name: '开始答题' })).toBeDisabled()
+  expect(startRequests).toBe(0)
+
+  await page.getByRole('link', { name: '答题练习' }).click()
+  await expect(page).toHaveURL(/\/quiz$/)
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  await expect(page.getByRole('textbox', { name: /出题主题/ })).toHaveValue('')
+  await expect(page.getByRole('combobox', { name: '学习文档' })).toHaveValue('')
+  expect(unexpectedRequests).toEqual([])
+  expect(problems).toEqual([])
+})
+
 test('adaptive loads documents on entry and refresh clears the recovered error', async ({ page }) => {
   let failDocuments = true
   let documentRequests = 0
