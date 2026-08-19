@@ -14,9 +14,9 @@ SM-2（SuperMemo-2，Anki 同源算法）：每个知识点维护 (复习次数 
 from datetime import date, timedelta
 
 from services.memory import (
+    mutate_bank_state,
     persist_memory_snapshot,
     read_bank_state,
-    write_bank_state,
 )
 
 _REVIEW_BANK = "review_schedule"
@@ -96,7 +96,8 @@ async def get_due_reviews(user_id: str, document_id: str | None = None,
 
 async def update_after_session(user_id: str, document_id: str | None,
                                reviewed_points: list[str], wrong_gaps: list[str],
-                               today: date | None = None) -> dict:
+                               today: date | None = None,
+                               session_id: str | None = None) -> dict:
     """批改后更新调度（零 LLM）：
 
       - reviewed_points（本轮 supervisor 针对复习的点）中未再错的 → 复习通过（间隔拉长）；又错的 → 重置
@@ -105,26 +106,36 @@ async def update_after_session(user_id: str, document_id: str | None,
     返回更新后的 review_schedule state（便于测试断言）。
     """
     today = today or date.today()
-    state = await read_bank_state(user_id, _REVIEW_BANK) or {"items": {}}
-    items = dict(state.get("items", {}))
-    wrong_set = set(wrong_gaps)
-    reviewed_set = set(reviewed_points)
+    def update_schedule(current: dict | None) -> tuple[dict, dict]:
+        state = current or {"items": {}}
+        applied_sessions = list(state.get("_applied_sessions") or [])
+        if session_id and session_id in applied_sessions:
+            return state, state
 
-    # 1. 本轮针对复习的点：未再错 → 通过；又错 → 重置
-    for p in reviewed_points:
-        if not p:
-            continue
-        quality = _QUALITY_WRONG if p in wrong_set else _quality_correct()
-        _apply(items, document_id, p, quality, today)
+        items = dict(state.get("items", {}))
+        wrong_set = set(wrong_gaps)
+        reviewed_set = set(reviewed_points)
 
-    # 2. 本轮新暴露的错点（不在复习集）：register / reset
-    for g in wrong_gaps:
-        if not g or g in reviewed_set:
-            continue
-        _apply(items, document_id, g, _QUALITY_WRONG, today)
+        # 1. 本轮针对复习的点：未再错 → 通过；又错 → 重置
+        for point in reviewed_points:
+            if not point:
+                continue
+            quality = _QUALITY_WRONG if point in wrong_set else _quality_correct()
+            _apply(items, document_id, point, quality, today)
 
-    state["items"] = items
-    state["last_updated"] = today.isoformat()
-    await write_bank_state(user_id, _REVIEW_BANK, state)
+        # 2. 本轮新暴露的错点（不在复习集）：register / reset
+        for gap in wrong_gaps:
+            if not gap or gap in reviewed_set:
+                continue
+            _apply(items, document_id, gap, _QUALITY_WRONG, today)
+
+        state["items"] = items
+        if session_id:
+            applied_sessions.append(session_id)
+            state["_applied_sessions"] = applied_sessions
+        state["last_updated"] = today.isoformat()
+        return state, state
+
+    state = await mutate_bank_state(user_id, _REVIEW_BANK, update_schedule)
     await persist_memory_snapshot()
     return state

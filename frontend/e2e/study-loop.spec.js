@@ -1654,6 +1654,316 @@ test('Autonomous generates a request key without crypto.randomUUID', async ({ pa
   expect(problems).toEqual([])
 })
 
+test('short answers stay pending until one canonical AI grading completes', async ({ page }) => {
+  const problems = trackBrowserProblems(page)
+  let releaseGrade
+  let markGradeStarted
+  const gradeGate = new Promise(resolve => { releaseGrade = resolve })
+  const gradeStarted = new Promise(resolve => { markGradeStarted = resolve })
+  let gradeRequests = 0
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (request.method() === 'POST' && path === '/session/start') {
+      return {
+        body: {
+          session_id: 'short-canonical',
+          total: 1,
+          questions: [{
+            index: 0,
+            question: '请解释 RAG 的基本流程。',
+            options: null,
+            type: 'short_answer',
+          }],
+        },
+      }
+    }
+    if (request.method() === 'POST' && path === '/session/short-canonical/answer') {
+      return {
+        body: {
+          evaluation_status: 'pending_ai',
+          correct: null,
+          correct_answer: null,
+          explanation: null,
+          is_last: true,
+          next_index: null,
+        },
+      }
+    }
+    if (request.method() === 'GET' && path === '/session/short-canonical/result') {
+      return {
+        body: {
+          session_id: 'short-canonical',
+          document_id: 'notes.md',
+          total: 1,
+          correct: 0,
+          incorrect: 0,
+          pending: 1,
+          score: null,
+          details: [],
+        },
+      }
+    }
+    if (request.method() === 'POST' && path === '/session/short-canonical/grade') {
+      gradeRequests += 1
+      markGradeStarted()
+      await gradeGate
+      return {
+        body: {
+          session_id: 'short-canonical',
+          total: 1,
+          correct: 1,
+          score: 1,
+          grades: [{
+            index: 0,
+            question: '请解释 RAG 的基本流程。',
+            user_answer: '先检索证据，再依据证据生成答案。',
+            correct_answer: '检索增强生成。',
+            is_correct: true,
+            ai_feedback: '语义正确，说明了检索和生成两个阶段。',
+            knowledge_gap: null,
+          }],
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/quiz')
+  await page.getByRole('combobox', { name: '学习文档' }).selectOption('notes.md')
+  await page.getByRole('button', { name: '简答题' }).click()
+  await page.getByRole('button', { name: '开始答题' }).click()
+  await page.getByRole('textbox', { name: '请解释 RAG 的基本流程。' }).fill('先检索证据，再依据证据生成答案。')
+  await page.getByRole('button', { name: '提交答案' }).click()
+
+  await expect(page.getByText('答案已记录')).toBeVisible()
+  await expect(page.getByText('✗ 错误')).toHaveCount(0)
+  await expect(page.getByText('正确答案：')).toHaveCount(0)
+
+  await page.getByRole('button', { name: '开始 AI 批改' }).click()
+  await gradeStarted
+  await expect(page.getByText('待评')).toBeVisible()
+  await expect(page.getByText('AI 待批改')).toBeVisible()
+
+  releaseGrade()
+  await expect(page.getByRole('heading', { name: 'AI 批改报告' })).toBeVisible()
+  await expect(page.getByText('100 分')).toBeVisible()
+  await expect(page.getByText('语义正确，说明了检索和生成两个阶段。')).toBeVisible()
+  expect(gradeRequests).toBe(1)
+  expect(unexpectedRequests).toEqual([])
+  expect(problems).toEqual([])
+})
+
+test('a late grading response cannot revive a restarted quiz', async ({ page }) => {
+  const problems = trackBrowserProblems(page)
+  let starts = 0
+  let releaseGrade
+  let markGradeStarted
+  const gradeGate = new Promise(resolve => { releaseGrade = resolve })
+  const gradeStarted = new Promise(resolve => { markGradeStarted = resolve })
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (request.method() === 'POST' && path === '/session/start') {
+      starts += 1
+      return {
+        body: {
+          session_id: `late-grade-${starts}`,
+          total: 1,
+          questions: [{
+            index: 0,
+            question: starts === 1 ? '旧会话题目' : '新会话题目',
+            options: ['A. 正确', 'B. 错误'],
+            type: 'choice',
+          }],
+        },
+      }
+    }
+    if (request.method() === 'POST' && path === '/session/late-grade-1/answer') {
+      return {
+        body: {
+          evaluation_status: 'final',
+          correct: true,
+          correct_answer: 'A. 正确',
+          explanation: '回答正确。',
+          is_last: true,
+          next_index: null,
+        },
+      }
+    }
+    if (request.method() === 'GET' && path === '/session/late-grade-1/result') {
+      return {
+        body: {
+          session_id: 'late-grade-1',
+          document_id: 'notes.md',
+          total: 1,
+          correct: 1,
+          incorrect: 0,
+          pending: 0,
+          score: 1,
+          details: [],
+        },
+      }
+    }
+    if (request.method() === 'POST' && path === '/session/late-grade-1/grade') {
+      markGradeStarted()
+      await gradeGate
+      return {
+        body: {
+          session_id: 'late-grade-1',
+          total: 1,
+          correct: 1,
+          score: 1,
+          grades: [{
+            index: 0,
+            question: '旧会话题目',
+            user_answer: 'A. 正确',
+            correct_answer: 'A. 正确',
+            is_correct: true,
+            ai_feedback: null,
+            knowledge_gap: null,
+          }],
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/quiz')
+  await page.getByRole('combobox', { name: '学习文档' }).selectOption('notes.md')
+  await page.getByRole('button', { name: '开始答题' }).click()
+  await page.getByRole('button', { name: 'A. 正确' }).click()
+  await page.getByRole('button', { name: '提交答案' }).click()
+  await page.getByRole('button', { name: '查看结果' }).click()
+  await page.getByRole('button', { name: 'AI 批改讲解' }).click()
+  await gradeStarted
+
+  await page.getByRole('button', { name: '再来一轮' }).click()
+  await page.getByRole('button', { name: '开始答题' }).click()
+  await expect(page.getByText('新会话题目')).toBeVisible()
+
+  releaseGrade()
+  await expect(page.getByText('新会话题目')).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'AI 批改报告' })).toHaveCount(0)
+  expect(starts).toBe(2)
+  expect(unexpectedRequests).toEqual([])
+  expect(problems).toEqual([])
+})
+
+test('a late learning-report response cannot replace a new quiz', async ({ page }) => {
+  const problems = trackBrowserProblems(page)
+  let starts = 0
+  let releaseReport
+  let markReportStarted
+  const reportGate = new Promise(resolve => { releaseReport = resolve })
+  const reportStarted = new Promise(resolve => { markReportStarted = resolve })
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (request.method() === 'POST' && path === '/session/start') {
+      starts += 1
+      return {
+        body: {
+          session_id: `late-report-${starts}`,
+          total: 1,
+          questions: [{
+            index: 0,
+            question: starts === 1 ? '报告旧题目' : '报告后的新题目',
+            options: ['A. 正确', 'B. 错误'],
+            type: 'choice',
+          }],
+        },
+      }
+    }
+    if (request.method() === 'POST' && path === '/session/late-report-1/answer') {
+      return {
+        body: {
+          evaluation_status: 'final',
+          correct: true,
+          correct_answer: 'A. 正确',
+          explanation: '回答正确。',
+          is_last: true,
+          next_index: null,
+        },
+      }
+    }
+    if (request.method() === 'GET' && path === '/session/late-report-1/result') {
+      return {
+        body: {
+          session_id: 'late-report-1',
+          document_id: 'notes.md',
+          total: 1,
+          correct: 1,
+          incorrect: 0,
+          pending: 0,
+          score: 1,
+          details: [],
+        },
+      }
+    }
+    if (request.method() === 'POST' && path === '/session/late-report-1/grade') {
+      return {
+        body: {
+          session_id: 'late-report-1',
+          total: 1,
+          correct: 1,
+          score: 1,
+          grades: [{
+            index: 0,
+            question: '报告旧题目',
+            user_answer: 'A. 正确',
+            correct_answer: 'A. 正确',
+            is_correct: true,
+            ai_feedback: null,
+            knowledge_gap: null,
+          }],
+        },
+      }
+    }
+    if (request.method() === 'POST' && path === '/session/late-report-1/report') {
+      markReportStarted()
+      await reportGate
+      return {
+        body: {
+          session_id: 'late-report-1',
+          document_id: 'notes.md',
+          overall_score: 1,
+          topic_mastery: [],
+          strengths: ['旧会话'],
+          weaknesses: [],
+          recommendations: ['旧建议'],
+          summary: '不应复活的旧报告。',
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/quiz')
+  await page.getByRole('combobox', { name: '学习文档' }).selectOption('notes.md')
+  await page.getByRole('button', { name: '开始答题' }).click()
+  await page.getByRole('button', { name: 'A. 正确' }).click()
+  await page.getByRole('button', { name: '提交答案' }).click()
+  await page.getByRole('button', { name: '查看结果' }).click()
+  await page.getByRole('button', { name: 'AI 批改讲解' }).click()
+  await page.getByRole('button', { name: '学习评估报告' }).click()
+  await reportStarted
+
+  await page.getByRole('button', { name: '再来一轮' }).click()
+  await page.getByRole('button', { name: '开始答题' }).click()
+  await expect(page.getByText('报告后的新题目')).toBeVisible()
+
+  releaseReport()
+  await expect(page.getByText('报告后的新题目')).toBeVisible()
+  await expect(page.getByText('不应复活的旧报告。')).toHaveCount(0)
+  expect(starts).toBe(2)
+  expect(unexpectedRequests).toEqual([])
+  expect(problems).toEqual([])
+})
+
 test('Dashboard starts a persisted wrong-question practice in Quiz', async ({ page }) => {
   const problems = trackBrowserProblems(page)
   const unexpectedRequests = await mockApi(page, ({ path, request }) => {

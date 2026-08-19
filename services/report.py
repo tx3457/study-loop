@@ -1,11 +1,17 @@
+import asyncio
 from pathlib import Path
+
 from dotenv import load_dotenv
+
+from models.grader import GradingReport
 from models.report import LearningReport, _ReportCore
 from services.session import sessions
 from services.grader import grade_session
 from services.llm import llm_parse, structured_client as client, structured_model as model
 
 load_dotenv(Path(__file__).parent.parent / ".env")
+
+_report_locks: dict[str, asyncio.Lock] = {}
 
 REPORT_SYSTEM_PROMPT = """
 你是学习评估专家。根据学生的答题记录，生成一份结构化学习评估报告。
@@ -20,21 +26,24 @@ REPORT_SYSTEM_PROMPT = """
 """
 
 
-async def generate_report(session_id: str) -> LearningReport:
+async def _generate_report_uncached(
+    session_id: str,
+    grading: GradingReport,
+) -> LearningReport:
     session = sessions.get(session_id)
     if not session:
         raise ValueError(f"Session {session_id} not found")
     if session.status != "completed":
         raise ValueError("Session not completed yet — submit all answers first")
 
-    # 获取批改结果（含 AI 讲解）
-    grading = await grade_session(session_id)
-
-    # 构建答题记录文本
+    # 仅使用上游已确定的权威批改结果构建报告。
     records = []
     for g in grading.grades:
         status = "✓" if g.is_correct else "✗"
-        record = f"{g.index + 1}. [{status}] 题目：{g.question} | 学生答案：{g.user_answer} | 正确答案：{g.correct_answer}"
+        record = (
+            f"{g.index + 1}. [{status}] 题目：{g.question} | "
+            f"学生答案：{g.user_answer} | 参考答案：{g.correct_answer}"
+        )
         if g.knowledge_gap:
             record += f" | 知识盲点：{g.knowledge_gap}"
         records.append(record)
@@ -67,3 +76,32 @@ async def generate_report(session_id: str) -> LearningReport:
         recommendations=core.recommendations,
         summary=core.summary,
     )
+
+
+async def generate_report(
+    session_id: str,
+    grading: GradingReport | None = None,
+) -> LearningReport:
+    """Return the one canonical report for an immutable completed session."""
+    session = sessions.get(session_id)
+    if not session:
+        raise ValueError(f"Session {session_id} not found")
+    if session.status != "completed":
+        raise ValueError("Session not completed yet — submit all answers first")
+
+    lock = _report_locks.setdefault(session_id, asyncio.Lock())
+    async with lock:
+        session = sessions.get(session_id)
+        if not session:
+            raise ValueError(f"Session {session_id} not found")
+        if session.status != "completed":
+            raise ValueError("Session not completed yet — submit all answers first")
+        canonical_grading = await grade_session(session_id)
+        if grading is not None and grading.model_dump() != canonical_grading.model_dump():
+            raise ValueError("Grading report does not match the session cache")
+        if session.learning_report is not None:
+            return session.learning_report.model_copy(deep=True)
+
+        report = await _generate_report_uncached(session_id, canonical_grading)
+        session.learning_report = report.model_copy(deep=True)
+        return report

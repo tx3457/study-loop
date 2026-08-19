@@ -9,31 +9,35 @@ Supervisor-based MAS guided 辅导端点（灰度并存）
 两段式 HTTP（HITL：用 LangGraph interrupt + checkpointer 持久化中断点，跨请求 thread_id 续跑）：
   POST /agent/tutor/start  {user_id, document_id, goal}
       → 跑到 wait_for_answers interrupt 暂停 → {thread_id, quiz, awaiting_answers, turn, supervisor_reason}
-  POST /agent/tutor/submit {thread_id, answers}
+  POST /agent/tutor/submit {thread_id, quiz_session_id, answers}
       → Command(resume=answers) 续跑 grader→supervisor→下一轮(下一个 interrupt) 或 finish
       → {thread_id, grading_report, quiz?, done, mastery, supervisor_reason, awaiting_answers}
 
 灰度：MAS_SUPERVISOR_ENABLED=false（默认）时端点返回 503，旧链路完全不受影响。
 
 """
+import asyncio
 import logging
 import uuid
+from weakref import WeakValueDictionary
 
 from fastapi import APIRouter, HTTPException
 from langgraph.types import Command
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from agents.supervisor import supervisor_enabled
 from agents.tutor_graph import compile_tutor_graph, tutor_graph
 from services.checkpoint import default_checkpoint_path, open_sqlite_checkpointer
 from services.memory import get_mastery
 from services.memory_context import build_returning_context
+from services.tutor_sessions import tutor_session_id
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
 # tutor guided 会话用独立 checkpoint db（与 orchestrator 的 db 隔离，避免 thread_id 串台）
 _TUTOR_DB_PATH = default_checkpoint_path().replace("orchestrator.db", "tutor.db")
+_SUBMIT_LOCKS: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -47,7 +51,31 @@ class TutorStartRequest(BaseModel):
 
 class TutorSubmitRequest(BaseModel):
     thread_id: str = Field(..., description="start 返回的会话线程 ID")
-    answers: list[str] = Field(default_factory=list, description="本轮逐题作答，顺序与下发题目一致")
+    quiz_session_id: str = Field(
+        ...,
+        min_length=8,
+        max_length=80,
+        description="当前待作答题目的会话令牌",
+    )
+    answers: list[str] = Field(
+        ...,
+        min_length=1,
+        max_length=10,
+        description="本轮逐题作答，顺序与下发题目一致",
+    )
+
+    @field_validator("answers")
+    @classmethod
+    def validate_answers(cls, answers: list[str]) -> list[str]:
+        normalized = []
+        for answer in answers:
+            answer = answer.strip()
+            if not answer:
+                raise ValueError("answers must not contain blanks")
+            if len(answer) > 4000:
+                raise ValueError("each answer must be at most 4000 characters")
+            normalized.append(answer)
+        return normalized
 
 
 class TutorOneshotRequest(BaseModel):
@@ -97,6 +125,7 @@ class TutorAssistResponse(BaseModel):
 
 class TutorTurnResponse(BaseModel):
     thread_id: str
+    quiz_session_id: str | None = None
     awaiting_answers: bool = False
     done: bool = False
     turn: int = 0
@@ -173,6 +202,7 @@ async def tutor_start(req: TutorStartRequest) -> TutorTurnResponse:
         # 跑到 wait_for_answers 暂停 → 回题目等作答
         return TutorTurnResponse(
             thread_id=thread_id,
+            quiz_session_id=payload.get("session_id"),
             awaiting_answers=True,
             turn=payload.get("turn", 0),
             quiz=payload.get("quiz"),
@@ -201,16 +231,44 @@ async def tutor_submit(req: TutorSubmitRequest) -> TutorTurnResponse:
     _require_enabled()
     config = {"configurable": {"thread_id": req.thread_id}}
 
-    async with open_sqlite_checkpointer(_TUTOR_DB_PATH) as cp:
-        graph = compile_tutor_graph(cp)
-        # 恢复前先确认该 thread 存在且确实停在中断点（不存在/已结束 → 友好报错）
-        snapshot = await graph.aget_state(config)
-        if not snapshot.values:
-            raise HTTPException(status_code=404, detail="会话不存在或已过期")
-        if not snapshot.next:
-            raise HTTPException(status_code=400, detail="会话已结束，无待续跑的中断点")
-
-        result = await graph.ainvoke(Command(resume=req.answers), config=config)
+    submit_lock = _SUBMIT_LOCKS.setdefault(req.thread_id, asyncio.Lock())
+    async with submit_lock:
+        async with open_sqlite_checkpointer(_TUTOR_DB_PATH) as cp:
+            graph = compile_tutor_graph(cp)
+            # 恢复前先确认该 thread 存在且确实停在 wait_for_answers。
+            snapshot = await graph.aget_state(config)
+            if not snapshot.values:
+                raise HTTPException(status_code=404, detail="会话不存在或已过期")
+            if not snapshot.next:
+                raise HTTPException(status_code=400, detail="会话已结束，无待续跑的中断点")
+            if "wait_for_answers" in snapshot.next:
+                pending_session_id = tutor_session_id(snapshot.values)
+                if req.quiz_session_id != pending_session_id:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="题目会话令牌已过期，请使用最新一轮题目",
+                    )
+                result = await graph.ainvoke(
+                    Command(resume=req.answers),
+                    config=config,
+                )
+            elif "grader" in snapshot.next:
+                # The answer node committed, but the process/request stopped
+                # before grader ran. Continue that checkpoint only when the
+                # retry is an exact replay of the committed turn.
+                committed_session_id = snapshot.values.get("session_id")
+                committed_answers = list(snapshot.values.get("answers") or [])
+                if (
+                    req.quiz_session_id != committed_session_id
+                    or req.answers != committed_answers
+                ):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="该轮答案已提交，重试内容与已提交内容不一致",
+                    )
+                result = await graph.ainvoke(None, config=config)
+            else:
+                raise HTTPException(status_code=409, detail="会话当前不在等待答案状态")
 
     user_id = result.get("user_id", "")
     document_id = result.get("document_id", "")
@@ -222,6 +280,7 @@ async def tutor_submit(req: TutorSubmitRequest) -> TutorTurnResponse:
         # 续跑后又停在下一轮 wait_for_answers → 下一份题目
         return TutorTurnResponse(
             thread_id=req.thread_id,
+            quiz_session_id=payload.get("session_id"),
             awaiting_answers=True,
             turn=payload.get("turn", 0),
             quiz=payload.get("quiz"),

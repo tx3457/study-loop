@@ -83,6 +83,10 @@ export default function Quiz() {
   const [learningReport, setLearningReport] = useState(null)
   const [grading, setGrading] = useState(false)
   const [reporting, setReporting] = useState(false)
+  const gradingRequestEpoch = useRef(0)
+  const reportRequestEpoch = useRef(0)
+  const gradingInFlight = useRef(false)
+  const reportingInFlight = useRef(false)
 
   // 配置
   const [config, setConfig] = useState({
@@ -101,6 +105,8 @@ export default function Quiz() {
   const [selectedAnswer, setSelectedAnswer] = useState('')
   const [feedback, setFeedback] = useState(null)
   const [submitting, setSubmitting] = useState(false)
+  const [advancing, setAdvancing] = useState(false)
+  const advancingInFlight = useRef(false)
   const answerIdempotencyKey = useRef(null)
 
   // 结果
@@ -150,6 +156,10 @@ export default function Quiz() {
     }
 
     practiceHydrated.current = true
+    gradingRequestEpoch.current += 1
+    reportRequestEpoch.current += 1
+    gradingInFlight.current = false
+    reportingInFlight.current = false
     answerIdempotencyKey.current = null
     setSessionId(practice.session_id)
     setQuestions(practice.questions)
@@ -172,9 +182,15 @@ export default function Quiz() {
   /* ── 开始答题 ──────────────────────────────────────────────────── */
   const handleStart = async () => {
     if (!config.document_id) return
+    gradingRequestEpoch.current += 1
+    reportRequestEpoch.current += 1
+    gradingInFlight.current = false
+    reportingInFlight.current = false
     answerIdempotencyKey.current = null
     setPhase('loading')
     setError(null)
+    setGradingReport(null)
+    setLearningReport(null)
 
     try {
       const data = await startSession(config)
@@ -194,8 +210,8 @@ export default function Quiz() {
 
   /* ── 提交答案 ──────────────────────────────────────────────────── */
   const handleSubmit = async () => {
-    if (!selectedAnswer || submitting) return
-    const answer = selectedAnswer
+    const answer = selectedAnswer.trim()
+    if (!answer || submitting) return
     const questionIndex = currentIdx
     setSubmitting(true)
     setError(null)
@@ -224,14 +240,23 @@ export default function Quiz() {
 
   /* ── 下一题 / 查看结果 ──────────────────────────────────────────── */
   const handleNext = async () => {
+    if (advancingInFlight.current) return
+    advancingInFlight.current = true
+    setAdvancing(true)
     if (feedback?.is_last) {
       stopTimer()
       try {
         const res = await getSessionResult(sessionId)
         setResult(res)
         setPhase('results')
+        if ((res.pending || 0) > 0) {
+          void runGrade(sessionId)
+        }
       } catch (err) {
         setError(err.message)
+      } finally {
+        advancingInFlight.current = false
+        setAdvancing(false)
       }
     } else {
       answerIdempotencyKey.current = null
@@ -239,11 +264,17 @@ export default function Quiz() {
       setSelectedAnswer('')
       setFeedback(null)
       setPhase('answering')
+      advancingInFlight.current = false
+      setAdvancing(false)
     }
   }
 
   function clearSession() {
     stopTimer()
+    gradingRequestEpoch.current += 1
+    reportRequestEpoch.current += 1
+    gradingInFlight.current = false
+    reportingInFlight.current = false
     answerIdempotencyKey.current = null
     setPhase('setup')
     setSessionId(null)
@@ -252,6 +283,8 @@ export default function Quiz() {
     setSelectedAnswer('')
     setFeedback(null)
     setSubmitting(false)
+    advancingInFlight.current = false
+    setAdvancing(false)
     setResult(null)
     setGradingReport(null)
     setLearningReport(null)
@@ -272,34 +305,51 @@ export default function Quiz() {
   }
 
   /* ── AI 批改 ─────────────────────────────────────────────────────── */
-  const handleGrade = async () => {
-    if (grading) return
+  async function runGrade(targetSessionId) {
+    if (!targetSessionId || gradingInFlight.current) return
+    gradingInFlight.current = true
+    const requestEpoch = ++gradingRequestEpoch.current
     setGrading(true)
     setError(null)
     try {
-      const report = await gradeSession(sessionId)
+      const report = await gradeSession(targetSessionId)
+      if (requestEpoch !== gradingRequestEpoch.current) return
       setGradingReport(report)
       setPhase('grading')
     } catch (err) {
+      if (requestEpoch !== gradingRequestEpoch.current) return
       setError(err.message)
     } finally {
-      setGrading(false)
+      if (requestEpoch === gradingRequestEpoch.current) {
+        gradingInFlight.current = false
+        setGrading(false)
+      }
     }
   }
 
+  const handleGrade = () => runGrade(sessionId)
+
   /* ── 学习报告 ───────────────────────────────────────────────────── */
   const handleReport = async () => {
-    if (reporting) return
+    if (!sessionId || reportingInFlight.current) return
+    reportingInFlight.current = true
+    const targetSessionId = sessionId
+    const requestEpoch = ++reportRequestEpoch.current
     setReporting(true)
     setError(null)
     try {
-      const report = await generateReport(sessionId)
+      const report = await generateReport(targetSessionId)
+      if (requestEpoch !== reportRequestEpoch.current) return
       setLearningReport(report)
       setPhase('report')
     } catch (err) {
+      if (requestEpoch !== reportRequestEpoch.current) return
       setError(err.message)
     } finally {
-      setReporting(false)
+      if (requestEpoch === reportRequestEpoch.current) {
+        reportingInFlight.current = false
+        setReporting(false)
+      }
     }
   }
 
@@ -312,12 +362,16 @@ export default function Quiz() {
 
   const currentQ = questions[currentIdx]
   const currentQuestionType = currentQ?.type || config.type
+  const resultPending = result?.pending || 0
+  const resultIncorrect = result?.incorrect
+    ?? Math.max((result?.total || 0) - (result?.correct || 0) - resultPending, 0)
+  const resultHasFinalScore = result != null && resultPending === 0 && typeof result.score === 'number'
 
   return (
     <div className="quiz-page">
       <header className="page-header">
         <h1 className="page-title">答题练习</h1>
-        <p className="page-desc">选择文档和参数，AI 根据内容出题，答完即时反馈。</p>
+        <p className="page-desc">选择文档和参数，AI 根据内容出题；客观题即时反馈，简答题进行语义批改。</p>
       </header>
 
       {error && (
@@ -485,7 +539,9 @@ export default function Quiz() {
             <p id={`quiz-question-${currentIdx}`} className="question-text">{currentQ.question}</p>
 
             {/* 选项列表 */}
-            {currentQ.options && currentQ.options.length > 0 && (
+            {currentQuestionType !== 'short_answer'
+              && currentQ.options
+              && currentQ.options.length > 0 && (
               <div className="options-list" role="group" aria-labelledby={`quiz-question-${currentIdx}`}>
                 {currentQ.options.map((opt, i) => {
                   const letter = String.fromCharCode(65 + i)
@@ -532,22 +588,36 @@ export default function Quiz() {
                 value={selectedAnswer}
                 onChange={e => handleAnswerChange(e.target.value)}
                 disabled={phase === 'feedback' || submitting}
+                maxLength={4000}
                 rows={3}
               />
             )}
 
             {/* 反馈区域 */}
             {phase === 'feedback' && feedback && (
-              <div className={`feedback-box ${feedback.correct ? 'correct' : 'wrong'}`}>
+              <div
+                className={`feedback-box ${feedback.evaluation_status === 'pending_ai'
+                  ? 'pending'
+                  : feedback.correct ? 'correct' : 'wrong'}`}
+                aria-live="polite"
+              >
                 <div className="feedback-header">
                   <span className="feedback-icon">
-                    {feedback.correct ? '✓ 正确' : '✗ 错误'}
+                    {feedback.evaluation_status === 'pending_ai'
+                      ? '✓ 答案已记录'
+                      : feedback.correct ? '✓ 正确' : '✗ 错误'}
                   </span>
                 </div>
-                <p className="feedback-answer">
-                  <strong>正确答案：</strong>{feedback.correct_answer}
-                </p>
-                <p className="feedback-explain">{feedback.explanation}</p>
+                {feedback.evaluation_status === 'pending_ai' ? (
+                  <p className="feedback-explain">简答题需要语义判断，完成本轮后会给出 AI 批改与讲解。</p>
+                ) : (
+                  <>
+                    <p className="feedback-answer">
+                      <strong>正确答案：</strong>{feedback.correct_answer}
+                    </p>
+                    <p className="feedback-explain">{feedback.explanation}</p>
+                  </>
+                )}
               </div>
             )}
 
@@ -557,13 +627,17 @@ export default function Quiz() {
                 <button
                   className="submit-btn"
                   onClick={handleSubmit}
-                  disabled={!selectedAnswer || submitting}
+                  disabled={!selectedAnswer.trim() || submitting}
                 >
                   {submitting ? '提交中...' : '提交答案'}
                 </button>
               ) : (
-                <button className="next-btn" onClick={handleNext}>
-                  {feedback?.is_last ? '查看结果' : '下一题'}
+                <button className="next-btn" onClick={handleNext} disabled={advancing}>
+                  {advancing
+                    ? '处理中...'
+                    : feedback?.is_last
+                      ? feedback?.evaluation_status === 'pending_ai' ? '开始 AI 批改' : '查看结果'
+                      : '下一题'}
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="9 18 15 12 9 6"/></svg>
                 </button>
               )}
@@ -585,13 +659,15 @@ export default function Quiz() {
                   className="ring-fill"
                   style={{
                     strokeDasharray: `${2 * Math.PI * 52}`,
-                    strokeDashoffset: `${2 * Math.PI * 52 * (1 - result.score)}`,
+                    strokeDashoffset: `${2 * Math.PI * 52 * (1 - (resultHasFinalScore ? result.score : 0))}`,
                   }}
                 />
               </svg>
               <div className="score-text">
-                <span className="score-number">{Math.round(result.score * 100)}</span>
-                <span className="score-unit">分</span>
+                <span className={`score-number ${resultHasFinalScore ? '' : 'pending'}`}>
+                  {resultHasFinalScore ? Math.round(result.score * 100) : '待评'}
+                </span>
+                {resultHasFinalScore && <span className="score-unit">分</span>}
               </div>
             </div>
             <div className="score-details">
@@ -601,9 +677,18 @@ export default function Quiz() {
               </div>
               <div className="score-detail-divider" />
               <div className="score-detail-item">
-                <span className="sd-value">{result.total - result.correct}</span>
+                <span className="sd-value">{resultIncorrect}</span>
                 <span className="sd-label">错误</span>
               </div>
+              {resultPending > 0 && (
+                <>
+                  <div className="score-detail-divider" />
+                  <div className="score-detail-item">
+                    <span className="sd-value">{resultPending}</span>
+                    <span className="sd-label">AI 待批改</span>
+                  </div>
+                </>
+              )}
               <div className="score-detail-divider" />
               <div className="score-detail-item">
                 <span className="sd-value">{formatTime(elapsed)}</span>
@@ -621,7 +706,7 @@ export default function Quiz() {
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>
                   </svg>
-                  AI 批改讲解
+                  {resultPending > 0 ? '重试 AI 批改' : 'AI 批改讲解'}
                 </>
               )}
             </button>
@@ -669,7 +754,9 @@ export default function Quiz() {
                   </div>
                   {!g.is_correct && (
                     <div className="gi-answer correct">
-                      <span className="gi-label">正确答案</span>
+                      <span className="gi-label">
+                        {questions[g.index]?.type === 'short_answer' ? '参考答案' : '正确答案'}
+                      </span>
                       <span>{g.correct_answer}</span>
                     </div>
                   )}

@@ -26,6 +26,7 @@ import agents.tutor_graph as tg
 import agents.diagnostic_worker as dw
 from agents.tutor_graph import compile_tutor_graph
 from langgraph.types import Command
+from services.session import sessions
 
 
 _QUIZ = {"questions": [
@@ -34,10 +35,14 @@ _QUIZ = {"questions": [
 ]}
 
 
-def _report(score: float) -> dict:
-    return {"session_id": "s", "total": 1, "correct": int(score), "score": score,
+def _report(score: float, session_id: str = "s") -> dict:
+    return {"session_id": session_id, "total": 1, "correct": int(score), "score": score,
             "grades": [{"index": 0, "question": "q", "user_answer": "A", "correct_answer": "A",
                         "is_correct": score >= 1.0, "knowledge_gap": None if score >= 1.0 else "最短路"}]}
+
+
+async def _perfect_grade(state: dict) -> dict:
+    return {"grading_report": _report(1.0, state["session_id"])}
 
 
 def _patches():
@@ -66,6 +71,8 @@ class TestTutorInterrupt(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmpdir = tempfile.mkdtemp(prefix="tutor_intr_")
         self.db_path = str(Path(self.tmpdir) / "tutor.db")
+        self.original_sessions = dict(sessions)
+        sessions.clear()
         self._ps = _patches()
         for p in self._ps:
             p.start()
@@ -75,9 +82,12 @@ class TestTutorInterrupt(unittest.IsolatedAsyncioTestCase):
             p.stop()
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
+        sessions.clear()
+        sessions.update(self.original_sessions)
 
     def _init_state(self):
         return {
+            "thread_id": self.tmpdir,
             "user_id": "u1", "document_id": "doc1", "goal": "图论", "description": "图论",
             "mode": "guided", "turn": 0, "handoff_count": 0, "history": [],
         }
@@ -93,9 +103,11 @@ class TestTutorInterrupt(unittest.IsolatedAsyncioTestCase):
         # mock grader_worker 的内部依赖（批改 + 画像写回 + mastery）
         import agents.grader_worker as gw
         with patch.dict("os.environ", {"SUPERVISOR_MODE": "rule"}), \
-             patch.object(gw.grader_agent, "ainvoke", AsyncMock(return_value={"grading_report": _report(1.0)})), \
+             patch.object(gw.grader_agent, "ainvoke", AsyncMock(side_effect=_perfect_grade)), \
              patch.object(gw.adapt_writer, "ainvoke", AsyncMock(return_value={})), \
-             patch.object(gw, "get_mastery", AsyncMock(return_value=0.9)):
+             patch.object(gw, "get_mastery", AsyncMock(return_value=0.9)), \
+             patch.object(gw, "consolidate_session_extras", AsyncMock()), \
+             patch.object(gw, "update_after_session", AsyncMock()):
 
             async with open_sqlite_checkpointer(self.db_path) as cp:
                 graph = compile_tutor_graph(cp)
@@ -104,7 +116,10 @@ class TestTutorInterrupt(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("__interrupt__", result, "应跑到 wait_for_answers interrupt 暂停")
                 payload = result["__interrupt__"][0].value
                 self.assertIn("quiz", payload)
-                self.assertEqual(payload["quiz"]["questions"][0]["answer"], "A")
+                public_question = payload["quiz"]["questions"][0]
+                self.assertEqual(public_question["question"], "最短路算法？")
+                self.assertNotIn("answer", public_question)
+                self.assertNotIn("explanation", public_question)
 
                 # ② Command(resume=...) 续跑 → grader → supervisor → 下一轮 interrupt 或 finish
                 result2 = await graph.ainvoke(Command(resume=["A"]), config=config)
@@ -119,9 +134,11 @@ class TestTutorInterrupt(unittest.IsolatedAsyncioTestCase):
         import agents.grader_worker as gw
 
         with patch.dict("os.environ", {"SUPERVISOR_MODE": "rule"}), \
-             patch.object(gw.grader_agent, "ainvoke", AsyncMock(return_value={"grading_report": _report(1.0)})), \
+             patch.object(gw.grader_agent, "ainvoke", AsyncMock(side_effect=_perfect_grade)), \
              patch.object(gw.adapt_writer, "ainvoke", AsyncMock(return_value={})), \
-             patch.object(gw, "get_mastery", AsyncMock(return_value=0.9)):
+             patch.object(gw, "get_mastery", AsyncMock(return_value=0.9)), \
+             patch.object(gw, "consolidate_session_extras", AsyncMock()), \
+             patch.object(gw, "update_after_session", AsyncMock()):
 
             # 第一段进程：跑到 interrupt 暂停后"崩溃"（退出 async with）
             async with open_sqlite_checkpointer(self.db_path) as cp:

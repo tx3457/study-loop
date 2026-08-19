@@ -9,6 +9,8 @@ AdaptAgent：精准 bank 读取 + decision_log
 decision_log 将 Adapt 的"推理过程"持久化成可审计事件。
 critic / 评估系统可以查 decision_log 看"为什么是这个难度而不是别的"。
 """
+import logging
+
 from langgraph.graph import END, START, StateGraph
 
 from agents.state import OrchestratorState
@@ -20,9 +22,11 @@ from services.memory import (
     get_preferences,
     get_weak_points,
 )
+from services.session import sessions
 from services.tracing import traceable
 
 _DIFFICULTY_MAP = {"easy": 0.2, "medium": 0.5, "hard": 0.8}
+logger = logging.getLogger(__name__)
 
 
 # ── adapt_reader：读 3 个 bank，决定下次出题参数 ─────────────────────────────
@@ -84,12 +88,27 @@ adapt_reader = _rb.compile()
 async def _write_profile(state: OrchestratorState) -> dict:
     """批改后：session_briefs + error_log + mastery + weak_points 全部更新。"""
     report = GradingReport.model_validate(state["grading_report"])
+    session = sessions.get(report.session_id)
+    if session is None:
+        raise ValueError(f"Session {report.session_id} not found for profile write")
+
+    user_id = session.user_id
+    document_id = session.document_id
+    if (
+        state.get("user_id") not in {None, user_id}
+        or state.get("document_id") not in {None, document_id}
+    ):
+        logger.warning(
+            "[adapt_writer] ignored mismatched state ownership for session %s",
+            report.session_id,
+        )
 
     async def record_decision() -> None:
         # 一条 decision_log 标记写入了哪些 bank（便于审计）
-        await append_decision(state["user_id"], {
+        await append_decision(user_id, {
+            "decision_id": f"adapt_writer:{report.session_id}",
             "agent": "adapt_writer",
-            "document_id": state["document_id"],
+            "document_id": document_id,
             "session_id": report.session_id,
             "score": report.score,
             "errors_logged": sum(1 for g in report.grades if not g.is_correct),
@@ -100,10 +119,12 @@ async def _write_profile(state: OrchestratorState) -> dict:
         })
 
     await commit_learning_memory(
-        state["user_id"],
+        user_id,
         report,
-        state["document_id"],
+        document_id,
+        questions=session.questions,
         after_write=record_decision,
+        on_core_written=lambda: setattr(session, "profile_written", True),
     )
     return {}
 
