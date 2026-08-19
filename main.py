@@ -21,7 +21,7 @@ from routers.adaptive import router as adaptive_router
 from routers.audit import router as audit_router
 from routers.tutor import router as tutor_router
 from routers.health import router as health_router
-from services.memory_persist import load_snapshot
+from services.memory_persist import load_snapshot, persist_snapshot
 from services.idempotency import IdempotencyConflictError
 from services.provider_config import (
     ProviderDeadlineExceeded,
@@ -40,6 +40,16 @@ async def _load_memory_snapshot():
             logging.getLogger(__name__).info(f"[startup] 跨会话记忆：从本机快照恢复 {n} 条")
     except Exception as e:
         logging.getLogger(__name__).warning(f"[startup] load_snapshot 失败（忽略）: {e}")
+
+
+async def _save_memory_snapshot():
+    """正常退出前刷新本机记忆快照；PostgreSQL 后端自动 no-op。"""
+    try:
+        await persist_snapshot()
+    except Exception as e:
+        logging.getLogger(__name__).warning(
+            f"[shutdown] persist_snapshot 失败（忽略）: {e}"
+        )
 
 
 async def _connect_mcp_live_servers():
@@ -73,7 +83,10 @@ async def lifespan(_app: FastAPI):
         try:
             await _cleanup_mcp_live_servers()
         finally:
-            await close_managed_provider_clients()
+            try:
+                await _save_memory_snapshot()
+            finally:
+                await close_managed_provider_clients()
 
 
 app = FastAPI(

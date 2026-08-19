@@ -67,7 +67,8 @@ authorization or Pydantic-validation boundary; see `SECURITY.md`.
 - `services/memory.py` stores learner profiles, mastery, weak points, preferences,
   and session events across conversations.
 - `services/memory_persist.py` is a local JSON snapshot fallback when PostgreSQL
-  is not configured.
+  is not configured. This fallback is intentionally single-worker; multi-worker
+  deployments must configure PostgreSQL rather than share one snapshot file.
 
 Checkpoint state and learner memory solve different problems and should not be
 described as one generic “memory” feature.

@@ -24,7 +24,9 @@ from services.session import (
 )
 from services.grader import grade_session
 from services.report import generate_report
-from services.memory import write_episodic_memory, update_semantic_memory
+from services.memory import (
+    commit_learning_memory,
+)
 from services.idempotency import (
     abort_idempotency_claim,
     normalize_idempotency_key,
@@ -160,28 +162,34 @@ def _require_completed_session(session_id: str):
 
 @router.post("/{session_id}/grade", response_model=GradingReport)
 async def grade(session_id: str):
-    session = _require_completed_session(session_id)
-    try:
-        report = await grade_session(session_id)
+    lock = _answer_locks.setdefault(session_id, asyncio.Lock())
+    async with lock:
+        session = _require_completed_session(session_id)
+        try:
+            report = await grade_session(session_id)
 
-        # 选择题在答完最后一题时已写画像；简答题必须等语义批改完成后再写。
-        # profile_written 防止重试 /grade 时重复累积 EMA 与 weak_points。
-        if not session.profile_written:
-            await write_episodic_memory(
-                session.user_id,
-                report,
-                session.document_id,
-                questions=session.questions,
-            )
-            await update_semantic_memory(session.user_id, report, session.document_id)
-            session.profile_written = True
+            # 选择题在答完最后一题时已写画像；简答题必须等语义批改完成后再写。
+            # 与 answer 共用 session lock，避免完成瞬间并发 /grade 重复累计画像。
+            if not session.profile_written:
+                await commit_learning_memory(
+                    session.user_id,
+                    report,
+                    session.document_id,
+                    questions=session.questions,
+                    on_core_written=lambda: setattr(
+                        session, "profile_written", True
+                    ),
+                )
 
-        return report
-    except ValidationError as exc:
-        logger.warning("grader provider returned invalid structured output")
-        raise HTTPException(status_code=503, detail="模型返回的批改格式无效") from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+            return report
+        except ValidationError as exc:
+            logger.warning("grader provider returned invalid structured output")
+            raise HTTPException(
+                status_code=503,
+                detail="模型返回的批改格式无效",
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/{session_id}/report", response_model=LearningReport)

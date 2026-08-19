@@ -18,6 +18,7 @@ from services.memory import (
     get_mastery,
     get_preferences,
     get_prioritized_weak_points,
+    get_user_session_count,
     get_user_sessions,
 )
 from services.srs import get_due_reviews
@@ -88,13 +89,17 @@ async def build_returning_context(user_id: str, document_id: str) -> dict:
         sessions = []
     # 过滤归档条目（type=="archive" 是聚合摘要，无单次 brief 语义）
     briefs = [s for s in sessions if isinstance(s, dict) and s.get("type") != "archive"]
+    try:
+        session_count = await get_user_session_count(user_id)
+    except Exception:
+        session_count = len(briefs)
 
     try:
         mastery = await get_mastery(user_id, document_id)
     except Exception:
         mastery = None
 
-    if not briefs and mastery is None:
+    if session_count == 0 and mastery is None:
         return {"is_returning": False}
 
     try:
@@ -108,8 +113,6 @@ async def build_returning_context(user_id: str, document_id: str) -> dict:
 
     last = briefs[0] if briefs else {}
     trend = _mastery_trend(briefs)
-    session_count = len(briefs)
-
     return {
         "is_returning": True,
         "session_count": session_count,

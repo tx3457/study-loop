@@ -28,11 +28,17 @@ API 分两层：
   3. decision_log 形成可审计的 reasoning trace
 """
 
+import asyncio
+import copy
+import hashlib
 import logging
 import os
+import threading
 import time
 import uuid
 from collections import Counter
+from collections.abc import Awaitable, Callable
+from contextlib import nullcontext
 from datetime import date, datetime
 from pathlib import Path
 
@@ -56,11 +62,23 @@ _POSTGRES_STORE_SETUP_LOCK_ID = 0x53545544594D454D
 _POSTGRES_STORE_SETUP_LOCK_TIMEOUT_ENV = "MEMORY_STORE_SETUP_LOCK_TIMEOUT_SECONDS"
 _POSTGRES_STORE_SETUP_LOCK_TIMEOUT_DEFAULT_SECONDS = 300.0
 _POSTGRES_STORE_SETUP_LOCK_POLL_SECONDS = 0.05
+_POSTGRES_SESSION_ARCHIVE_LOCK_TIMEOUT_ENV = (
+    "MEMORY_SESSION_ARCHIVE_LOCK_TIMEOUT_SECONDS"
+)
+_POSTGRES_SESSION_ARCHIVE_LOCK_TIMEOUT_DEFAULT_SECONDS = 10.0
+_POSTGRES_SESSION_ARCHIVE_LOCK_POLL_SECONDS = 0.02
+_MEMORY_COMMIT_CANCEL_DRAIN_TIMEOUT_SECONDS = 15.0
 _WRONG_QUESTION_SOURCE_PREFIX = "wrong-question:"
+_STORE_LOCK = threading.RLock()
+_BACKGROUND_MEMORY_COMMITS: set[asyncio.Task] = set()
 
 
 class PostgresStoreSetupLockTimeoutError(TimeoutError):
     """Another worker did not finish learner-memory schema setup in time."""
+
+
+class PostgresSessionArchiveLockTimeoutError(TimeoutError):
+    """Another worker did not release a user's learner-memory lock in time."""
 
 
 def _postgres_store_setup_lock_timeout_seconds() -> float:
@@ -77,6 +95,24 @@ def _postgres_store_setup_lock_timeout_seconds() -> float:
     if not 0 < value < float("inf"):
         raise ValueError(
             f"{_POSTGRES_STORE_SETUP_LOCK_TIMEOUT_ENV} must be a positive number"
+        )
+    return value
+
+
+def _postgres_session_archive_lock_timeout_seconds() -> float:
+    source = os.getenv(
+        _POSTGRES_SESSION_ARCHIVE_LOCK_TIMEOUT_ENV,
+        str(_POSTGRES_SESSION_ARCHIVE_LOCK_TIMEOUT_DEFAULT_SECONDS),
+    )
+    try:
+        value = float(source)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{_POSTGRES_SESSION_ARCHIVE_LOCK_TIMEOUT_ENV} must be a positive number"
+        ) from None
+    if not 0 < value < float("inf"):
+        raise ValueError(
+            f"{_POSTGRES_SESSION_ARCHIVE_LOCK_TIMEOUT_ENV} must be a positive number"
         )
     return value
 
@@ -136,6 +172,11 @@ else:
     store = InMemoryStore()
 
 
+def _store_access_lock():
+    """本地 Store/快照共享锁；PostgreSQL 并发由数据库和 advisory lock 管理。"""
+    return _STORE_LOCK if not DATABASE_URL else nullcontext()
+
+
 # ── 6 个 bank 的命名空间 ──────────────────────────────────────────────────
 SEMANTIC_BANKS = ("preferences", "mastery", "weak_points")
 EPISODIC_BANKS = ("session_briefs", "error_log", "decision_log")
@@ -149,30 +190,76 @@ def _now_iso() -> str:
     return datetime.now().isoformat()
 
 
+def _session_archive_lock_id(user_id: str) -> int:
+    """为每个用户生成稳定的负数 advisory-lock id，与 schema 锁隔离。"""
+    digest = hashlib.sha256(
+        f"study-loop:session-archive:{user_id}".encode("utf-8")
+    ).digest()
+    value = int.from_bytes(digest[:8], "big") & ((1 << 63) - 1)
+    return -(value or 1)
+
+
+def _search_all_items(
+    namespace: tuple,
+    *,
+    event_filter: dict | None = None,
+    batch_size: int = 100,
+) -> list:
+    """分页读取完整 namespace，避免 Store 默认只返回 10 条。"""
+    with _store_access_lock():
+        items = []
+        offset = 0
+        while True:
+            batch = store.search(
+                namespace,
+                filter=event_filter,
+                limit=batch_size,
+                offset=offset,
+            )
+            items.extend(batch)
+            if len(batch) < batch_size:
+                return items
+            offset += len(batch)
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # 低层通用 API
 # ═══════════════════════════════════════════════════════════════════════════
+def _read_bank_state_sync(user_id: str, bank: str) -> dict | None:
+    with _store_access_lock():
+        item = store.get(_bank_ns(user_id, bank), "current")
+    return copy.deepcopy(item.value) if item else None
+
+
+def _write_bank_state_sync(user_id: str, bank: str, payload: dict) -> None:
+    with _store_access_lock():
+        store.put(_bank_ns(user_id, bank), "current", copy.deepcopy(payload))
+
+
 async def read_bank_state(user_id: str, bank: str) -> dict | None:
     """读 semantic bank 的完整状态（统一 key='current'）。"""
-    item = store.get(_bank_ns(user_id, bank), "current")
-    return item.value if item else None
+    return _read_bank_state_sync(user_id, bank)
 
 
 async def write_bank_state(user_id: str, bank: str, payload: dict) -> None:
     """覆盖写 semantic bank。"""
-    store.put(_bank_ns(user_id, bank), "current", payload)
+    _write_bank_state_sync(user_id, bank, payload)
 
 
 async def append_bank_event(user_id: str, bank: str, key: str, payload: dict) -> None:
     """append 单条事件到 episodic bank。"""
-    payload.setdefault("timestamp", _now_iso())
-    store.put(_bank_ns(user_id, bank), key, payload)
+    stored_payload = copy.deepcopy(payload)
+    stored_payload.setdefault("timestamp", _now_iso())
+    with _store_access_lock():
+        store.put(_bank_ns(user_id, bank), key, stored_payload)
 
 
 async def list_bank_events(user_id: str, bank: str, limit: int = 50) -> list[dict]:
     """读 episodic bank 全部事件，按 timestamp 倒序，截到 limit。"""
-    results = store.search(_bank_ns(user_id, bank))
-    items = [r.value for r in results]
+    if limit <= 0:
+        return []
+    results = _search_all_items(_bank_ns(user_id, bank))
+    items = [copy.deepcopy(r.value) for r in results]
     items.sort(key=lambda x: x.get("timestamp", x.get("date", "")), reverse=True)
     return items[:limit]
 
@@ -195,18 +282,57 @@ async def update_preferences(user_id: str, patch: dict) -> None:
 async def get_mastery(user_id: str, document_id: str | None = None):
     """document_id=None 返回整个 dict，否则返回单个 doc 的 mastery（None 表示无数据）。"""
     state = await read_bank_state(user_id, "mastery") or {}
-    return state if document_id is None else state.get(document_id)
+    if document_id is not None:
+        return state.get(document_id)
+    state.pop("_applied_sessions", None)
+    return state
+
+
+def _update_mastery_sync(
+    user_id: str,
+    document_id: str,
+    current_score: float,
+    *,
+    session_id: str | None = None,
+) -> float:
+    """单行状态内同时保存 EMA 和已应用 session，令部分失败后的重试幂等。"""
+    state = _read_bank_state_sync(user_id, "mastery") or {}
+    applied_by_document = copy.deepcopy(state.get("_applied_sessions") or {})
+    applied_sessions = list(applied_by_document.get(document_id) or [])
+    if session_id and session_id in applied_sessions:
+        existing = state.get(document_id)
+        return float(existing) if isinstance(existing, (int, float)) else current_score
+
+    old = state.get(document_id, current_score)   # 首次以本次分数为基准
+    new_val = round(old * 0.6 + current_score * 0.4, 3)
+    state[document_id] = new_val
+    if session_id:
+        applied_sessions.append(session_id)
+        applied_by_document[document_id] = applied_sessions
+        state["_applied_sessions"] = applied_by_document
+    state["last_updated"] = _now_iso()
+    _write_bank_state_sync(user_id, "mastery", state)
+    return new_val
 
 
 async def update_mastery(user_id: str, document_id: str, current_score: float) -> float:
     """EMA: new = old * 0.6 + current * 0.4。返回新 mastery 值。"""
-    state = await read_bank_state(user_id, "mastery") or {}
-    old = state.get(document_id, current_score)   # 首次以本次分数为基准
-    new_val = round(old * 0.6 + current_score * 0.4, 3)
-    state[document_id] = new_val
-    state["last_updated"] = _now_iso()
-    await write_bank_state(user_id, "mastery", state)
-    return new_val
+    if DATABASE_URL:
+        result: list[float] = []
+
+        def operation() -> None:
+            result.append(
+                _update_mastery_sync(user_id, document_id, current_score)
+            )
+
+        await asyncio.to_thread(
+            _run_with_postgres_session_archive_lock,
+            user_id,
+            DATABASE_URL,
+            operation,
+        )
+        return result[0]
+    return _update_mastery_sync(user_id, document_id, current_score)
 
 
 async def get_weak_points(user_id: str, document_id: str | None = None) -> list[str]:
@@ -228,15 +354,18 @@ async def get_weak_points(user_id: str, document_id: str | None = None) -> list[
     return [e["point"] for e in points if e.get("point")]
 
 
-async def append_weak_points(user_id: str, new_points: list[str],
-                             document_id: str | None = None) -> None:
+def _append_weak_points_sync(
+    user_id: str,
+    new_points: list[str],
+    document_id: str | None = None,
+) -> None:
     """去重追加薄弱点，新条目放最前。
 
     按 document_id 分桶：
       - 去重在 (document_id, point) 维度：不同文档的同名薄弱点各留一份
       - WEAK_POINTS_MAX 上限按「每文档」算，避免医学薄弱点挤占数学的额度
     """
-    state = await read_bank_state(user_id, "weak_points") or {"points": []}
+    state = _read_bank_state_sync(user_id, "weak_points") or {"points": []}
     existing = state.get("points", [])
     ts = _now_iso()
 
@@ -252,7 +381,24 @@ async def append_weak_points(user_id: str, new_points: list[str],
     same_doc_merged = (new_entries + same_doc)[:WEAK_POINTS_MAX]
     state["points"] = same_doc_merged + other_doc
     state["last_updated"] = ts
-    await write_bank_state(user_id, "weak_points", state)
+    _write_bank_state_sync(user_id, "weak_points", state)
+
+
+async def append_weak_points(user_id: str, new_points: list[str],
+                             document_id: str | None = None) -> None:
+    if DATABASE_URL:
+        await asyncio.to_thread(
+            _run_with_postgres_session_archive_lock,
+            user_id,
+            DATABASE_URL,
+            lambda: _append_weak_points_sync(
+                user_id,
+                new_points,
+                document_id,
+            ),
+        )
+        return
+    _append_weak_points_sync(user_id, new_points, document_id)
 
 
 async def get_prioritized_weak_points(user_id: str, document_id: str | None = None,
@@ -275,9 +421,40 @@ async def get_prioritized_weak_points(user_id: str, document_id: str | None = No
 # ═══════════════════════════════════════════════════════════════════════════
 # 高层语义 API（episodic banks）
 # ═══════════════════════════════════════════════════════════════════════════
-async def append_session_brief(user_id: str, brief: dict) -> None:
+def _append_session_brief_sync(user_id: str, brief: dict) -> None:
     key = brief.get("session_id") or f"sess_{uuid.uuid4().hex[:12]}"
-    await append_bank_event(user_id, "session_briefs", key, brief)
+    namespace = _bank_ns(user_id, "session_briefs")
+    with _store_access_lock():
+        # session_id 是不可变事件键：请求重试不能覆盖归档线程已经读取的值，
+        # 否则 archive 写入旧统计后会删除刚覆盖的新值。
+        if brief.get("session_id") and store.get(namespace, key) is not None:
+            return
+        if brief.get("session_id"):
+            # 已归档会话的迟到重试不应重新变成 raw brief 并重复计数。
+            archives = _search_all_items(
+                namespace,
+                event_filter={"type": "archive"},
+            )
+            if any(key in (item.value.get("session_ids") or []) for item in archives):
+                return
+        stored_brief = copy.deepcopy(brief)
+        stored_brief.setdefault("timestamp", _now_iso())
+        store.put(namespace, key, stored_brief)
+
+
+async def append_session_brief(user_id: str, brief: dict) -> None:
+    if DATABASE_URL:
+        # 与归档共用同一个跨进程锁，使“查重→写入”和“扫描→归档→删除”
+        # 不会在多个 worker 间交错。阻塞的 psycopg 调用在线程中执行，不冻结
+        # FastAPI 事件循环；上层 commit_learning_memory 会在请求取消时等待提交收尾。
+        await asyncio.to_thread(
+            _run_with_postgres_session_archive_lock,
+            user_id,
+            DATABASE_URL,
+            lambda: _append_session_brief_sync(user_id, brief),
+        )
+        return
+    _append_session_brief_sync(user_id, brief)
 
 
 async def append_error(user_id: str, error: dict) -> None:
@@ -293,15 +470,16 @@ async def resolve_error(
 ) -> bool:
     """把重练答对的错题标为已解决，同时保留原始事件供审计。"""
     namespace = _bank_ns(user_id, "error_log")
-    item = store.get(namespace, error_id)
-    if item is None:
-        return False
-    payload = {
-        **item.value,
-        "resolved_at": _now_iso(),
-        "resolved_session_id": resolved_session_id,
-    }
-    store.put(namespace, error_id, payload)
+    with _store_access_lock():
+        item = store.get(namespace, error_id)
+        if item is None:
+            return False
+        payload = {
+            **copy.deepcopy(item.value),
+            "resolved_at": _now_iso(),
+            "resolved_session_id": resolved_session_id,
+        }
+        store.put(namespace, error_id, payload)
     return True
 
 
@@ -316,31 +494,22 @@ async def list_errors(user_id: str, document_id: str | None = None, limit: int =
     if limit <= 0:
         return []
 
-    namespace = _bank_ns(user_id, "error_log")
     event_filter = {"document_id": document_id} if document_id is not None else None
-    batch_size = max(100, limit)
-    offset = 0
-    items: list[dict] = []
-    while True:
-        results = store.search(
-            namespace,
-            filter=event_filter,
-            limit=batch_size,
-            offset=offset,
-        )
-        items.extend(
-            {
-                **result.value,
-                # 升级前 payload 没有 error_id；注入真实 store key 才能在
-                # 重练答对时回写同一条记录，而不是生成无法解析的展示 ID。
-                "error_id": result.value.get("error_id") or result.key,
-            }
-            for result in results
-            if not result.value.get("resolved_at")
-        )
-        if len(results) < batch_size:
-            break
-        offset += len(results)
+    results = _search_all_items(
+        _bank_ns(user_id, "error_log"),
+        event_filter=event_filter,
+        batch_size=max(100, limit),
+    )
+    items = [
+        {
+            **copy.deepcopy(result.value),
+            # 升级前 payload 没有 error_id；注入真实 store key 才能在
+            # 重练答对时回写同一条记录，而不是生成无法解析的展示 ID。
+            "error_id": result.value.get("error_id") or result.key,
+        }
+        for result in results
+        if not result.value.get("resolved_at")
+    ]
 
     items.sort(
         key=lambda item: item.get("timestamp", item.get("date", "")),
@@ -356,11 +525,15 @@ async def _maybe_migrate_legacy(user_id: str) -> None:
     """将 legacy profile / sessions 命名空间迁移到语义 bank，仅在目标为空时执行。"""
     # 已有任何新 bank 数据则跳过
     for bank in SEMANTIC_BANKS + EPISODIC_BANKS:
-        if store.get(_bank_ns(user_id, bank), "current") or store.search(_bank_ns(user_id, bank)):
+        with _store_access_lock():
+            has_state = store.get(_bank_ns(user_id, bank), "current")
+            has_events = store.search(_bank_ns(user_id, bank))
+        if has_state or has_events:
             return
 
     # 1. legacy profile → mastery + weak_points + preferences
-    legacy_profile = store.get(("users", user_id, "profile"), "profile")
+    with _store_access_lock():
+        legacy_profile = store.get(("users", user_id, "profile"), "profile")
     if legacy_profile and legacy_profile.value:
         v = legacy_profile.value
         if v.get("topic_mastery"):
@@ -376,9 +549,79 @@ async def _maybe_migrate_legacy(user_id: str) -> None:
             })
 
     # 2. legacy sessions → session_briefs（按 key 透传）
-    legacy_sessions = store.search(("users", user_id, "sessions"))
+    legacy_sessions = _search_all_items(("users", user_id, "sessions"))
     for r in legacy_sessions:
-        store.put(_bank_ns(user_id, "session_briefs"), r.key, r.value)
+        with _store_access_lock():
+            store.put(_bank_ns(user_id, "session_briefs"), r.key, r.value)
+
+
+def _count_sessions(results: list) -> int:
+    """按真实会话数统计；archive 物理上是一条，但代表多次会话。"""
+    session_ids: set[str] = set()
+    legacy_archive_count = 0
+    for result in results:
+        value = result.value
+        if value.get("type") == "archive":
+            archived_ids = value.get("session_ids")
+            if archived_ids:
+                session_ids.update(str(item) for item in archived_ids)
+            else:
+                count = value.get("session_count", 0)
+                if isinstance(count, int) and not isinstance(count, bool):
+                    legacy_archive_count += max(count, 0)
+            continue
+        session_ids.add(str(value.get("session_id") or result.key))
+    return len(session_ids) + legacy_archive_count
+
+
+def _average_session_score(results: list) -> float | None:
+    """按归档所代表的会话数加权，且忽略 crash-window 的 raw 重复项。"""
+    seen_ids: set[str] = set()
+    weighted_score = 0.0
+    scored_count = 0
+
+    archives = sorted(
+        (result for result in results if result.value.get("type") == "archive"),
+        key=lambda result: result.key,
+    )
+    for result in archives:
+        value = result.value
+        rate = value.get("avg_correct_rate")
+        if not isinstance(rate, (int, float)) or isinstance(rate, bool):
+            continue
+        archived_ids = [str(item) for item in (value.get("session_ids") or [])]
+        if archived_ids:
+            new_ids = [item for item in archived_ids if item not in seen_ids]
+            seen_ids.update(archived_ids)
+            weight = len(new_ids)
+        else:
+            count = value.get("session_count", 0)
+            weight = count if isinstance(count, int) and not isinstance(count, bool) else 0
+        weighted_score += float(rate) * max(weight, 0)
+        scored_count += max(weight, 0)
+
+    for result in results:
+        value = result.value
+        if value.get("type") == "archive":
+            continue
+        session_id = str(value.get("session_id") or result.key)
+        if session_id in seen_ids:
+            continue
+        rate = value.get("correct_rate")
+        if isinstance(rate, (int, float)) and not isinstance(rate, bool):
+            weighted_score += float(rate)
+            scored_count += 1
+        seen_ids.add(session_id)
+
+    return round(weighted_score / scored_count, 3) if scored_count else None
+
+
+async def get_user_session_count(user_id: str) -> int:
+    """返回包含归档内容的精确会话数，不受历史展示上限影响。"""
+    await _maybe_migrate_legacy(user_id)
+    return _count_sessions(
+        _search_all_items(_bank_ns(user_id, "session_briefs"))
+    )
 
 
 async def get_user_profile(user_id: str) -> dict | None:
@@ -388,8 +631,11 @@ async def get_user_profile(user_id: str) -> dict | None:
     prefs = await get_preferences(user_id)
     mastery_state = (await read_bank_state(user_id, "mastery") or {}).copy()
     mastery_state.pop("last_updated", None)
+    mastery_state.pop("_applied_sessions", None)
     wp = await get_weak_points(user_id)
-    session_count = len(store.search(_bank_ns(user_id, "session_briefs")))
+    session_results = _search_all_items(_bank_ns(user_id, "session_briefs"))
+    session_count = _count_sessions(session_results)
+    average_correct_rate = _average_session_score(session_results)
 
     if not (prefs or mastery_state or wp or session_count):
         return None
@@ -399,6 +645,7 @@ async def get_user_profile(user_id: str) -> dict | None:
         "topic_mastery": mastery_state,
         "weak_points": wp,
         "total_sessions": session_count,
+        "average_correct_rate": average_correct_rate,
         "preferences": prefs,
         "last_updated": prefs.get("last_updated") or _now_iso(),
     }
@@ -407,9 +654,21 @@ async def get_user_profile(user_id: str) -> dict | None:
 async def get_user_sessions(user_id: str) -> list[dict]:
     """兼容 API：从 session_briefs bank 读取，按日期倒序。"""
     await _maybe_migrate_legacy(user_id)
-    items = await list_bank_events(user_id, "session_briefs", limit=200)
-    items.sort(key=lambda x: x.get("date", x.get("timestamp", "")), reverse=True)
-    return items
+    results = _search_all_items(_bank_ns(user_id, "session_briefs"))
+    archived_ids = {
+        str(session_id)
+        for result in results
+        if result.value.get("type") == "archive"
+        for session_id in (result.value.get("session_ids") or [])
+    }
+    items = [
+        copy.deepcopy(result.value)
+        for result in results
+        if result.value.get("type") == "archive"
+        or str(result.value.get("session_id") or result.key) not in archived_ids
+    ]
+    items.sort(key=lambda x: x.get("date") or x.get("timestamp", ""), reverse=True)
+    return items[:200]
 
 
 async def write_episodic_memory(
@@ -479,16 +738,138 @@ async def write_episodic_memory(
             "source_error_id": source_error_id,
         })
 
-    await maybe_archive_session_briefs(user_id)
+def _update_semantic_memory_sync(
+    user_id: str,
+    report: GradingReport,
+    document_id: str,
+) -> None:
+    """在一个用户级临界区中提交幂等 mastery 与可重试 weak-points。"""
+    with _store_access_lock():
+        _update_mastery_sync(
+            user_id,
+            document_id,
+            report.score,
+            session_id=report.session_id,
+        )
+        new_gaps = [
+            grade.knowledge_gap
+            for grade in report.grades
+            if not grade.is_correct and grade.knowledge_gap
+        ]
+        if new_gaps:
+            _append_weak_points_sync(user_id, new_gaps, document_id)
 
 
 async def update_semantic_memory(user_id: str, report: GradingReport, document_id: str) -> None:
-    """兼容 API：更新 mastery（EMA）+ 追加 weak_points。"""
-    await update_mastery(user_id, document_id, report.score)
-    new_gaps = [g.knowledge_gap for g in report.grades
-                if not g.is_correct and g.knowledge_gap]
-    if new_gaps:
-        await append_weak_points(user_id, new_gaps, document_id)
+    """更新 mastery（按 session 幂等）并追加 weak_points。"""
+    if DATABASE_URL:
+        await asyncio.to_thread(
+            _run_with_postgres_session_archive_lock,
+            user_id,
+            DATABASE_URL,
+            lambda: _update_semantic_memory_sync(user_id, report, document_id),
+        )
+        return
+    _update_semantic_memory_sync(user_id, report, document_id)
+
+
+async def persist_memory_snapshot() -> bool:
+    """把当前 InMemoryStore 原子落盘；PostgreSQL 后端自动 no-op。"""
+    from services.memory_persist import persist_snapshot
+
+    try:
+        return await persist_snapshot()
+    except Exception as exc:
+        logger.warning("[memory] persist snapshot 失败（保留进程内状态）: %s", exc)
+        return False
+
+
+async def _complete_memory_commit(operation: Awaitable[None]) -> None:
+    """请求取消时仍等待已开始的记忆提交结束，再把取消信号交还调用方。"""
+    task = asyncio.create_task(operation)
+    try:
+        await asyncio.shield(task)
+        return
+    except asyncio.CancelledError as cancellation:
+        # shield 防止外层取消传播给提交任务。连续取消也只延后响应取消，不能把
+        # learner memory 轻易留在“session 已写、mastery 未写”的半提交状态。
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _MEMORY_COMMIT_CANCEL_DRAIN_TIMEOUT_SECONDS
+        while not task.done():
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                _track_background_memory_commit(task)
+                logger.warning(
+                    "cancelled request stopped waiting for learner-memory commit "
+                    "after %.0fs; commit continues in background",
+                    _MEMORY_COMMIT_CANCEL_DRAIN_TIMEOUT_SECONDS,
+                )
+                raise cancellation
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(task),
+                    timeout=remaining,
+                )
+            except asyncio.CancelledError:
+                continue
+            except asyncio.TimeoutError:
+                continue
+        if task.cancelled():
+            raise cancellation
+        task.result()  # 若提交自身失败，优先暴露真实写入错误。
+        raise cancellation
+
+
+def _track_background_memory_commit(task: asyncio.Task) -> None:
+    """保留超时后的提交任务，并消费异常，避免任务被回收或静默告警。"""
+    _BACKGROUND_MEMORY_COMMITS.add(task)
+
+    def on_done(completed: asyncio.Task) -> None:
+        _BACKGROUND_MEMORY_COMMITS.discard(completed)
+        try:
+            completed.result()
+        except asyncio.CancelledError:
+            logger.warning("background learner-memory commit was cancelled")
+        except Exception:
+            logger.exception("background learner-memory commit failed")
+
+    task.add_done_callback(on_done)
+
+
+async def commit_learning_memory(
+    user_id: str,
+    report: GradingReport,
+    document_id: str,
+    *,
+    questions: list[Question] | None = None,
+    after_write: Callable[[], Awaitable[None]] | None = None,
+    on_core_written: Callable[[], None] | None = None,
+) -> None:
+    """完整提交 episodic + semantic memory，再归档并刷新本地快照。"""
+
+    async def operation() -> None:
+        await write_episodic_memory(
+            user_id,
+            report,
+            document_id,
+            questions=questions,
+        )
+        await update_semantic_memory(user_id, report, document_id)
+        if on_core_written is not None:
+            on_core_written()
+        if after_write is not None:
+            try:
+                await after_write()
+            except Exception as exc:
+                logger.warning(
+                    "learner-memory optional audit write failed user=%s: %s",
+                    user_id,
+                    exc,
+                )
+        await maybe_archive_session_briefs(user_id)
+        await persist_memory_snapshot()
+
+    await _complete_memory_commit(operation())
 
 
 async def consolidate_session_extras(user_id: str, report: GradingReport, document_id: str,
@@ -509,7 +890,6 @@ async def consolidate_session_extras(user_id: str, report: GradingReport, docume
     延迟导入 preference_learning / memory_context / memory_persist：避免与本模块的模块级循环依赖。
     """
     from services.memory_context import build_profile_card
-    from services.memory_persist import save_snapshot
     from services.preference_learning import infer_preferences
 
     patch: dict = {}
@@ -531,10 +911,7 @@ async def consolidate_session_extras(user_id: str, report: GradingReport, docume
         logger.warning(f"[consolidate] build/store profile_card 失败: {e}")
 
     # ③ 本机快照落盘（原子写；Postgres 后端 no-op）
-    try:
-        save_snapshot()
-    except Exception as e:
-        logger.warning(f"[consolidate] save_snapshot 失败: {e}")
+    await persist_memory_snapshot()
 
     return patch
 
@@ -542,33 +919,159 @@ async def consolidate_session_extras(user_id: str, report: GradingReport, docume
 # ═══════════════════════════════════════════════════════════════════════════
 # 归档（session_briefs 满了就把最旧的一半聚合）
 # ═══════════════════════════════════════════════════════════════════════════
-def _aggregate_episodes(episodes: list[dict]) -> dict:
-    dates = sorted(e.get("date", "") for e in episodes if e.get("date"))
-    avg_rate = round(sum(e.get("correct_rate", 0) for e in episodes) / len(episodes), 3)
-    all_gaps = [gap for e in episodes for gap in e.get("knowledge_gaps", [])]
+def _aggregate_episodes(episodes: list[tuple[str, dict]]) -> dict:
+    values = [value for _, value in episodes]
+    session_ids = [str(value.get("session_id") or key) for key, value in episodes]
+    dates = sorted(value.get("date", "") for value in values if value.get("date"))
+    avg_rate = round(
+        sum(value.get("correct_rate", 0) for value in values) / len(values),
+        3,
+    )
+    all_gaps = [
+        gap
+        for value in values
+        for gap in value.get("knowledge_gaps", [])
+    ]
     top_gaps = [gap for gap, _ in Counter(all_gaps).most_common(10)]
+    period_start = dates[0] if dates else None
+    period_end = dates[-1] if dates else None
     return {
         "type": "archive",
-        "period": f"{dates[0]} ~ {dates[-1]}" if dates else "unknown",
-        "session_count": len(episodes),
+        "period": (
+            f"{period_start} ~ {period_end}"
+            if period_start and period_end
+            else "unknown"
+        ),
+        "period_start": period_start,
+        "period_end": period_end,
+        # date 供现有历史排序使用，避免 archive 因缺 date 永远排在最前面。
+        "date": period_end or "",
+        "session_ids": session_ids,
+        "session_count": len(session_ids),
         "avg_correct_rate": avg_rate,
         "top_knowledge_gaps": top_gaps,
+        "total_questions": sum(value.get("total_questions", 0) for value in values),
         "timestamp": _now_iso(),
     }
 
 
-async def maybe_archive_session_briefs(user_id: str) -> None:
-    results = store.search(_bank_ns(user_id, "session_briefs"))
-    if len(results) <= ARCHIVE_THRESHOLD:
+def _archive_session_briefs_sync(user_id: str) -> None:
+    """在进程内锁中执行归档，确保本地快照看到完整的前/后状态。"""
+    with _store_access_lock():
+        _archive_session_briefs_unlocked(user_id)
+
+
+def _archive_session_briefs_unlocked(user_id: str) -> None:
+    """执行一次归档；PostgreSQL 调用方还必须先持有该用户的 advisory lock。"""
+    namespace = _bank_ns(user_id, "session_briefs")
+    results = _search_all_items(namespace)
+    archived_ids = {
+        str(session_id)
+        for result in results
+        if result.value.get("type") == "archive"
+        for session_id in (result.value.get("session_ids") or [])
+    }
+    raw_results = []
+    for result in results:
+        if result.value.get("type") == "archive":
+            continue
+        session_id = str(result.value.get("session_id") or result.key)
+        if session_id in archived_ids:
+            # archive 先写后删；若上次进程在删除途中退出，这里完成清理。
+            store.delete(namespace, result.key)
+            continue
+        raw_results.append(result)
+    if len(raw_results) <= ARCHIVE_THRESHOLD:
         return
 
-    sorted_results = sorted(results, key=lambda r: r.value.get("date", ""))
+    sorted_results = sorted(
+        raw_results,
+        key=lambda result: (
+            result.value.get("date") or "",
+            result.value.get("timestamp") or "",
+            result.key,
+        ),
+    )
     cutoff = len(sorted_results) // 2
     to_archive = sorted_results[:cutoff]
 
-    archive_entry = _aggregate_episodes([r.value for r in to_archive])
-    archive_key = f"archive_{to_archive[0].value.get('date', 'old')}"
-    store.put(_bank_ns(user_id, "session_briefs"), archive_key, archive_entry)
+    episodes = [(result.key, result.value) for result in to_archive]
+    archive_entry = _aggregate_episodes(episodes)
+    digest = hashlib.sha256(
+        "\x1f".join(archive_entry["session_ids"]).encode("utf-8")
+    ).hexdigest()[:20]
+    archive_key = f"archive_{digest}"
+    store.put(namespace, archive_key, archive_entry)
 
-    for r in to_archive:
-        store.delete(_bank_ns(user_id, "session_briefs"), r.key)
+    for result in to_archive:
+        store.delete(namespace, result.key)
+
+
+def _run_with_postgres_session_archive_lock(
+    user_id: str,
+    database_url: str,
+    operation: Callable[[], None],
+) -> None:
+    """在用户级 PostgreSQL session lock 内执行 session 写入或归档。"""
+    import psycopg
+
+    lock_id = _session_archive_lock_id(user_id)
+    timeout_seconds = _postgres_session_archive_lock_timeout_seconds()
+    connect_timeout = max(1, int(timeout_seconds + 0.999))
+    statement_timeout_ms = max(1, int(timeout_seconds * 1000))
+    # 使用独立直连而不是 Store 的池连接；with 退出会关闭 session，并在成功、
+    # 异常两条路径上释放 session-level advisory lock。
+    with psycopg.connect(
+        database_url,
+        autocommit=True,
+        connect_timeout=connect_timeout,
+        options=f"-c statement_timeout={statement_timeout_ms}",
+    ) as connection:
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            acquired = connection.execute(
+                "SELECT pg_try_advisory_lock(%s)",
+                (lock_id,),
+            ).fetchone()
+            if acquired and acquired[0]:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise PostgresSessionArchiveLockTimeoutError(
+                    f"Timed out after {timeout_seconds:g} seconds waiting for "
+                    "learner-memory session/archive lock"
+                )
+            time.sleep(
+                min(_POSTGRES_SESSION_ARCHIVE_LOCK_POLL_SECONDS, remaining)
+            )
+        operation()
+
+
+def _archive_session_briefs_with_postgres_lock(
+    user_id: str,
+    database_url: str,
+) -> bool:
+    _run_with_postgres_session_archive_lock(
+        user_id,
+        database_url,
+        lambda: _archive_session_briefs_sync(user_id),
+    )
+    return True
+
+
+async def maybe_archive_session_briefs(user_id: str) -> None:
+    if not DATABASE_URL:
+        # 此路径内无 await，同一事件循环上的多个请求不会交错执行归档。
+        _archive_session_briefs_sync(user_id)
+        return
+
+    try:
+        await asyncio.to_thread(
+            _archive_session_briefs_with_postgres_lock,
+            user_id,
+            DATABASE_URL,
+        )
+    except Exception as exc:
+        # 归档是有界压缩，不应让一次锁连接故障破坏已经写入的学习结果；
+        # raw brief 会保留，并由后续请求或下次归档继续处理。
+        logger.warning("session brief 归档跳过 user=%s: %s", user_id, exc)

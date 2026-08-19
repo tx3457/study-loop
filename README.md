@@ -90,7 +90,9 @@ Web 前端会为 Autonomous 请求、单题答案和 Adaptive 单轮提交生成
 [`.env.example`](.env.example)。多 worker 首次初始化 PostgreSQL learner memory
 时，其他 worker 最多等待 `MEMORY_STORE_SETUP_LOCK_TIMEOUT_SECONDS`（默认 300
 秒）；初始化连接需直连 PostgreSQL 或使用 session pooling。Quiz 与 Adaptive
-会话本身仍保存在进程内存中，后端重启后需要重新开始。
+会话本身仍保存在进程内存中，后端重启后需要重新开始。未配置
+`DATABASE_URL` 时，学习者记忆由单进程内存和本地 JSON 快照兜底，只支持一个
+后端 worker；需要多 worker 时必须配置 PostgreSQL，不能让多个进程共写同一快照。
 
 Structured Output 和 Embeddings 的专用 key 与地址必须成对配置；两者同时留空时才会整组回退到 `LLM_*`。完整配置见 [`.env.example`](.env.example)。
 

@@ -13,7 +13,11 @@ SM-2（SuperMemo-2，Anki 同源算法）：每个知识点维护 (复习次数 
 """
 from datetime import date, timedelta
 
-from services.memory import read_bank_state, write_bank_state
+from services.memory import (
+    persist_memory_snapshot,
+    read_bank_state,
+    write_bank_state,
+)
 
 _REVIEW_BANK = "review_schedule"
 _DEFAULT_EF = 2.5
@@ -122,4 +126,5 @@ async def update_after_session(user_id: str, document_id: str | None,
     state["items"] = items
     state["last_updated"] = today.isoformat()
     await write_bank_state(user_id, _REVIEW_BANK, state)
+    await persist_memory_snapshot()
     return state

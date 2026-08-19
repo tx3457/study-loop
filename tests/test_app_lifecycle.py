@@ -98,6 +98,9 @@ class TestApplicationLifespan(unittest.TestCase):
         async def cleanup_mcp():
             events.append("mcp_cleanup")
 
+        async def save_memory():
+            events.append("memory_save")
+
         async def close_providers():
             events.append("providers_close")
 
@@ -105,6 +108,8 @@ class TestApplicationLifespan(unittest.TestCase):
             main, "_connect_mcp_live_servers", new=connect_mcp
         ), patch.object(
             main, "_cleanup_mcp_live_servers", new=cleanup_mcp
+        ), patch.object(
+            main, "_save_memory_snapshot", new=save_memory
         ), patch.object(
             main, "close_managed_provider_clients", new=close_providers
         ):
@@ -119,10 +124,12 @@ class TestApplicationLifespan(unittest.TestCase):
                 "memory",
                 "mcp_connect",
                 "mcp_cleanup",
+                "memory_save",
                 "providers_close",
                 "memory",
                 "mcp_connect",
                 "mcp_cleanup",
+                "memory_save",
                 "providers_close",
             ],
         )
@@ -141,7 +148,9 @@ class TestApplicationLifespan(unittest.TestCase):
 
         with patch.object(main, "_load_memory_snapshot", new=noop), patch.object(
             main, "_connect_mcp_live_servers", new=noop
-        ), patch.object(main, "_cleanup_mcp_live_servers", new=noop):
+        ), patch.object(
+            main, "_cleanup_mcp_live_servers", new=noop
+        ), patch.object(main, "_save_memory_snapshot", new=noop):
             with TestClient(main.app):
                 pass
             self.assertTrue(factory.clients[0].closed)
@@ -160,6 +169,7 @@ class TestApplicationLifespan(unittest.TestCase):
 
         connect_mcp = AsyncMock(side_effect=RuntimeError("offline"))
         cleanup_mcp = AsyncMock()
+        save_memory = AsyncMock()
         close_providers = AsyncMock()
 
         with patch.object(
@@ -170,6 +180,8 @@ class TestApplicationLifespan(unittest.TestCase):
             mcp_servers, "cleanup_all", new=cleanup_mcp
         ), patch.object(
             main, "close_managed_provider_clients", new=close_providers
+        ), patch.object(
+            main, "_save_memory_snapshot", new=save_memory
         ):
             with TestClient(main.app) as client:
                 response = client.get("/health/live")
@@ -177,6 +189,7 @@ class TestApplicationLifespan(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         connect_mcp.assert_awaited_once_with()
         cleanup_mcp.assert_awaited_once_with()
+        save_memory.assert_awaited_once_with()
         close_providers.assert_awaited_once_with()
 
     def test_startup_cancellation_releases_resources(self):
@@ -195,6 +208,9 @@ class TestApplicationLifespan(unittest.TestCase):
         async def close_providers():
             events.append("providers_close")
 
+        async def save_memory():
+            events.append("memory_save")
+
         async def run_lifespan():
             async with main.lifespan(main.app):
                 self.fail("cancelled startup must not enter the application context")
@@ -204,6 +220,8 @@ class TestApplicationLifespan(unittest.TestCase):
         ), patch.object(
             main, "_cleanup_mcp_live_servers", new=cleanup_mcp
         ), patch.object(
+            main, "_save_memory_snapshot", new=save_memory
+        ), patch.object(
             main, "close_managed_provider_clients", new=close_providers
         ):
             with self.assertRaises(asyncio.CancelledError):
@@ -211,5 +229,11 @@ class TestApplicationLifespan(unittest.TestCase):
 
         self.assertEqual(
             events,
-            ["memory", "mcp_connect", "mcp_cleanup", "providers_close"],
+            [
+                "memory",
+                "mcp_connect",
+                "mcp_cleanup",
+                "memory_save",
+                "providers_close",
+            ],
         )

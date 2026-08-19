@@ -34,10 +34,9 @@ from services.grader import grade_session
 from services.learning_path import generate_learning_path
 from services.memory import (
     append_decision,
+    commit_learning_memory,
     get_mastery,
     get_weak_points,
-    update_semantic_memory,
-    write_episodic_memory,
 )
 from services.rag import generate_question
 from services.idempotency import (
@@ -246,26 +245,28 @@ async def _grade_and_update(
 
     report = await grade_session(qsid)
     asess.last_report = report
-    await update_semantic_memory(
-        asess.user_id, report, asess.document_id
-    )  # EMA mastery + weak_points
-    await write_episodic_memory(
+
+    async def record_decision() -> None:
+        if asess.current_decision is not None:
+            await append_decision(
+                asess.user_id,
+                {  # 决策审计 trace
+                    "agent": "adaptive_loop",
+                    "decision": asess.current_decision.action,
+                    "rationale": asess.current_decision.reason,
+                    "turn": asess.turn,
+                    "score": report.score,
+                },
+            )
+
+    await commit_learning_memory(
         asess.user_id,
         report,
         asess.document_id,
         questions=qs.questions,
-    )  # session_briefs + error_log
-    if asess.current_decision is not None:
-        await append_decision(
-            asess.user_id,
-            {  # 决策审计 trace
-                "agent": "adaptive_loop",
-                "decision": asess.current_decision.action,
-                "rationale": asess.current_decision.reason,
-                "turn": asess.turn,
-                "score": report.score,
-            },
-        )
+        after_write=record_decision,
+        on_core_written=lambda: setattr(qs, "profile_written", True),
+    )
 
     # 回填本轮轨迹(history[-1] 对应刚答完这套题)
     if asess.history:
