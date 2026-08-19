@@ -1,12 +1,16 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
+  createIdempotencyKey,
   getUserProfile,
   getUserSessions,
   getDocuments,
   getWrongQuestions,
-  startWrongQuestionPractice,
 } from '../api/client'
+import {
+  createWrongQuestionQuizRecovery,
+  writeQuizRecovery,
+} from '../state/quizRecovery'
 import './Dashboard.css'
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -30,12 +34,10 @@ export default function Dashboard() {
   const [wrongLoading, setWrongLoading] = useState(false)
   const [wrongError, setWrongError] = useState(null)
   const [practiceError, setPracticeError] = useState(null)
-  const [practiceLoading, setPracticeLoading] = useState(false)
   const [error, setError] = useState(null)
   const [partialError, setPartialError] = useState(null)
   const dashboardRequestId = useRef(0)
   const wrongRequestId = useRef(0)
-  const practiceRequestId = useRef(0)
 
   /* ── 加载数据 ──────────────────────────────────────────────────── */
   const loadDashboard = useCallback(async () => {
@@ -93,7 +95,6 @@ export default function Dashboard() {
     loadDashboard()
     return () => {
       dashboardRequestId.current += 1
-      practiceRequestId.current += 1
     }
   }, [loadDashboard])
 
@@ -128,36 +129,24 @@ export default function Dashboard() {
     loadWrongQuestions(wrongDoc)
   }, [loadWrongQuestions, wrongDoc])
 
-  const handleRepractice = async () => {
-    if (!wrongDoc || practiceLoading) return
-    const documentId = wrongDoc
-    const requestId = ++practiceRequestId.current
-    setPracticeLoading(true)
+  const handleRepractice = () => {
+    if (!wrongDoc) return
     setPracticeError(null)
     try {
-      const practice = await startWrongQuestionPractice(documentId)
-      if (requestId !== practiceRequestId.current) return
-      navigate('/quiz', {
-        state: {
-          wrongQuestionPractice: {
-            ...practice,
-            document_id: documentId,
-          },
-        },
-      })
-    } catch (err) {
-      if (requestId !== practiceRequestId.current) return
-      setPracticeError(err.message)
-    } finally {
-      if (requestId === practiceRequestId.current) {
-        setPracticeLoading(false)
+      const recovery = createWrongQuestionQuizRecovery(
+        wrongDoc,
+        createIdempotencyKey(),
+      )
+      if (!recovery || !writeQuizRecovery(recovery)) {
+        throw new Error('浏览器无法保存重练进度，请检查存储权限后重试')
       }
+      navigate('/quiz')
+    } catch (err) {
+      setPracticeError(err.message)
     }
   }
 
   const handleWrongDocumentChange = (event) => {
-    practiceRequestId.current += 1
-    setPracticeLoading(false)
     setPracticeError(null)
     setWrongDoc(event.target.value)
   }
@@ -305,9 +294,8 @@ export default function Dashboard() {
                     type="button"
                     className="state-action wrong-practice"
                     onClick={handleRepractice}
-                    disabled={practiceLoading}
                   >
-                    {practiceLoading ? '正在准备...' : `开始重练（${wrongQuestions.total}）`}
+                    {`开始重练（${wrongQuestions.total}）`}
                   </button>
                 )}
                 <select

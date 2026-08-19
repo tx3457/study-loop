@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 
 from models.grader import GradingReport
 from models.report import LearningReport, _ReportCore
+from models.session import QuizSession
 from services.session import sessions
 from services.grader import grade_session
 from services.llm import llm_parse, structured_client as client, structured_model as model
@@ -27,12 +28,9 @@ REPORT_SYSTEM_PROMPT = """
 
 
 async def _generate_report_uncached(
-    session_id: str,
+    session: QuizSession,
     grading: GradingReport,
 ) -> LearningReport:
-    session = sessions.get(session_id)
-    if not session:
-        raise ValueError(f"Session {session_id} not found")
     if session.status != "completed":
         raise ValueError("Session not completed yet — submit all answers first")
 
@@ -67,7 +65,7 @@ async def _generate_report_uncached(
     core = response.choices[0].message.parsed
 
     return LearningReport(
-        session_id=session_id,
+        session_id=session.session_id,
         document_id=session.document_id,
         overall_score=grading.score,
         topic_mastery=core.topic_mastery,
@@ -76,6 +74,25 @@ async def _generate_report_uncached(
         recommendations=core.recommendations,
         summary=core.summary,
     )
+
+
+async def generate_report_for_quiz(
+    session: QuizSession,
+    grading: GradingReport,
+) -> LearningReport:
+    """Generate or return the canonical report for an explicitly owned session."""
+    if session.status != "completed":
+        raise ValueError("Session not completed yet — submit all answers first")
+    if session.grading_report is None:
+        raise ValueError("Session does not contain a canonical grading report")
+    if grading.model_dump() != session.grading_report.model_dump():
+        raise ValueError("Grading report does not match the session cache")
+    if session.learning_report is not None:
+        return session.learning_report.model_copy(deep=True)
+
+    report = await _generate_report_uncached(session, grading)
+    session.learning_report = report.model_copy(deep=True)
+    return report
 
 
 async def generate_report(
@@ -102,6 +119,4 @@ async def generate_report(
         if session.learning_report is not None:
             return session.learning_report.model_copy(deep=True)
 
-        report = await _generate_report_uncached(session_id, canonical_grading)
-        session.learning_report = report.model_copy(deep=True)
-        return report
+        return await generate_report_for_quiz(session, canonical_grading)

@@ -21,7 +21,7 @@ from services.vectorstore import ensure_document_available as _ensure_document_a
 
 logger = logging.getLogger(__name__)
 
-# 内存会话存储（服务重启后清空）
+# Adaptive/Tutor legacy cache. Stable Web Quiz routes use QuizSessionStore.
 sessions: dict[str, QuizSession] = {}
 
 # 文字难度 → 连续值（无用户画像时的兜底）
@@ -97,7 +97,15 @@ def validate_provider_questions(questions: list[Question], question_type: str) -
                 raise InvalidQuizResponseError("模型返回的答案不属于任何选项")
 
 
-async def start_session(req: SessionStartRequest) -> tuple[str, list[QuestionView]]:
+def question_views(session: QuizSession) -> list[QuestionView]:
+    return [
+        QuestionView(index=i, question=q.question, options=q.options, type=q.type)
+        for i, q in enumerate(session.questions)
+    ]
+
+
+async def prepare_session(req: SessionStartRequest) -> QuizSession:
+    """Generate and validate a QuizSession without choosing a storage backend."""
     await _ensure_document_available(req.document_id)
 
     # 自适应：读取用户画像，计算本次出题参数
@@ -135,25 +143,24 @@ async def start_session(req: SessionStartRequest) -> tuple[str, list[QuestionVie
         user_answers=[],
         status="active",
     )
-    sessions[session_id] = session
-
-    questions_view = [
-        QuestionView(index=i, question=q.question, options=q.options, type=q.type)
-        for i, q in enumerate(session.questions)
-    ]
-    return session_id, questions_view
+    return session
 
 
-async def submit_answer(
-    session_id: str,
+async def start_session(req: SessionStartRequest) -> tuple[str, list[QuestionView]]:
+    """Legacy in-memory start used by Adaptive/Tutor-oriented callers."""
+    session = await prepare_session(req)
+    sessions[session.session_id] = session
+    return session.session_id, question_views(session)
+
+
+async def apply_answer_to_session(
+    session: QuizSession,
     answer: str,
     *,
     question_index: int | None = None,
     before_commit: Callable[[], Awaitable[None]] | None = None,
 ) -> AnswerResult:
-    session = sessions.get(session_id)
-    if not session:
-        raise SessionNotFoundError(f"Session {session_id} not found")
+    """Validate and append one answer to an explicitly owned session object."""
     if session.status != "active":
         raise SessionConflictError("Session is not accepting answers")
 
@@ -174,6 +181,46 @@ async def submit_answer(
     is_last = len(session.user_answers) == len(session.questions)
     if is_last:
         session.status = "completed"
+
+    return answer_result_for_index(session, current_index)
+
+
+def answer_result_for_index(session: QuizSession, index: int) -> AnswerResult:
+    """Reconstruct the canonical submit response for an already stored answer."""
+    if index < 0 or index >= len(session.user_answers) or index >= len(session.questions):
+        raise SessionConflictError("Answer index is not present in session")
+    question = session.questions[index]
+    answer = session.user_answers[index]
+    requires_semantic_grading = question.type == "short_answer"
+    correct = None if requires_semantic_grading else answers_match(question, answer)
+    is_last = index == len(session.questions) - 1
+    return AnswerResult(
+        evaluation_status=("pending_ai" if requires_semantic_grading else "final"),
+        correct=correct,
+        correct_answer=None if requires_semantic_grading else question.answer,
+        explanation=None if requires_semantic_grading else question.explanation,
+        is_last=is_last,
+        next_index=index + 1 if not is_last else None,
+    )
+
+
+async def submit_answer(
+    session_id: str,
+    answer: str,
+    *,
+    question_index: int | None = None,
+    before_commit: Callable[[], Awaitable[None]] | None = None,
+) -> AnswerResult:
+    session = sessions.get(session_id)
+    if not session:
+        raise SessionNotFoundError(f"Session {session_id} not found")
+    response = await apply_answer_to_session(
+        session,
+        answer,
+        question_index=question_index,
+        before_commit=before_commit,
+    )
+    if response.is_last:
         # 画像写回统一使用 memory bank API；失败时不影响答题结果返回。
         if not any(question.type == "short_answer" for question in session.questions):
             try:
@@ -182,17 +229,10 @@ async def submit_answer(
             except Exception as e:
                 logger.warning(f"[session] 画像写回失败（不影响答题结果）: {e}")
 
-    return AnswerResult(
-        evaluation_status=("pending_ai" if requires_semantic_grading else "final"),
-        correct=correct,
-        correct_answer=None if requires_semantic_grading else question.answer,
-        explanation=None if requires_semantic_grading else question.explanation,
-        is_last=is_last,
-        next_index=current_index + 1 if not is_last else None,
-    )
+    return response
 
 
-async def _write_back_profile(session: QuizSession, session_id: str) -> None:
+async def write_objective_profile(session: QuizSession, session_id: str) -> None:
     """会话完成后把成绩写回画像（session_briefs / error_log / mastery EMA / weak_points）。
 
     与 adapt_writer 走同一套 commit_learning_memory，
@@ -232,10 +272,13 @@ async def _write_back_profile(session: QuizSession, session_id: str) -> None:
     )
 
 
-async def get_result(session_id: str) -> SessionResult:
-    session = sessions.get(session_id)
-    if not session:
-        raise SessionNotFoundError(f"Session {session_id} not found")
+async def _write_back_profile(session: QuizSession, session_id: str) -> None:
+    """Backward-compatible legacy hook used by in-memory session tests/callers."""
+    await write_objective_profile(session, session_id)
+
+
+def build_result(session: QuizSession) -> SessionResult:
+    """Build the public completed result from an explicitly supplied session."""
     if session.status != "completed":
         raise SessionConflictError("Session not completed")
 
@@ -280,7 +323,7 @@ async def get_result(session_id: str) -> SessionResult:
 
     total = len(session.questions)
     return SessionResult(
-        session_id=session_id,
+        session_id=session.session_id,
         document_id=session.document_id,
         total=total,
         correct=correct_count,
@@ -295,3 +338,11 @@ async def get_result(session_id: str) -> SessionResult:
         ),
         details=details,
     )
+
+
+async def get_result(session_id: str) -> SessionResult:
+    """Legacy result wrapper for the in-memory Adaptive/Tutor cache."""
+    session = sessions.get(session_id)
+    if not session:
+        raise SessionNotFoundError(f"Session {session_id} not found")
+    return build_result(session)

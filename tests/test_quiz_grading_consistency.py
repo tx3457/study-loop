@@ -1,20 +1,29 @@
 import asyncio
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from fastapi import HTTPException
+from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from agents import adapt_agent
+from main import app
 from models.grader import AIFeedback
 from models.quiz import Question
 from models.report import TopicMastery, _ReportCore
-from models.session import AnswerRequest, QuizSession, SessionStartRequest
+from models.session import (
+    AnswerRequest,
+    QuizSession,
+    QuizSessionAggregate,
+    SessionStartRequest,
+)
 from routers import session as session_router
 from services import grader as grader_service
 from services import report as report_service
 from services import session as session_service
+from services.quiz_sessions import QuizSessionStore
 
 
 def _question(
@@ -58,6 +67,18 @@ def _feedback(*, is_correct: bool = True, label: str = "feedback") -> AIFeedback
     )
 
 
+def _durable_aggregate(session: QuizSession) -> QuizSessionAggregate:
+    last_index = len(session.user_answers) - 1
+    return QuizSessionAggregate(
+        session=session,
+        last_answer_index=last_index,
+        last_answer_result=session_service.answer_result_for_index(
+            session,
+            last_index,
+        ),
+    )
+
+
 def _report_response():
     core = _ReportCore(
         topic_mastery=[
@@ -84,14 +105,12 @@ class TestQuizGradingConsistency(unittest.IsolatedAsyncioTestCase):
         session_service.sessions.clear()
         grader_service._grade_locks.clear()
         report_service._report_locks.clear()
-        session_router._answer_locks.clear()
 
     def tearDown(self):
         session_service.sessions.clear()
         session_service.sessions.update(self.original_sessions)
         grader_service._grade_locks.clear()
         report_service._report_locks.clear()
-        session_router._answer_locks.clear()
 
     async def test_short_answer_is_pending_until_semantic_grading(self):
         session_id = "short-pending"
@@ -187,134 +206,6 @@ class TestQuizGradingConsistency(unittest.IsolatedAsyncioTestCase):
             ["first", "second"],
         )
 
-    async def test_report_reuses_canonical_grade_and_writes_memory_once(self):
-        session_id = "report-canonical"
-        session_service.sessions[session_id] = _completed_session(session_id)
-        llm_grade = AsyncMock(return_value=_feedback())
-        report_llm = AsyncMock(return_value=_report_response())
-        memory_calls = 0
-
-        async def commit_memory(*args, on_core_written=None, **kwargs):
-            nonlocal memory_calls
-            memory_calls += 1
-            if on_core_written is not None:
-                on_core_written()
-
-        with (
-            patch.object(grader_service, "_llm_grade", llm_grade),
-            patch.object(report_service, "llm_parse", report_llm),
-            patch.object(
-                session_router,
-                "commit_learning_memory",
-                side_effect=commit_memory,
-            ),
-        ):
-            first = await session_router.report(session_id)
-            second = await session_router.report(session_id)
-
-        self.assertEqual(first.model_dump(), second.model_dump())
-        self.assertEqual(first.overall_score, 1.0)
-        llm_grade.assert_awaited_once()
-        report_llm.assert_awaited_once()
-        self.assertEqual(memory_calls, 1)
-
-    async def test_memory_retry_reuses_successful_grading(self):
-        session_id = "memory-retry"
-        session_service.sessions[session_id] = _completed_session(session_id)
-        llm_grade = AsyncMock(return_value=_feedback())
-        successful_commits = 0
-
-        async def successful_commit(*args, on_core_written=None, **kwargs):
-            nonlocal successful_commits
-            successful_commits += 1
-            if on_core_written is not None:
-                on_core_written()
-
-        with patch.object(grader_service, "_llm_grade", llm_grade):
-            with patch.object(
-                session_router,
-                "commit_learning_memory",
-                AsyncMock(side_effect=RuntimeError("memory unavailable")),
-            ):
-                with self.assertRaisesRegex(RuntimeError, "memory unavailable"):
-                    await session_router.grade(session_id)
-
-            with patch.object(
-                session_router,
-                "commit_learning_memory",
-                side_effect=successful_commit,
-            ):
-                grading = await session_router.grade(session_id)
-
-        self.assertEqual(grading.correct, 1)
-        llm_grade.assert_awaited_once()
-        self.assertEqual(successful_commits, 1)
-
-    async def test_report_retry_does_not_repeat_grading_or_memory(self):
-        session_id = "report-retry"
-        session_service.sessions[session_id] = _completed_session(session_id)
-        llm_grade = AsyncMock(return_value=_feedback())
-        report_llm = AsyncMock(
-            side_effect=[RuntimeError("report unavailable"), _report_response()]
-        )
-        memory_calls = 0
-
-        async def commit_memory(*args, on_core_written=None, **kwargs):
-            nonlocal memory_calls
-            memory_calls += 1
-            if on_core_written is not None:
-                on_core_written()
-
-        with (
-            patch.object(grader_service, "_llm_grade", llm_grade),
-            patch.object(report_service, "llm_parse", report_llm),
-            patch.object(
-                session_router,
-                "commit_learning_memory",
-                side_effect=commit_memory,
-            ),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "report unavailable"):
-                await session_router.report(session_id)
-            report = await session_router.report(session_id)
-
-        self.assertEqual(report.overall_score, 1.0)
-        llm_grade.assert_awaited_once()
-        self.assertEqual(report_llm.await_count, 2)
-        self.assertEqual(memory_calls, 1)
-
-    async def test_concurrent_grade_and_report_share_canonical_state(self):
-        session_id = "grade-report-concurrent"
-        session_service.sessions[session_id] = _completed_session(session_id)
-        llm_grade = AsyncMock(return_value=_feedback())
-        report_llm = AsyncMock(return_value=_report_response())
-        memory_calls = 0
-
-        async def commit_memory(*args, on_core_written=None, **kwargs):
-            nonlocal memory_calls
-            memory_calls += 1
-            if on_core_written is not None:
-                on_core_written()
-
-        with (
-            patch.object(grader_service, "_llm_grade", llm_grade),
-            patch.object(report_service, "llm_parse", report_llm),
-            patch.object(
-                session_router,
-                "commit_learning_memory",
-                side_effect=commit_memory,
-            ),
-        ):
-            grading, learning_report = await asyncio.gather(
-                session_router.grade(session_id),
-                session_router.report(session_id),
-            )
-
-        self.assertEqual(grading.score, learning_report.overall_score)
-        llm_grade.assert_awaited_once()
-        report_llm.assert_awaited_once()
-        self.assertEqual(memory_calls, 1)
-
     async def test_cached_report_still_rejects_noncanonical_grading(self):
         session_id = "cached-report-validation"
         session_service.sessions[session_id] = _completed_session(session_id)
@@ -379,12 +270,6 @@ class TestQuizGradingConsistency(unittest.IsolatedAsyncioTestCase):
             f"adapt_writer:{session_id}",
         )
 
-    async def test_missing_grade_does_not_allocate_router_lock(self):
-        with self.assertRaises(HTTPException) as raised:
-            await session_router.grade("missing-session")
-        self.assertEqual(raised.exception.status_code, 404)
-        self.assertNotIn("missing-session", session_router._answer_locks)
-
     def test_answer_contract_rejects_blank_and_unbounded_input(self):
         with self.assertRaises(ValidationError):
             AnswerRequest(answer="   ", question_index=0)
@@ -405,6 +290,186 @@ class TestQuizGradingConsistency(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(invalid=invalid), self.assertRaises(ValidationError):
                 SessionStartRequest(**base, **invalid)
+
+
+class TestDurableWebQuizGrading(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.db_path = str(Path(self.tempdir.name) / "quiz-sessions.sqlite3")
+        self.client = TestClient(app, raise_server_exceptions=False)
+        self.store_patch = None
+        self._install_store(QuizSessionStore(sqlite_path=self.db_path))
+
+    def tearDown(self):
+        if self.store_patch is not None:
+            self.store_patch.stop()
+        self.client.close()
+        self.tempdir.cleanup()
+
+    def _install_store(self, store: QuizSessionStore) -> None:
+        if self.store_patch is not None:
+            self.store_patch.stop()
+        self.store = store
+        self.store_patch = patch.object(session_router, "quiz_sessions", store)
+        self.store_patch.start()
+
+    def _reopen_store(self) -> None:
+        self._install_store(QuizSessionStore(sqlite_path=self.db_path))
+
+    def _seed(self, session: QuizSession) -> None:
+        asyncio.run(self.store.create(_durable_aggregate(session)))
+
+    def _inspect(self, session_id: str):
+        return asyncio.run(self.store.inspect(session_id))
+
+    @staticmethod
+    def _memory_writer(counter: dict[str, int]):
+        async def commit_memory(*args, on_core_written=None, **kwargs):
+            counter["calls"] += 1
+            if on_core_written is not None:
+                on_core_written()
+
+        return commit_memory
+
+    def test_partial_grade_checkpoint_survives_failure_and_store_reopen(self):
+        session_id = "durable-partial-grading"
+        self._seed(
+            _completed_session(
+                session_id,
+                questions=[
+                    _question(prompt="Question one"),
+                    _question(prompt="Question two"),
+                ],
+                answers=["Answer one", "Answer two"],
+            )
+        )
+        llm_grade = AsyncMock(
+            side_effect=[_feedback(label="first"), RuntimeError("provider down")]
+        )
+        memory = {"calls": 0}
+
+        with (
+            patch.object(grader_service, "_llm_grade", llm_grade),
+            patch.object(
+                session_router,
+                "commit_learning_memory",
+                side_effect=self._memory_writer(memory),
+            ),
+        ):
+            failed = self.client.post(f"/session/{session_id}/grade")
+            self.assertEqual(failed.status_code, 500, failed.text)
+
+            checkpoint = self._inspect(session_id)
+            self.assertIsNotNone(checkpoint)
+            self.assertFalse(checkpoint.busy)
+            self.assertEqual(
+                list(checkpoint.aggregate.session.question_grades),
+                [0],
+            )
+            self.assertIsNone(checkpoint.aggregate.session.grading_report)
+
+            self._reopen_store()
+            llm_grade.side_effect = None
+            llm_grade.return_value = _feedback(label="second")
+            completed = self.client.post(f"/session/{session_id}/grade")
+
+        self.assertEqual(completed.status_code, 200, completed.text)
+        self.assertEqual(
+            [grade["ai_feedback"] for grade in completed.json()["grades"]],
+            ["first", "second"],
+        )
+        self.assertEqual(llm_grade.await_count, 3)
+        self.assertEqual(memory["calls"], 1)
+
+        persisted = self._inspect(session_id)
+        self.assertIsNotNone(persisted.aggregate.session.grading_report)
+        self.assertTrue(persisted.aggregate.session.profile_written)
+
+    def test_memory_retry_after_reopen_reuses_canonical_grading(self):
+        session_id = "durable-memory-retry"
+        self._seed(_completed_session(session_id))
+        llm_grade = AsyncMock(return_value=_feedback())
+        successful_memory = {"calls": 0}
+
+        with patch.object(grader_service, "_llm_grade", llm_grade):
+            with patch.object(
+                session_router,
+                "commit_learning_memory",
+                AsyncMock(side_effect=RuntimeError("memory unavailable")),
+            ):
+                failed = self.client.post(f"/session/{session_id}/grade")
+
+            self.assertEqual(failed.status_code, 500, failed.text)
+            checkpoint = self._inspect(session_id)
+            self.assertIsNotNone(checkpoint.aggregate.session.grading_report)
+            self.assertFalse(checkpoint.aggregate.session.profile_written)
+            self.assertFalse(checkpoint.busy)
+
+            self._reopen_store()
+            with patch.object(
+                session_router,
+                "commit_learning_memory",
+                side_effect=self._memory_writer(successful_memory),
+            ):
+                completed = self.client.post(f"/session/{session_id}/grade")
+
+        self.assertEqual(completed.status_code, 200, completed.text)
+        llm_grade.assert_awaited_once()
+        self.assertEqual(successful_memory["calls"], 1)
+        self.assertTrue(
+            self._inspect(session_id).aggregate.session.profile_written
+        )
+
+    def test_report_retry_and_reopen_reuses_canonical_caches_and_memory(self):
+        session_id = "durable-report-retry"
+        self._seed(_completed_session(session_id))
+        llm_grade = AsyncMock(return_value=_feedback())
+        report_llm = AsyncMock(
+            side_effect=[RuntimeError("report unavailable"), _report_response()]
+        )
+        memory = {"calls": 0}
+
+        with (
+            patch.object(grader_service, "_llm_grade", llm_grade),
+            patch.object(report_service, "llm_parse", report_llm),
+            patch.object(
+                session_router,
+                "commit_learning_memory",
+                side_effect=self._memory_writer(memory),
+            ),
+        ):
+            failed = self.client.post(f"/session/{session_id}/report")
+            self.assertEqual(failed.status_code, 500, failed.text)
+
+            checkpoint = self._inspect(session_id)
+            self.assertIsNotNone(checkpoint.aggregate.session.grading_report)
+            self.assertTrue(checkpoint.aggregate.session.profile_written)
+            self.assertIsNone(checkpoint.aggregate.session.learning_report)
+            self.assertFalse(checkpoint.busy)
+
+            self._reopen_store()
+            completed = self.client.post(f"/session/{session_id}/report")
+            self.assertEqual(completed.status_code, 200, completed.text)
+
+            self._reopen_store()
+            cached = self.client.post(f"/session/{session_id}/report")
+
+        self.assertEqual(cached.status_code, 200, cached.text)
+        self.assertEqual(completed.json()["summary"], cached.json()["summary"])
+        llm_grade.assert_awaited_once()
+        self.assertEqual(report_llm.await_count, 2)
+        self.assertEqual(memory["calls"], 1)
+
+        persisted = self._inspect(session_id)
+        self.assertIsNotNone(persisted.aggregate.session.grading_report)
+        self.assertIsNotNone(persisted.aggregate.session.learning_report)
+        self.assertTrue(persisted.aggregate.session.profile_written)
+
+    def test_missing_durable_grade_is_http_404(self):
+        response = self.client.post("/session/missing-session/grade")
+
+        self.assertEqual(response.status_code, 404, response.text)
+        self.assertEqual(response.json()["code"], "quiz_session_not_found")
 
 
 if __name__ == "__main__":

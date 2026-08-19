@@ -1,16 +1,24 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { useLocation, useNavigate } from 'react-router-dom'
+import { useLocation } from 'react-router-dom'
 import DocumentPrerequisite from '../components/DocumentPrerequisite'
 import {
   createIdempotencyKey,
   generateReport,
   getDocuments,
   getSessionResult,
+  getSessionSnapshot,
   gradeSession,
-  isTerminalExecutionError,
   startSession,
+  startWrongQuestionPractice,
   submitAnswer,
 } from '../api/client'
+import {
+  clearQuizRecovery,
+  createStandardQuizRecovery,
+  readQuizRecovery,
+  sameQuizIntent,
+  writeQuizRecovery,
+} from '../state/quizRecovery'
 import './Quiz.css'
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -66,14 +74,96 @@ function isCorrectOption(option, correctAnswer) {
   )
 }
 
+class RecoverySupersededError extends Error {}
+
+function assertSessionSnapshot(
+  snapshot,
+  expectedSessionId,
+  expectedDocumentId,
+  expectedOrigin,
+) {
+  const valid = snapshot
+    && snapshot.schema_version === 1
+    && snapshot.session_id === expectedSessionId
+    && snapshot.document_id === expectedDocumentId
+    && snapshot.origin === expectedOrigin
+    && Number.isInteger(snapshot.revision)
+    && snapshot.revision >= 1
+    && ['active', 'completed'].includes(snapshot.status)
+    && Number.isInteger(snapshot.total)
+    && snapshot.total >= 1
+    && Number.isInteger(snapshot.answered_count)
+    && snapshot.answered_count >= 0
+    && snapshot.answered_count <= snapshot.total
+    && Array.isArray(snapshot.questions)
+    && snapshot.questions.length === snapshot.total
+    && typeof snapshot.expires_at === 'number'
+    && Number.isFinite(snapshot.expires_at)
+
+  if (!valid) throw new Error('服务端返回的答题快照无效，请稍后重试')
+  if (snapshot.status === 'active' && snapshot.answered_count >= snapshot.total) {
+    throw new Error('服务端返回的答题进度不一致，请稍后重试')
+  }
+  if (snapshot.status === 'completed' && snapshot.answered_count !== snapshot.total) {
+    throw new Error('服务端返回的答题结果不完整，请稍后重试')
+  }
+  return snapshot
+}
+
+function recoverySessionFromResponse(response) {
+  if (!response?.session_id) {
+    throw new Error('服务端没有返回可恢复的答题会话，请稍后重试')
+  }
+  return {
+    session_id: response.session_id,
+    // 兼容升级前的同源后端；新契约始终返回这两个字段。
+    revision: Number.isInteger(response.revision) && response.revision >= 1
+      ? response.revision
+      : 1,
+    expires_at: typeof response.expires_at === 'number' && Number.isFinite(response.expires_at)
+      ? response.expires_at
+      : Math.floor(Date.now() / 1000) + 3600,
+  }
+}
+
+function shouldClearQuizSession(error) {
+  return error?.status === 404
+    || error?.status === 410
+    || error?.code === 'quiz_session_corrupt'
+    || error?.code === 'side_effect_ambiguous'
+    || (
+      error?.code === 'idempotency_conflict'
+      && error?.reason === 'ambiguous'
+    )
+}
+
+function isPayloadMismatch(error) {
+  return error?.code === 'idempotency_conflict'
+    && error?.reason === 'payload_mismatch'
+}
+
+function isRecoveryBusyError(error) {
+  return error?.status === 409 && (
+    error?.reason === 'in_progress'
+    || error?.code === 'quiz_session_busy'
+  )
+}
+
 export default function Quiz() {
   const location = useLocation()
-  const navigate = useNavigate()
-  const practiceHydrated = useRef(false)
   const presetHydratedSearch = useRef(null)
 
+  const [recovery, setRecovery] = useState(() => readQuizRecovery())
+  const recoveryRef = useRef(recovery)
+  const [recoveryReady, setRecoveryReady] = useState(() => recovery == null)
+  const [recoveryAttempt, setRecoveryAttempt] = useState(0)
+  const recoveryInFlight = useRef(false)
+  const recoveryEpoch = useRef(0)
+  const recoveryRetryTimer = useRef(null)
+  const mountedRef = useRef(true)
+
   /* ── 状态 ──────────────────────────────────────────────────────── */
-  const [phase, setPhase] = useState('setup') // setup | loading | answering | feedback | results | grading | report
+  const [phase, setPhase] = useState(() => recovery ? 'loading' : 'setup') // setup | loading | answering | feedback | results | grading | report
   const [documents, setDocuments] = useState([])
   const [docsLoading, setDocsLoading] = useState(true)
   const [docsError, setDocsError] = useState(null)
@@ -108,7 +198,6 @@ export default function Quiz() {
   const [submitting, setSubmitting] = useState(false)
   const [advancing, setAdvancing] = useState(false)
   const advancingInFlight = useRef(false)
-  const answerIdempotencyKey = useRef(null)
 
   // 结果
   const [result, setResult] = useState(null)
@@ -116,6 +205,22 @@ export default function Quiz() {
   // 计时器
   const [elapsed, setElapsed] = useState(0)
   const timerRef = useRef(null)
+
+  const persistRecovery = useCallback((value) => {
+    if (!mountedRef.current) return null
+    const stored = writeQuizRecovery(value)
+    if (!stored) return null
+    recoveryRef.current = stored
+    setRecovery(stored)
+    return stored
+  }, [])
+
+  const discardRecovery = useCallback(() => {
+    if (!mountedRef.current) return
+    clearQuizRecovery()
+    recoveryRef.current = null
+    setRecovery(null)
+  }, [])
 
   /* ── 加载文档列表 ──────────────────────────────────────────────── */
   const loadDocuments = useCallback(async () => {
@@ -125,7 +230,7 @@ export default function Quiz() {
       const data = await getDocuments()
       const nextDocuments = data.documents || []
       setDocuments(nextDocuments)
-      setConfig(current => nextDocuments.includes(current.document_id)
+      setConfig(current => recoveryRef.current || nextDocuments.includes(current.document_id)
         ? current
         : { ...current, document_id: '' })
     } catch (err) {
@@ -139,6 +244,7 @@ export default function Quiz() {
 
   /* ── 计时器 ────────────────────────────────────────────────────── */
   const startTimer = useCallback(() => {
+    clearInterval(timerRef.current)
     setElapsed(0)
     timerRef.current = setInterval(() => setElapsed(t => t + 1), 1000)
   }, [])
@@ -148,44 +254,262 @@ export default function Quiz() {
     timerRef.current = null
   }, [])
 
-  useEffect(() => () => clearInterval(timerRef.current), [])
-
   useEffect(() => {
-    const practice = location.state?.wrongQuestionPractice
-    if (practiceHydrated.current || !practice?.session_id || !practice?.questions?.length) {
-      return
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      clearInterval(timerRef.current)
+      clearTimeout(recoveryRetryTimer.current)
+      // React StrictMode immediately mounts effects again after its
+      // development-only cleanup. Defer epoch invalidation one microtask so
+      // that simulated cleanup does not strand a valid recovery in flight,
+      // while a real unmount still invalidates every late response.
+      queueMicrotask(() => {
+        if (mountedRef.current) return
+        recoveryEpoch.current += 1
+        gradingRequestEpoch.current += 1
+        reportRequestEpoch.current += 1
+      })
     }
+  }, [])
 
-    practiceHydrated.current = true
-    presetHydratedSearch.current = ''
+  const hydrateSnapshot = useCallback((snapshot, record) => {
+    const acknowledgedCount = Math.min(
+      record.acknowledged_answer_count,
+      snapshot.answered_count,
+    )
+    const hasUnacknowledgedFeedback = Boolean(
+      snapshot.last_answer_result
+      && snapshot.last_answer_index === snapshot.answered_count - 1
+      && snapshot.answered_count > acknowledgedCount
+    )
+    const updatedRecord = {
+      ...record,
+      session: {
+        session_id: snapshot.session_id,
+        revision: snapshot.revision,
+        expires_at: snapshot.expires_at,
+      },
+      acknowledged_answer_count: acknowledgedCount,
+      pending_answer: null,
+    }
+    const stored = persistRecovery(updatedRecord)
+
     gradingRequestEpoch.current += 1
     reportRequestEpoch.current += 1
     gradingInFlight.current = false
     reportingInFlight.current = false
-    answerIdempotencyKey.current = null
-    setSessionId(practice.session_id)
-    setQuestions(practice.questions)
-    setConfig(current => ({
-      ...current,
-      document_id: practice.document_id || current.document_id,
-      description: '错题重练',
-      count: practice.total || practice.questions.length,
-    }))
-    setCurrentIdx(0)
-    setSelectedAnswer('')
-    setFeedback(null)
-    setResult(null)
-    setError(null)
-    setPhase('answering')
-    startTimer()
-    navigate(location.pathname, { replace: true, state: null })
-  }, [location.pathname, location.state, navigate, startTimer])
+    setGrading(false)
+    setReporting(false)
+    setSubmitting(false)
+    advancingInFlight.current = false
+    setAdvancing(false)
+
+    setSessionId(snapshot.session_id)
+    setQuestions(snapshot.questions)
+    setConfig(current => record.intent.kind === 'standard'
+      ? record.intent.request
+      : {
+          ...current,
+          document_id: record.intent.request.document_id,
+          description: '错题重练',
+          count: snapshot.total,
+          user_id: record.intent.request.user_id,
+        })
+    setResult(snapshot.result)
+    setGradingReport(snapshot.grading_report)
+    setLearningReport(snapshot.learning_report)
+
+    if (snapshot.learning_report) {
+      stopTimer()
+      setCurrentIdx(Math.max(snapshot.total - 1, 0))
+      setSelectedAnswer('')
+      setFeedback(null)
+      setPhase('report')
+    } else if (snapshot.grading_report) {
+      stopTimer()
+      setCurrentIdx(Math.max(snapshot.total - 1, 0))
+      setSelectedAnswer('')
+      setFeedback(null)
+      setPhase('grading')
+    } else if (hasUnacknowledgedFeedback) {
+      startTimer()
+      setCurrentIdx(snapshot.last_answer_index)
+      setSelectedAnswer(snapshot.last_user_answer || '')
+      setFeedback(snapshot.last_answer_result)
+      setPhase('feedback')
+    } else if (snapshot.status === 'completed') {
+      stopTimer()
+      setCurrentIdx(Math.max(snapshot.total - 1, 0))
+      setSelectedAnswer('')
+      setFeedback(null)
+      setPhase('results')
+    } else {
+      startTimer()
+      setCurrentIdx(snapshot.answered_count)
+      setSelectedAnswer('')
+      setFeedback(null)
+      setPhase('answering')
+    }
+
+    setRecoveryReady(true)
+    setError(stored ? null : '浏览器无法更新恢复进度，请不要刷新页面')
+  }, [persistRecovery, startTimer, stopTimer])
+
+  const recoverQuiz = useCallback(async (epoch) => {
+    const assertCurrent = () => {
+      if (epoch !== recoveryEpoch.current) throw new RecoverySupersededError()
+    }
+
+    let record = recoveryRef.current
+    if (!record) {
+      setRecoveryReady(true)
+      setPhase('setup')
+      return
+    }
+
+    if (!record.session) {
+      const response = record.intent.kind === 'standard'
+        ? await startSession({
+            ...record.intent.request,
+            idempotency_key: record.start_idempotency_key,
+          })
+        : await startWrongQuestionPractice(
+            record.intent.request.document_id,
+            record.intent.request.user_id,
+            record.start_idempotency_key,
+          )
+      assertCurrent()
+      record = persistRecovery({
+        ...record,
+        session: recoverySessionFromResponse(response),
+      })
+      if (!record) {
+        throw new Error('浏览器无法保存答题会话，请检查存储权限后重试')
+      }
+
+      const initialSnapshot = assertSessionSnapshot({
+        schema_version: 1,
+        origin: record.intent.kind === 'standard' ? 'standard' : 'wrong_question',
+        session_id: record.session.session_id,
+        document_id: record.intent.request.document_id,
+        revision: record.session.revision,
+        status: 'active',
+        total: response.total,
+        answered_count: 0,
+        questions: response.questions,
+        last_answer_index: null,
+        last_user_answer: null,
+        last_answer_result: null,
+        result: null,
+        grading_report: null,
+        learning_report: null,
+        expires_at: record.session.expires_at,
+        busy: false,
+      },
+      record.session.session_id,
+      record.intent.request.document_id,
+      record.intent.kind === 'standard' ? 'standard' : 'wrong_question')
+      hydrateSnapshot(initialSnapshot, record)
+      return
+    }
+
+    let snapshot = assertSessionSnapshot(
+      await getSessionSnapshot(record.session.session_id),
+      record.session.session_id,
+      record.intent.request.document_id,
+      record.intent.kind === 'standard' ? 'standard' : 'wrong_question',
+    )
+    assertCurrent()
+    if (snapshot.busy) {
+      const busyError = new Error('答题进度正在同步，稍后会自动重试')
+      busyError.status = 409
+      busyError.code = 'quiz_session_busy'
+      busyError.reason = 'in_progress'
+      throw busyError
+    }
+
+    const pendingAnswer = record.pending_answer
+    if (pendingAnswer && snapshot.answered_count <= pendingAnswer.question_index) {
+      if (
+        snapshot.status !== 'active'
+        || snapshot.answered_count !== pendingAnswer.question_index
+      ) {
+        throw new Error('待提交答案与服务端进度不一致，请重新加载')
+      }
+
+      await submitAnswer(record.session.session_id, {
+        answer: pendingAnswer.answer,
+        question_index: pendingAnswer.question_index,
+        idempotency_key: pendingAnswer.idempotency_key,
+      })
+      assertCurrent()
+      snapshot = assertSessionSnapshot(
+        await getSessionSnapshot(record.session.session_id),
+        record.session.session_id,
+        record.intent.request.document_id,
+        record.intent.kind === 'standard' ? 'standard' : 'wrong_question',
+      )
+      assertCurrent()
+      if (snapshot.busy) {
+        const busyError = new Error('答案正在同步，稍后会自动重试')
+        busyError.status = 409
+        busyError.code = 'quiz_session_busy'
+        busyError.reason = 'in_progress'
+        throw busyError
+      }
+    }
+
+    if (pendingAnswer && snapshot.answered_count <= pendingAnswer.question_index) {
+      throw new Error('答案尚未写入服务端，请重试恢复')
+    }
+
+    hydrateSnapshot(snapshot, record)
+  }, [hydrateSnapshot, persistRecovery])
 
   useEffect(() => {
-    const practice = location.state?.wrongQuestionPractice
-    const hasPendingPractice = Boolean(practice?.session_id && practice?.questions?.length)
+    if (recoveryReady || recoveryInFlight.current || !recoveryRef.current) return
+    void recoveryAttempt
+    recoveryInFlight.current = true
+    const epoch = ++recoveryEpoch.current
+
+    void recoverQuiz(epoch).catch(err => {
+      if (err instanceof RecoverySupersededError || epoch !== recoveryEpoch.current) return
+      const current = recoveryRef.current
+      let retryDelay = null
+      if (shouldClearQuizSession(err) || (isPayloadMismatch(err) && !current?.session)) {
+        discardRecovery()
+        setRecoveryReady(true)
+        setSessionId(null)
+        setQuestions([])
+        setPhase('setup')
+      } else if (isPayloadMismatch(err) && current?.session) {
+        const reset = persistRecovery({ ...current, pending_answer: null })
+        setPhase('loading')
+        if (reset) retryDelay = 0
+      } else {
+        setPhase('loading')
+      }
+      setError(err.message)
+
+      if (isRecoveryBusyError(err)) {
+        retryDelay = 800
+      }
+      if (retryDelay != null) {
+        clearTimeout(recoveryRetryTimer.current)
+        recoveryRetryTimer.current = setTimeout(
+          () => setRecoveryAttempt(attempt => attempt + 1),
+          retryDelay,
+        )
+      }
+    }).finally(() => {
+      if (epoch === recoveryEpoch.current) recoveryInFlight.current = false
+    })
+  }, [discardRecovery, persistRecovery, recoverQuiz, recoveryAttempt, recoveryReady])
+
+  useEffect(() => {
     if (
-      hasPendingPractice
+      !recoveryReady
       || phase !== 'setup'
       || docsLoading
       || docsError
@@ -225,35 +549,54 @@ export default function Quiz() {
       description: topic,
     }))
     setError(null)
-  }, [docsError, docsLoading, documents, location.search, location.state, phase])
+  }, [docsError, docsLoading, documents, location.search, phase, recoveryReady])
 
   /* ── 开始答题 ──────────────────────────────────────────────────── */
-  const handleStart = async () => {
+  const handleStart = () => {
     if (!config.document_id) return
     gradingRequestEpoch.current += 1
     reportRequestEpoch.current += 1
     gradingInFlight.current = false
     reportingInFlight.current = false
-    answerIdempotencyKey.current = null
     setPhase('loading')
     setError(null)
     setGradingReport(null)
     setLearningReport(null)
 
+    let nextRecovery
     try {
-      const data = await startSession(config)
-      setSessionId(data.session_id)
-      setQuestions(data.questions)
-      setCurrentIdx(0)
-      setSelectedAnswer('')
-      setFeedback(null)
-      setResult(null)
-      setPhase('answering')
-      startTimer()
+      const startRequest = {
+        ...config,
+        document_id: config.document_id.trim(),
+        description: config.description.trim() || '全文',
+        user_id: config.user_id.trim(),
+      }
+      const intent = { kind: 'standard', request: startRequest }
+      const existing = readQuizRecovery()
+      nextRecovery = existing
+        && !existing.session
+        && sameQuizIntent(existing.intent, intent)
+        ? existing
+        : createStandardQuizRecovery(startRequest, createIdempotencyKey())
     } catch (err) {
       setError(err.message)
       setPhase('setup')
+      return
     }
+    if (!nextRecovery || !persistRecovery(nextRecovery)) {
+      setError('浏览器无法保存恢复进度，请检查存储权限后重试')
+      setPhase('setup')
+      return
+    }
+
+    setSessionId(null)
+    setQuestions([])
+    setCurrentIdx(0)
+    setSelectedAnswer('')
+    setFeedback(null)
+    setResult(null)
+    setRecoveryReady(false)
+    setRecoveryAttempt(attempt => attempt + 1)
   }
 
   /* ── 提交答案 ──────────────────────────────────────────────────── */
@@ -261,24 +604,71 @@ export default function Quiz() {
     const answer = selectedAnswer.trim()
     if (!answer || submitting) return
     const questionIndex = currentIdx
+    let record = recoveryRef.current
+    if (!record?.session || record.session.session_id !== sessionId) {
+      setError('当前答题会话无法恢复，请重新开始')
+      return
+    }
+
+    const pendingAnswer = record.pending_answer || {
+      idempotency_key: createIdempotencyKey(),
+      question_index: questionIndex,
+      answer,
+    }
+    if (
+      pendingAnswer.question_index !== questionIndex
+      || pendingAnswer.answer !== answer
+    ) {
+      setError('上一次答案仍待确认，请先重试原答案')
+      return
+    }
+    record = persistRecovery({ ...record, pending_answer: pendingAnswer })
+    if (!record) {
+      setError('浏览器无法保存待提交答案，请检查存储权限后重试')
+      return
+    }
+
     setSubmitting(true)
     setError(null)
 
     try {
-      const idempotencyKey = answerIdempotencyKey.current || createIdempotencyKey()
-      answerIdempotencyKey.current = idempotencyKey
       const fb = await submitAnswer(sessionId, {
         answer,
         question_index: questionIndex,
-        idempotency_key: idempotencyKey,
+        idempotency_key: pendingAnswer.idempotency_key,
       })
-      answerIdempotencyKey.current = null
+      persistRecovery({
+        ...record,
+        session: {
+          session_id: sessionId,
+          revision: Number.isInteger(fb.revision) && fb.revision >= 1
+            ? fb.revision
+            : record.session.revision,
+          expires_at: typeof fb.expires_at === 'number' && Number.isFinite(fb.expires_at)
+            ? fb.expires_at
+            : record.session.expires_at,
+        },
+        pending_answer: null,
+      })
       setFeedback(fb)
       setPhase('feedback')
     } catch (err) {
-      const staleState = err.status === 409 && !err.code
-      if (err.status === 404 || staleState || isTerminalExecutionError(err)) {
+      if (shouldClearQuizSession(err)) {
         clearSession()
+      } else if (isPayloadMismatch(err)) {
+        persistRecovery({ ...record, pending_answer: null })
+        setPhase('loading')
+        setRecoveryReady(false)
+        setRecoveryAttempt(attempt => attempt + 1)
+      } else if (
+        err.status === 409
+        && (err.reason === 'stale' || err.code === 'quiz_session_stale' || !err.code)
+      ) {
+        setPhase('loading')
+        setRecoveryReady(false)
+        setRecoveryAttempt(attempt => attempt + 1)
+      } else {
+        setPhase('answering')
       }
       setError(err.message)
     } finally {
@@ -291,10 +681,34 @@ export default function Quiz() {
     if (advancingInFlight.current) return
     advancingInFlight.current = true
     setAdvancing(true)
+    const record = recoveryRef.current
+    const acknowledgedRecord = record
+      ? persistRecovery({
+          ...record,
+          acknowledged_answer_count: Math.max(
+            record.acknowledged_answer_count,
+            currentIdx + 1,
+          ),
+        }) || record
+      : null
     if (feedback?.is_last) {
       stopTimer()
       try {
         const res = await getSessionResult(sessionId)
+        if (acknowledgedRecord) {
+          persistRecovery({
+            ...acknowledgedRecord,
+            session: {
+              session_id: sessionId,
+              revision: Number.isInteger(res.revision) && res.revision >= 1
+                ? res.revision
+                : acknowledgedRecord.session.revision,
+              expires_at: typeof res.expires_at === 'number' && Number.isFinite(res.expires_at)
+                ? res.expires_at
+                : acknowledgedRecord.session.expires_at,
+            },
+          })
+        }
         setResult(res)
         setPhase('results')
         if ((res.pending || 0) > 0) {
@@ -307,7 +721,6 @@ export default function Quiz() {
         setAdvancing(false)
       }
     } else {
-      answerIdempotencyKey.current = null
       setCurrentIdx(idx => idx + 1)
       setSelectedAnswer('')
       setFeedback(null)
@@ -319,11 +732,15 @@ export default function Quiz() {
 
   function clearSession() {
     stopTimer()
+    clearTimeout(recoveryRetryTimer.current)
+    recoveryEpoch.current += 1
+    recoveryInFlight.current = false
+    discardRecovery()
+    setRecoveryReady(true)
     gradingRequestEpoch.current += 1
     reportRequestEpoch.current += 1
     gradingInFlight.current = false
     reportingInFlight.current = false
-    answerIdempotencyKey.current = null
     setPhase('setup')
     setSessionId(null)
     setQuestions([])
@@ -348,7 +765,7 @@ export default function Quiz() {
   }
 
   const handleAnswerChange = (answer) => {
-    if (answer !== selectedAnswer) answerIdempotencyKey.current = null
+    if (recoveryRef.current?.pending_answer) return
     setSelectedAnswer(answer)
   }
 
@@ -362,10 +779,22 @@ export default function Quiz() {
     try {
       const report = await gradeSession(targetSessionId)
       if (requestEpoch !== gradingRequestEpoch.current) return
+      const record = recoveryRef.current
+      if (record?.session?.session_id === targetSessionId) {
+        persistRecovery({
+          ...record,
+          session: {
+            session_id: targetSessionId,
+            revision: report.revision,
+            expires_at: report.expires_at,
+          },
+        })
+      }
       setGradingReport(report)
       setPhase('grading')
     } catch (err) {
       if (requestEpoch !== gradingRequestEpoch.current) return
+      if (shouldClearQuizSession(err)) clearSession()
       setError(err.message)
     } finally {
       if (requestEpoch === gradingRequestEpoch.current) {
@@ -388,10 +817,22 @@ export default function Quiz() {
     try {
       const report = await generateReport(targetSessionId)
       if (requestEpoch !== reportRequestEpoch.current) return
+      const record = recoveryRef.current
+      if (record?.session?.session_id === targetSessionId) {
+        persistRecovery({
+          ...record,
+          session: {
+            session_id: targetSessionId,
+            revision: report.revision,
+            expires_at: report.expires_at,
+          },
+        })
+      }
       setLearningReport(report)
       setPhase('report')
     } catch (err) {
       if (requestEpoch !== reportRequestEpoch.current) return
+      if (shouldClearQuizSession(err)) clearSession()
       setError(err.message)
     } finally {
       if (requestEpoch === reportRequestEpoch.current) {
@@ -414,6 +855,14 @@ export default function Quiz() {
   const resultIncorrect = result?.incorrect
     ?? Math.max((result?.total || 0) - (result?.correct || 0) - resultPending, 0)
   const resultHasFinalScore = result != null && resultPending === 0 && typeof result.score === 'number'
+  const pendingAnswerLocked = Boolean(recovery?.pending_answer)
+
+  const retryRecovery = () => {
+    setError(null)
+    setPhase('loading')
+    setRecoveryReady(false)
+    setRecoveryAttempt(attempt => attempt + 1)
+  }
 
   return (
     <div className="quiz-page">
@@ -475,6 +924,7 @@ export default function Quiz() {
               placeholder="例如：第三章 向量检索"
               value={config.description}
               onChange={e => setConfig(c => ({ ...c, description: e.target.value }))}
+              maxLength={4000}
             />
           </div>
 
@@ -551,8 +1001,28 @@ export default function Quiz() {
       {phase === 'loading' && (
         <div className="quiz-loading" role="status" aria-live="polite">
           <div className="loading-spinner" />
-          <p className="loading-text">AI 正在出题...</p>
-          <p className="loading-hint">正在检索文档并生成题目，请稍候</p>
+          <p className="loading-text">
+            {recovery?.session
+              ? '正在恢复答题进度...'
+              : recovery?.intent.kind === 'wrong_question'
+                ? '正在准备错题重练...'
+                : 'AI 正在出题...'}
+          </p>
+          <p className="loading-hint">
+            {recovery?.session
+              ? '正在与服务端核对最新进度，请稍候'
+              : '正在检索文档并生成题目，请稍候'}
+          </p>
+          {error && recovery && (
+            <div className="result-actions">
+              <button type="button" className="state-action" onClick={retryRecovery}>
+                重试恢复
+              </button>
+              <button type="button" className="restart-btn" onClick={handleRestart}>
+                放弃本次进度
+              </button>
+            </div>
+          )}
         </div>
       )}
 
@@ -614,7 +1084,7 @@ export default function Quiz() {
                       className={optClass}
                       aria-pressed={isSelected}
                       onClick={() => phase === 'answering' && handleAnswerChange(opt)}
-                      disabled={phase === 'feedback' || submitting}
+                      disabled={phase === 'feedback' || submitting || pendingAnswerLocked}
                     >
                       <span className="option-letter">{letter}</span>
                       <span className="option-text">{opt}</span>
@@ -638,7 +1108,7 @@ export default function Quiz() {
                 placeholder="请输入你的答案..."
                 value={selectedAnswer}
                 onChange={e => handleAnswerChange(e.target.value)}
-                disabled={phase === 'feedback' || submitting}
+                disabled={phase === 'feedback' || submitting || pendingAnswerLocked}
                 maxLength={4000}
                 rows={3}
               />

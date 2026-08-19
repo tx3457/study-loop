@@ -95,12 +95,28 @@ export async function generateLearningPath(documentId) {
    ═══════════════════════════════════════════════════════════════════ */
 
 /** 开始答题会话 */
-export async function startSession({ document_id, description, count, difficulty, type, user_id }) {
+export async function startSession({
+  document_id,
+  description,
+  count,
+  difficulty,
+  type,
+  user_id,
+  idempotency_key,
+}) {
   return request('/session/start', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(idempotency_key ? { 'Idempotency-Key': idempotency_key } : {}),
+    },
     body: JSON.stringify({ document_id, description, count, difficulty, type, user_id }),
   })
+}
+
+/** 获取浏览器安全的会话快照，用于刷新与跨页面恢复 */
+export async function getSessionSnapshot(sessionId) {
+  return request(`/session/${encodeURIComponent(sessionId)}`)
 }
 
 /** 提交单题答案 */
@@ -150,11 +166,18 @@ export async function getWrongQuestions(documentId, userId = 'default_user') {
 }
 
 /** 用当前文档的持久错题创建一轮重练会话 */
-export async function startWrongQuestionPractice(documentId, userId = 'default_user') {
+export async function startWrongQuestionPractice(
+  documentId,
+  userId = 'default_user',
+  idempotencyKey,
+) {
   const query = new URLSearchParams({ user_id: userId })
   return request(
     `/wrong-questions/${encodeURIComponent(documentId)}/practice?${query}`,
-    { method: 'POST' },
+    {
+      method: 'POST',
+      headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {},
+    },
   )
 }
 

@@ -3,6 +3,8 @@ import { expect, test } from '@playwright/test'
 const API_PREFIX = '/api'
 const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const AUTONOMOUS_SESSION_KEY = 'study-loop.autonomous.awaiting.v1'
+const QUIZ_RECOVERY_KEY = 'study-loop.quiz.recovery.v1'
+const FUTURE_EXPIRES_AT = 4_102_444_800
 
 test.beforeEach(async ({ page }) => {
   await page.route('https://fonts.googleapis.com/**', route => route.fulfill({
@@ -611,8 +613,56 @@ test('quiz restart clears transient errors and prior grading and learning report
   expect(unexpectedRequests).toEqual([])
 })
 
-test('quiz retries an answer safely and rotates the key only when the answer changes', async ({ page }) => {
+test('quiz reload reuses the pending start key after the first response is lost', async ({ page }) => {
+  const startAttempts = []
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (request.method() === 'POST' && path === '/session/start') {
+      startAttempts.push({
+        body: await request.postDataJSON(),
+        key: await request.headerValue('idempotency-key'),
+      })
+      if (startAttempts.length === 1) {
+        return { status: 503, body: { detail: '出题响应暂时不可用' } }
+      }
+      return {
+        body: {
+          session_id: 'quiz-start-recovered',
+          total: 1,
+          questions: [{ index: 0, question: '恢复后的题目', options: ['A', 'B'], type: 'choice' }],
+          revision: 1,
+          expires_at: FUTURE_EXPIRES_AT,
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/quiz')
+  await page.getByRole('combobox', { name: '学习文档' }).selectOption('notes.md')
+  await page.getByRole('button', { name: '开始答题' }).click()
+  await expect(page.getByRole('alert')).toContainText('出题响应暂时不可用')
+
+  const pending = await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), QUIZ_RECOVERY_KEY)
+  expect(pending).toMatchObject({
+    intent: { kind: 'standard', request: { document_id: 'notes.md' } },
+    session: null,
+  })
+  expect(pending.start_idempotency_key).toMatch(UUID_V4_PATTERN)
+
+  await page.reload()
+  await expect(page.getByText('恢复后的题目')).toBeVisible()
+  expect(startAttempts).toHaveLength(2)
+  expect(startAttempts[1].body).toEqual(startAttempts[0].body)
+  expect(startAttempts[1].key).toBe(startAttempts[0].key)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('quiz reload reconciles a pending answer and replays the exact request key', async ({ page }) => {
   const answerAttempts = []
+  let snapshotReads = 0
   const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
     if (request.method() === 'GET' && path === '/documents') {
       return { body: { documents: ['notes.md'] } }
@@ -623,6 +673,53 @@ test('quiz retries an answer safely and rotates the key only when the answer cha
           session_id: 'quiz-retry',
           total: 1,
           questions: [{ index: 0, question: '请选择首字母', options: ['Alpha', 'Beta'] }],
+          revision: 1,
+          expires_at: FUTURE_EXPIRES_AT,
+        },
+      }
+    }
+    if (request.method() === 'GET' && path === '/session/quiz-retry') {
+      snapshotReads += 1
+      const answered = snapshotReads > 1
+      return {
+        body: {
+          schema_version: 1,
+          origin: 'standard',
+          session_id: 'quiz-retry',
+          document_id: 'notes.md',
+          revision: answered ? 2 : 1,
+          status: answered ? 'completed' : 'active',
+          total: 1,
+          answered_count: answered ? 1 : 0,
+          questions: [{ index: 0, question: '请选择首字母', options: ['Alpha', 'Beta'], type: 'choice' }],
+          last_answer_index: answered ? 0 : null,
+          last_user_answer: answered ? 'Alpha' : null,
+          last_answer_result: answered ? {
+            evaluation_status: 'final',
+            correct: true,
+            correct_answer: 'Alpha',
+            explanation: '已安全恢复答案',
+            is_last: true,
+            next_index: null,
+            revision: 2,
+            expires_at: FUTURE_EXPIRES_AT,
+          } : null,
+          result: answered ? {
+            session_id: 'quiz-retry',
+            document_id: 'notes.md',
+            total: 1,
+            correct: 1,
+            incorrect: 0,
+            pending: 0,
+            score: 1,
+            details: [],
+            revision: 2,
+            expires_at: FUTURE_EXPIRES_AT,
+          } : null,
+          grading_report: null,
+          learning_report: null,
+          expires_at: FUTURE_EXPIRES_AT,
+          busy: false,
         },
       }
     }
@@ -634,23 +731,16 @@ test('quiz retries an answer safely and rotates the key only when the answer cha
       if (answerAttempts.length === 1) {
         return { status: 503, body: { detail: '答案提交暂时不可用' } }
       }
-      if (answerAttempts.length === 2) {
-        return {
-          status: 409,
-          body: {
-            detail: '答案请求仍在处理中',
-            code: 'idempotency_conflict',
-            reason: 'in_progress',
-          },
-        }
-      }
       return {
         body: {
-          correct: false,
+          evaluation_status: 'final',
+          correct: true,
           correct_answer: 'Alpha',
-          explanation: '已记录修改后的答案',
+          explanation: '已安全恢复答案',
           is_last: true,
           next_index: null,
+          revision: 2,
+          expires_at: FUTURE_EXPIRES_AT,
         },
       }
     }
@@ -664,23 +754,123 @@ test('quiz retries an answer safely and rotates the key only when the answer cha
   await page.getByRole('button', { name: /Alpha/ }).click()
   await page.getByRole('button', { name: '提交答案' }).click()
   await expect(page.getByRole('alert')).toContainText('答案提交暂时不可用')
+  expect(await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), QUIZ_RECOVERY_KEY))
+    .toMatchObject({
+      session: { session_id: 'quiz-retry', revision: 1 },
+      pending_answer: { question_index: 0, answer: 'Alpha' },
+    })
 
-  await page.getByRole('button', { name: '提交答案' }).click()
-  await expect(page.getByRole('alert')).toContainText('答案请求仍在处理中')
-
-  await page.getByRole('button', { name: /Beta/ }).click()
-  await page.getByRole('button', { name: '提交答案' }).click()
-  await expect(page.getByText('已记录修改后的答案')).toBeVisible()
+  await page.reload()
+  await expect(page.getByText('已安全恢复答案')).toBeVisible()
 
   expect(answerAttempts.map(attempt => attempt.body)).toEqual([
     { answer: 'Alpha', question_index: 0 },
     { answer: 'Alpha', question_index: 0 },
-    { answer: 'Beta', question_index: 0 },
   ])
   expect(answerAttempts[0].key).toMatch(UUID_V4_PATTERN)
   expect(answerAttempts[1].key).toBe(answerAttempts[0].key)
-  expect(answerAttempts[2].key).toMatch(UUID_V4_PATTERN)
-  expect(answerAttempts[2].key).not.toBe(answerAttempts[0].key)
+  expect(snapshotReads).toBe(2)
+  expect(
+    await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), QUIZ_RECOVERY_KEY)
+  ).toMatchObject({ pending_answer: null, acknowledged_answer_count: 0 })
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('quiz snapshot restores a completed learning report without replaying mutations', async ({ page }) => {
+  const recovery = {
+    schema_version: 1,
+    intent: {
+      kind: 'standard',
+      request: {
+        document_id: 'notes.md',
+        description: '',
+        count: 1,
+        difficulty: 'medium',
+        type: 'choice',
+        user_id: 'default_user',
+      },
+    },
+    start_idempotency_key: '11111111-1111-4111-8111-111111111111',
+    session: {
+      session_id: 'quiz-report-recovered',
+      revision: 3,
+      expires_at: FUTURE_EXPIRES_AT,
+    },
+    acknowledged_answer_count: 1,
+    pending_answer: null,
+  }
+  await page.addInitScript(({ key, value }) => {
+    sessionStorage.setItem(key, JSON.stringify(value))
+  }, { key: QUIZ_RECOVERY_KEY, value: recovery })
+
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (request.method() === 'GET' && path === '/session/quiz-report-recovered') {
+      return {
+        body: {
+          schema_version: 1,
+          origin: 'standard',
+          session_id: 'quiz-report-recovered',
+          document_id: 'notes.md',
+          revision: 4,
+          status: 'completed',
+          total: 1,
+          answered_count: 1,
+          questions: [{ index: 0, question: '已完成题目', options: ['A', 'B'], type: 'choice' }],
+          last_answer_index: 0,
+          last_user_answer: 'A',
+          last_answer_result: {
+            evaluation_status: 'final',
+            correct: true,
+            correct_answer: 'A',
+            explanation: '回答正确',
+            is_last: true,
+            next_index: null,
+            revision: 4,
+            expires_at: FUTURE_EXPIRES_AT,
+          },
+          result: {
+            session_id: 'quiz-report-recovered',
+            document_id: 'notes.md',
+            total: 1,
+            correct: 1,
+            incorrect: 0,
+            pending: 0,
+            score: 1,
+            details: [],
+            revision: 4,
+            expires_at: FUTURE_EXPIRES_AT,
+          },
+          grading_report: {
+            session_id: 'quiz-report-recovered',
+            total: 1,
+            correct: 1,
+            score: 1,
+            grades: [],
+          },
+          learning_report: {
+            session_id: 'quiz-report-recovered',
+            document_id: 'notes.md',
+            overall_score: 1,
+            summary: '刷新后恢复的学习报告',
+            topic_mastery: [],
+            strengths: ['基础概念'],
+            weaknesses: [],
+            recommendations: ['继续复习'],
+          },
+          expires_at: FUTURE_EXPIRES_AT,
+          busy: false,
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/quiz')
+  await expect(page.getByRole('heading', { name: '学习评估报告' })).toBeVisible()
+  await expect(page.getByText('刷新后恢复的学习报告')).toBeVisible()
   expect(unexpectedRequests).toEqual([])
 })
 
@@ -2206,7 +2396,8 @@ test('a late learning-report response cannot replace a new quiz', async ({ page 
 
 test('Dashboard starts a persisted wrong-question practice in Quiz', async ({ page }) => {
   const problems = trackBrowserProblems(page)
-  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+  let practiceKey
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
     if (request.method() === 'GET' && path === '/documents') {
       return { body: { documents: ['retrieval.md'] } }
     }
@@ -2260,6 +2451,7 @@ test('Dashboard starts a persisted wrong-question practice in Quiz', async ({ pa
       request.method() === 'POST'
       && path === '/wrong-questions/retrieval.md/practice'
     ) {
+      practiceKey = await request.headerValue('idempotency-key')
       return {
         body: {
           session_id: 'practice-session',
@@ -2278,6 +2470,8 @@ test('Dashboard starts a persisted wrong-question practice in Quiz', async ({ pa
               type: 'short_answer',
             },
           ],
+          revision: 1,
+          expires_at: FUTURE_EXPIRES_AT,
         },
       }
     }
@@ -2292,6 +2486,8 @@ test('Dashboard starts a persisted wrong-question practice in Quiz', async ({ pa
           explanation: 'RRF 会融合多个有序结果集。',
           is_last: false,
           next_index: 1,
+          revision: 2,
+          expires_at: FUTURE_EXPIRES_AT,
         },
       }
     }
@@ -2304,6 +2500,16 @@ test('Dashboard starts a persisted wrong-question practice in Quiz', async ({ pa
 
   await expect(page).toHaveURL(/\/quiz$/)
   await expect(page.getByText('RRF 的作用是什么？')).toBeVisible()
+  expect(practiceKey).toMatch(UUID_V4_PATTERN)
+  expect(
+    await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), QUIZ_RECOVERY_KEY)
+  ).toMatchObject({
+    intent: {
+      kind: 'wrong_question',
+      request: { document_id: 'retrieval.md', user_id: 'default_user' },
+    },
+    session: { session_id: 'practice-session', revision: 1 },
+  })
   await page.getByRole('button', { name: '融合多路检索排名' }).click()
   await page.getByRole('button', { name: '提交答案' }).click()
   await page.getByRole('button', { name: '下一题' }).click()
@@ -2314,27 +2520,24 @@ test('Dashboard starts a persisted wrong-question practice in Quiz', async ({ pa
   expect(problems).toEqual([])
 })
 
-test('a late wrong-practice response cannot navigate away from a newly selected document', async ({ page }) => {
+test('Dashboard persists wrong-practice intent before navigation and reload reuses its key', async ({ page }) => {
   const problems = trackBrowserProblems(page)
-  let releasePractice
-  let markPracticeStarted
-  const practiceGate = new Promise(resolve => { releasePractice = resolve })
-  const practiceStarted = new Promise(resolve => { markPracticeStarted = resolve })
-  const entry = documentId => ({
-    entry_id: `${documentId}:0`,
-    document_id: documentId,
-    question: `${documentId} 的错题`,
+  const practiceKeys = []
+  const entry = {
+    entry_id: 'a.md:0',
+    document_id: 'a.md',
+    question: 'a.md 的错题',
     options: ['错误', '正确'],
     question_type: 'choice',
     correct_answer: '正确',
     explanation: '解析',
     user_answer: '错误',
     knowledge_gap: '测试',
-    session_id: `${documentId}-session`,
-  })
+    session_id: 'a.md-session',
+  }
   const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
     if (request.method() === 'GET' && path === '/documents') {
-      return { body: { documents: ['a.md', 'b.md'] } }
+      return { body: { documents: ['a.md'] } }
     }
     if (request.method() === 'GET' && path === '/user/default_user/sessions') {
       return { body: [] }
@@ -2342,24 +2545,23 @@ test('a late wrong-practice response cannot navigate away from a newly selected 
     if (request.method() === 'GET' && path === '/user/default_user/profile') {
       return {
         body: {
-          topic_mastery: { 'a.md': 0.3, 'b.md': 0.5 },
+          topic_mastery: { 'a.md': 0.3 },
           weak_points: [],
-          total_sessions: 2,
+          total_sessions: 1,
         },
       }
     }
     if (request.method() === 'GET' && path === '/wrong-questions/a.md') {
-      return { body: { document_id: 'a.md', total: 1, entries: [entry('a.md')] } }
-    }
-    if (request.method() === 'GET' && path === '/wrong-questions/b.md') {
-      return { body: { document_id: 'b.md', total: 1, entries: [entry('b.md')] } }
+      return { body: { document_id: 'a.md', total: 1, entries: [entry] } }
     }
     if (request.method() === 'POST' && path === '/wrong-questions/a.md/practice') {
-      markPracticeStarted()
-      await practiceGate
+      practiceKeys.push(await request.headerValue('idempotency-key'))
+      if (practiceKeys.length === 1) {
+        return { status: 503, body: { detail: '重练响应暂时不可用' } }
+      }
       return {
         body: {
-          session_id: 'late-a-practice',
+          session_id: 'recovered-a-practice',
           total: 1,
           questions: [{
             index: 0,
@@ -2367,6 +2569,8 @@ test('a late wrong-practice response cannot navigate away from a newly selected 
             options: ['错误', '正确'],
             type: 'choice',
           }],
+          revision: 1,
+          expires_at: FUTURE_EXPIRES_AT,
         },
       }
     }
@@ -2374,22 +2578,159 @@ test('a late wrong-practice response cannot navigate away from a newly selected 
   })
 
   await page.goto('/dashboard')
-  const documentSelect = page.getByLabel('错题文档')
-  await documentSelect.selectOption('a.md')
+  await page.getByLabel('错题文档').selectOption('a.md')
   await page.getByRole('button', { name: '开始重练（1）' }).click()
+  await expect(page).toHaveURL(/\/quiz$/)
+  await expect(page.getByRole('alert')).toContainText('重练响应暂时不可用')
+  const pending = await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), QUIZ_RECOVERY_KEY)
+  expect(pending).toMatchObject({
+    intent: {
+      kind: 'wrong_question',
+      request: { document_id: 'a.md', user_id: 'default_user' },
+    },
+    session: null,
+  })
+
+  await page.reload()
+  await expect(page.getByText('a.md 的错题')).toBeVisible()
+  expect(practiceKeys).toHaveLength(2)
+  expect(practiceKeys[0]).toMatch(UUID_V4_PATTERN)
+  expect(practiceKeys[1]).toBe(practiceKeys[0])
+  expect(unexpectedRequests).toEqual([])
+  expect(
+    problems.filter(problem => !problem.includes('503 (Service Unavailable)')),
+  ).toEqual([])
+})
+
+test('a response from an unmounted Quiz cannot overwrite a newer Dashboard recovery', async ({ page }) => {
+  const problems = trackBrowserProblems(page)
+  let releaseAnswer
+  let markAnswerStarted
+  let releasePractice
+  let markPracticeStarted
+  const answerGate = new Promise(resolve => { releaseAnswer = resolve })
+  const answerStarted = new Promise(resolve => { markAnswerStarted = resolve })
+  const practiceGate = new Promise(resolve => { releasePractice = resolve })
+  const practiceStarted = new Promise(resolve => { markPracticeStarted = resolve })
+  const wrongEntry = {
+    entry_id: 'b.md:0',
+    document_id: 'b.md',
+    question: '只属于 B 文档的错题',
+    options: ['错误', '正确'],
+    question_type: 'choice',
+    correct_answer: '正确',
+    explanation: 'B 文档解析',
+    user_answer: '错误',
+    knowledge_gap: 'B 文档知识点',
+    session_id: 'b-source-session',
+  }
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['a.md', 'b.md'] } }
+    }
+    if (request.method() === 'POST' && path === '/session/start') {
+      return {
+        body: {
+          session_id: 'old-a-session',
+          total: 1,
+          questions: [{
+            index: 0,
+            question: 'A 文档中的旧题目',
+            options: ['A. 正确', 'B. 错误'],
+            type: 'choice',
+          }],
+          revision: 1,
+          expires_at: FUTURE_EXPIRES_AT,
+        },
+      }
+    }
+    if (request.method() === 'POST' && path === '/session/old-a-session/answer') {
+      markAnswerStarted()
+      await answerGate
+      return {
+        body: {
+          evaluation_status: 'final',
+          correct: true,
+          correct_answer: 'A. 正确',
+          explanation: '旧请求已经完成。',
+          is_last: true,
+          next_index: null,
+          revision: 2,
+          expires_at: FUTURE_EXPIRES_AT,
+        },
+      }
+    }
+    if (request.method() === 'GET' && path === '/user/default_user/sessions') {
+      return { body: [] }
+    }
+    if (request.method() === 'GET' && path === '/user/default_user/profile') {
+      return {
+        body: {
+          topic_mastery: { 'b.md': 0.2 },
+          weak_points: [],
+          total_sessions: 1,
+        },
+      }
+    }
+    if (request.method() === 'GET' && path === '/wrong-questions/b.md') {
+      return { body: { document_id: 'b.md', total: 1, entries: [wrongEntry] } }
+    }
+    if (request.method() === 'POST' && path === '/wrong-questions/b.md/practice') {
+      markPracticeStarted()
+      await practiceGate
+      return {
+        body: {
+          session_id: 'new-b-practice',
+          total: 1,
+          questions: [{
+            index: 0,
+            question: '只属于 B 文档的错题',
+            options: ['错误', '正确'],
+            type: 'choice',
+          }],
+          revision: 1,
+          expires_at: FUTURE_EXPIRES_AT,
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/quiz')
+  await page.getByRole('combobox', { name: '学习文档' }).selectOption('a.md')
+  await page.getByRole('button', { name: '开始答题' }).click()
+  await page.getByRole('button', { name: 'A. 正确' }).click()
+  await page.getByRole('button', { name: '提交答案' }).click()
+  await answerStarted
+
+  await page.getByRole('link', { name: '学习报告' }).click()
+  await page.getByLabel('错题文档').selectOption('b.md')
+  await page.getByRole('button', { name: '开始重练（1）' }).click()
+  await expect(page).toHaveURL(/\/quiz$/)
   await practiceStarted
 
-  await documentSelect.selectOption('b.md')
-  await expect(page.getByText('b.md 的错题')).toBeVisible()
-  const lateResponse = page.waitForResponse(
-    response => response.url().includes('/wrong-questions/a.md/practice')
-  )
-  releasePractice()
-  await lateResponse
+  const oldResponsePromise = page.waitForResponse(response => (
+    response.request().method() === 'POST'
+    && new URL(response.url()).pathname === `${API_PREFIX}/session/old-a-session/answer`
+  ))
+  releaseAnswer()
+  const oldResponse = await oldResponsePromise
+  await oldResponse.finished()
+  await page.evaluate(() => new Promise(resolve => {
+    requestAnimationFrame(() => requestAnimationFrame(resolve))
+  }))
+  expect(
+    await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), QUIZ_RECOVERY_KEY),
+  ).toMatchObject({
+    intent: {
+      kind: 'wrong_question',
+      request: { document_id: 'b.md', user_id: 'default_user' },
+    },
+    session: null,
+  })
 
-  await expect(page).toHaveURL(/\/dashboard$/)
-  await expect(page.getByText('b.md 的错题')).toBeVisible()
-  await expect(page.getByRole('alert')).toHaveCount(0)
+  releasePractice()
+  await expect(page.getByText('只属于 B 文档的错题')).toBeVisible()
   expect(unexpectedRequests).toEqual([])
   expect(problems).toEqual([])
 })
