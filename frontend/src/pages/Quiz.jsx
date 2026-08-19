@@ -70,6 +70,7 @@ export default function Quiz() {
   const location = useLocation()
   const navigate = useNavigate()
   const practiceHydrated = useRef(false)
+  const presetHydratedSearch = useRef(null)
 
   /* ── 状态 ──────────────────────────────────────────────────────── */
   const [phase, setPhase] = useState('setup') // setup | loading | answering | feedback | results | grading | report
@@ -156,6 +157,7 @@ export default function Quiz() {
     }
 
     practiceHydrated.current = true
+    presetHydratedSearch.current = ''
     gradingRequestEpoch.current += 1
     reportRequestEpoch.current += 1
     gradingInFlight.current = false
@@ -178,6 +180,52 @@ export default function Quiz() {
     startTimer()
     navigate(location.pathname, { replace: true, state: null })
   }, [location.pathname, location.state, navigate, startTimer])
+
+  useEffect(() => {
+    const practice = location.state?.wrongQuestionPractice
+    const hasPendingPractice = Boolean(practice?.session_id && practice?.questions?.length)
+    if (
+      hasPendingPractice
+      || phase !== 'setup'
+      || docsLoading
+      || docsError
+      || presetHydratedSearch.current === location.search
+    ) {
+      return
+    }
+
+    const params = new URLSearchParams(location.search)
+    const documentId = (params.get('document_id') || '').trim()
+    const topic = (params.get('topic') || '').trim()
+    presetHydratedSearch.current = location.search
+
+    if (!documentId && !topic) {
+      setConfig(current => ({
+        ...current,
+        document_id: '',
+        description: '',
+      }))
+      setError(null)
+      return
+    }
+
+    if (!documentId || !documents.includes(documentId)) {
+      setConfig(current => ({
+        ...current,
+        document_id: '',
+        description: topic,
+      }))
+      setError('链接中的学习文档不存在或已被删除，请重新选择文档。')
+      return
+    }
+
+    setConfig(current => ({
+      ...current,
+      document_id: documentId,
+      description: topic,
+    }))
+    setError(null)
+  }, [docsError, docsLoading, documents, location.search, location.state, phase])
 
   /* ── 开始答题 ──────────────────────────────────────────────────── */
   const handleStart = async () => {
@@ -406,7 +454,10 @@ export default function Quiz() {
               id="quiz-document"
               className="field-select"
               value={config.document_id}
-              onChange={e => setConfig(c => ({ ...c, document_id: e.target.value }))}
+              onChange={e => {
+                setConfig(c => ({ ...c, document_id: e.target.value }))
+                setError(null)
+              }}
               disabled={docsLoading}
             >
               <option value="">{docsLoading ? '加载中...' : '-- 选择文档 --'}</option>
