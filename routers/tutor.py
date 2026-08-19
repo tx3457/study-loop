@@ -1,8 +1,7 @@
 """
-Supervisor-based MAS guided 辅导端点（灰度并存）
+Supervisor-based MAS guided 辅导实验端点（Lab）
 
-和 orchestrator(规则工作流)、autonomous(自由 ReAct)、adaptive(闭环 agent) 并列的第四条路径：
-一个由 TeachingSupervisor(LLM 动态编排) 驱动的真 Multi-Agent 辅导闭环——
+这是一个由 TeachingSupervisor 动态编排的实验工作流——
   diagnostic → quiz → critic →(reviser↔critic 精修)→ wait_for_answers(HITL 暂停)
             → [Command(resume=answers)] → grader → supervisor 决策下一轮 / finish
 
@@ -13,7 +12,8 @@ Supervisor-based MAS guided 辅导端点（灰度并存）
       → Command(resume=answers) 续跑 grader→supervisor→下一轮(下一个 interrupt) 或 finish
       → {thread_id, grading_report, quiz?, done, mastery, supervisor_reason, awaiting_answers}
 
-灰度：MAS_SUPERVISOR_ENABLED=false（默认）时端点返回 503，旧链路完全不受影响。
+边界：纯讲解 tutor worker 仍未完成，也没有 Web 页面。默认不注册这些路由；
+仅在进程启动前设置 MAS_SUPERVISOR_ENABLED=true 时用于开发和架构实验。
 
 """
 import asyncio
@@ -32,7 +32,7 @@ from services.memory import get_mastery
 from services.memory_context import build_returning_context
 from services.tutor_sessions import tutor_session_id
 
-router = APIRouter()
+router = APIRouter(tags=["Experimental Tutor Lab"])
 logger = logging.getLogger(__name__)
 
 # tutor guided 会话用独立 checkpoint db（与 orchestrator 的 db 隔离，避免 thread_id 串台）
@@ -143,7 +143,7 @@ class TutorTurnResponse(BaseModel):
 # 编排 helper
 # ═══════════════════════════════════════════════════════════════════════════
 def _require_enabled() -> None:
-    """灰度开关：未启用 supervisor MAS 时直接 503，旧链路不受影响。"""
+    """防御性复核：处理启动后开关变化或直接函数调用。"""
     if not supervisor_enabled():
         raise HTTPException(
             status_code=503,

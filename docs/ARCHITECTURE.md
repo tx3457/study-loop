@@ -29,14 +29,17 @@ workflow rather than an unconstrained tool Agent.
 
 | Surface | Actual control flow | State and stop condition | Accurate label |
 | --- | --- | --- | --- |
-| `/agent/autonomous` | The model chooses a registered business tool, `ask_user`, or `finalize`; tool output returns as an observation before the next decision | In-process session state; at most 8 rounds | Tool-using Agent |
-| `/agent/tutor/assist` | The embedded assistant uses the same tool loop; `ask_user` pauses through LangGraph `interrupt` | SQLite checkpointer + `thread_id`; at most 8 assistant rounds | Tool-using Agent with HITL |
+| `/agent/autonomous` | The model chooses a registered business tool, `ask_user`, or `finalize`; tool output returns as an observation before the next decision | PostgreSQL/SQLite pause snapshots with guarded resume; at most 8 rounds | Tool-using Agent |
+| `/agent/tutor/assist` (Lab) | The embedded assistant uses the same tool loop; `ask_user` pauses through LangGraph `interrupt` | SQLite checkpointer + `thread_id`; at most 8 assistant rounds | Experimental tool-using Agent with HITL |
 | `/agent/adaptive/*` | The model selects a structured teaching action; application code executes a known branch | Adaptive session state, mastery/round stop rules | Agentic workflow |
 | `/agent/run` and quiz/critic/reviser graphs | Node order and retry routes are encoded by the developer | Graph state and bounded revision counts | Predefined LangGraph workflow |
 | document retrieval and learner memory | No autonomous decision loop | Chroma/BM25 and Store-compatible memory | RAG / application memory |
 
-The optional supervisor graph is experimental: it is disabled by default and
-contains an unfinished tutor worker. It is not a headline production claim.
+The optional supervisor graph is experimental: it has no Web surface, is not
+registered in FastAPI unless `MAS_SUPERVISOR_ENABLED=true` at process startup,
+and contains an unfinished pure-tutor worker. The `/agent/tutor/*` routes are a
+Lab surface for architecture experiments, not a headline product or resume
+claim.
 
 ## Tool loop
 
