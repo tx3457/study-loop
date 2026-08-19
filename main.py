@@ -6,6 +6,7 @@ from fastapi.responses import HTMLResponse,JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from openai import APIError, APITimeoutError, RateLimitError
 from pydantic import BaseModel, Field
+from agents.supervisor import supervisor_enabled
 from routers.chat import router as chat_router
 from routers.documents import router as document_router
 from routers.quiz import router as quiz_router
@@ -19,7 +20,6 @@ from routers.eval import router as eval_router
 from routers.autonomous import router as autonomous_router
 from routers.adaptive import router as adaptive_router
 from routers.audit import router as audit_router
-from routers.tutor import router as tutor_router
 from routers.health import router as health_router
 from services.memory_persist import load_snapshot, persist_snapshot
 from services.idempotency import IdempotencyConflictError
@@ -72,6 +72,16 @@ async def _cleanup_mcp_live_servers():
         pass
 
 
+def _include_experimental_routers(application: FastAPI) -> bool:
+    """Register opt-in Lab APIs only when enabled at process startup."""
+    if not supervisor_enabled():
+        return False
+    from routers.tutor import router as tutor_router
+
+    application.include_router(tutor_router)
+    return True
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Own startup resources and release them in reverse dependency order."""
@@ -121,7 +131,7 @@ app.include_router(eval_router)
 app.include_router(autonomous_router)
 app.include_router(adaptive_router)
 app.include_router(audit_router)
-app.include_router(tutor_router)   # Supervisor-based MAS guided 辅导（灰度，默认 503）
+_include_experimental_routers(app)
 app.include_router(health_router)
 
 

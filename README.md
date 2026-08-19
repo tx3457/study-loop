@@ -10,8 +10,17 @@ StudyLoop 是一个基于个人学习材料的 AI 自适应学习系统。它支
 - 使用 Chroma 与 BM25 检索学习材料
 - 生成学习路径、练习题和学习报告
 - 自动批改答案并记录错题与掌握度
-- 提供 Autonomous Agent 和带人工确认的 Tutor Agent
+- 提供有轮次上限、工具白名单和人工确认的 Autonomous Agent
 - 保存学习记忆和工作流 checkpoint
+
+### 功能边界
+
+默认产品主线是 Web 中的文档、学习路径、Quiz、Adaptive、Dashboard 和
+Autonomous。`/agent/tutor/*` supervisor 图属于 API-only Lab：默认不注册路由、
+没有前端页面，而且纯讲解 tutor worker 尚未完成。只有显式设置
+`MAS_SUPERVISOR_ENABLED=true` 并重启后端才会暴露这些实验接口；它不作为当前
+简历的已完成功能。其他未进入 Web 主线的 `/agent/run`、`/agent/stream`、
+`/eval/ab` 与 `/audit` 也应视为开发者接口，而不是独立产品入口。
 
 ## 环境要求
 
@@ -147,7 +156,7 @@ TEST_DATABASE_URL=postgresql://user:password@127.0.0.1:5432/studyloop_test \
     tests/test_autonomous_sessions_postgres.py \
     tests/test_memory_postgres.py
 
-# Agent 演示与 BM25 评测校验
+# 确定性 tool-loop 演示与 BM25 评测校验（不代表实验 Tutor Web 功能）
 python scripts/demo_react_tutor_agent.py
 python evaluation/scifact_bm25/verify.py
 
