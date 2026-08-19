@@ -5,9 +5,8 @@ from collections.abc import Awaitable, Callable
 
 from models.grader import GradingReport, QuestionGrade
 from services.memory import (
+    commit_learning_memory,
     get_user_profile,
-    update_semantic_memory,
-    write_episodic_memory,
 )
 from models.quiz import Question
 from models.session import (
@@ -194,7 +193,7 @@ async def submit_answer(
 async def _write_back_profile(session: QuizSession, session_id: str) -> None:
     """会话完成后把成绩写回画像（session_briefs / error_log / mastery EMA / weak_points）。
 
-    与 adapt_writer 走同一套 write_episodic_memory + update_semantic_memory，
+    与 adapt_writer 走同一套 commit_learning_memory，
     保证两条轨道（/session/* 与 /agent/stream grade）的记忆口径一致。
     本轨道为字符串比较批改，无 LLM 提炼的 knowledge_gap，错题以题干截断兜底。
     """
@@ -222,13 +221,13 @@ async def _write_back_profile(session: QuizSession, session_id: str) -> None:
         score=round(correct_count / total, 2) if total else 0.0,
         grades=grades,
     )
-    await write_episodic_memory(
+    await commit_learning_memory(
         session.user_id,
         report,
         session.document_id,
         questions=session.questions,
+        on_core_written=lambda: setattr(session, "profile_written", True),
     )
-    await update_semantic_memory(session.user_id, report, session.document_id)
 
 
 async def get_result(session_id: str) -> SessionResult:

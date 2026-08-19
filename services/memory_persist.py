@@ -13,16 +13,21 @@
 
 路径 env MEMORY_SNAPSHOT_PATH（默认 ./.memory_snapshot.json，已加入 .gitignore）。
 """
+import asyncio
+import copy
 import json
 import logging
 import os
 import tempfile
+import threading
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_PATH = str(Path(__file__).parent.parent / ".memory_snapshot.json")
 _SNAPSHOT_VERSION = 1
+_SNAPSHOT_LOCK = threading.Lock()
+_PAGE_SIZE = 100
 
 
 def snapshot_path() -> str:
@@ -34,23 +39,68 @@ def _is_inmemory() -> bool:
     return not os.getenv("DATABASE_URL")
 
 
+def _all_namespaces(store) -> list[tuple]:
+    namespaces = []
+    offset = 0
+    while True:
+        batch = store.list_namespaces(limit=_PAGE_SIZE, offset=offset)
+        namespaces.extend(batch)
+        if len(batch) < _PAGE_SIZE:
+            return namespaces
+        offset += len(batch)
+
+
+def _all_items(store, namespace: tuple) -> list:
+    items = []
+    offset = 0
+    while True:
+        batch = store.search(
+            namespace,
+            limit=_PAGE_SIZE,
+            offset=offset,
+        )
+        items.extend(batch)
+        if len(batch) < _PAGE_SIZE:
+            return items
+        offset += len(batch)
+
+
 def save_snapshot(path: str | None = None) -> bool:
-    """导出 InMemoryStore 全部 namespace 到 JSON（原子写）。返回是否实际写入。"""
+    """导出 InMemoryStore 全量数据到 JSON（原子写）。返回是否实际写入。"""
     if not _is_inmemory():
         return False
-    from services.memory import store  # 延迟导入避免与 memory.py 的模块级循环依赖
+    with _SNAPSHOT_LOCK:
+        return _save_snapshot_unlocked(path)
+
+
+def _save_snapshot_unlocked(path: str | None = None) -> bool:
+    # 延迟导入避免与 memory.py 的模块级循环依赖。所有 InMemoryStore 访问共用
+    # 同一把锁，先在锁内序列化出一致视图，再释放锁执行磁盘 I/O。
+    from services.memory import _STORE_LOCK, store
 
     path = path or snapshot_path()
-    items: list[dict] = []
     try:
-        for ns in store.list_namespaces():
-            for it in store.search(ns):
-                items.append({"ns": list(it.namespace), "key": it.key, "value": it.value})
+        with _STORE_LOCK:
+            items: list[dict] = []
+            for ns in _all_namespaces(store):
+                for it in _all_items(store, ns):
+                    items.append(
+                        {
+                            "ns": list(it.namespace),
+                            "key": it.key,
+                            "value": copy.deepcopy(it.value),
+                        }
+                    )
+        # 值在写入 Store 时也会 deepcopy；拿到独立副本后即可释放锁，避免
+        # JSON 编码大快照时阻塞事件循环里的下一次记忆写入。
+        serialized = json.dumps(
+            {"version": _SNAPSHOT_VERSION, "items": items},
+            ensure_ascii=False,
+        )
     except Exception as e:
         logger.warning(f"[memory_persist] dump store failed: {e}")
         return False
 
-    payload = {"version": _SNAPSHOT_VERSION, "items": items}
     try:
         directory = os.path.dirname(path) or "."
         os.makedirs(directory, exist_ok=True)
@@ -58,7 +108,7 @@ def save_snapshot(path: str | None = None) -> bool:
         fd, tmp = tempfile.mkstemp(dir=directory, prefix=".memsnap_", suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False)
+                f.write(serialized)
             os.replace(tmp, path)
         finally:
             if os.path.exists(tmp):
@@ -70,11 +120,16 @@ def save_snapshot(path: str | None = None) -> bool:
         return False
 
 
+async def persist_snapshot(path: str | None = None) -> bool:
+    """在线程中串行刷新快照，避免阻塞 FastAPI 事件循环。"""
+    return await asyncio.to_thread(save_snapshot, path)
+
+
 def load_snapshot(path: str | None = None) -> int:
     """启动时从 JSON 回灌 InMemoryStore。返回回灌条数（0 = 无快照 / 非 InMemory / 失败）。"""
     if not _is_inmemory():
         return 0
-    from services.memory import store
+    from services.memory import _STORE_LOCK, store
 
     path = path or snapshot_path()
     if not os.path.exists(path):
@@ -88,11 +143,12 @@ def load_snapshot(path: str | None = None) -> int:
 
     items = payload.get("items", []) if isinstance(payload, dict) else []
     n = 0
-    for rec in items:
-        try:
-            store.put(tuple(rec["ns"]), rec["key"], rec["value"])
-            n += 1
-        except Exception as e:
-            logger.warning(f"[memory_persist] put failed for {rec.get('ns')}: {e}")
+    with _STORE_LOCK:
+        for rec in items:
+            try:
+                store.put(tuple(rec["ns"]), rec["key"], rec["value"])
+                n += 1
+            except Exception as e:
+                logger.warning(f"[memory_persist] put failed for {rec.get('ns')}: {e}")
     logger.info(f"[memory_persist] loaded {n} items ← {path}")
     return n

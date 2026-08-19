@@ -166,10 +166,26 @@ export default function Dashboard() {
   const mastery = profile?.topic_mastery || {}
   const masteryEntries = Object.entries(mastery)
   const weakPoints = profile?.weak_points || []
-  const realSessions = sessions.filter(s => !s.type) // 排除 archive 条目
-  const avgScore = realSessions.length
-    ? Math.round((realSessions.reduce((s, e) => s + (e.correct_rate || 0), 0) / realSessions.length) * 100)
-    : 0
+  // 归档代表多次历史学习：平均分按 session_count 加权，趋势中保留一个聚合点，
+  // 避免归档后 Dashboard 只展示最近几次记录。
+  const trendSessions = sessions
+    .map(session => session.type === 'archive'
+      ? { ...session, correct_rate: session.avg_correct_rate, isArchive: true }
+      : session)
+    .filter(session => Number.isFinite(Number(session.correct_rate)))
+  const scoreSummary = trendSessions.reduce((summary, session) => {
+    const weight = session.isArchive ? Math.max(Number(session.session_count) || 0, 0) : 1
+    return {
+      weightedScore: summary.weightedScore + Number(session.correct_rate) * weight,
+      count: summary.count + weight,
+    }
+  }, { weightedScore: 0, count: 0 })
+  const profileAverage = profile?.average_correct_rate
+  const avgScore = typeof profileAverage === 'number' && Number.isFinite(profileAverage)
+    ? Math.round(profileAverage * 100)
+    : scoreSummary.count
+      ? Math.round((scoreSummary.weightedScore / scoreSummary.count) * 100)
+      : 0
 
   if (loading) {
     return (
@@ -210,7 +226,7 @@ export default function Dashboard() {
             重新加载
           </button>
         </div>
-      ) : !partialError && noProfile && realSessions.length === 0 ? (
+      ) : !partialError && noProfile && trendSessions.length === 0 ? (
         <div className="dash-empty">
           <div className="empty-icon">
             <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round">
@@ -272,8 +288,8 @@ export default function Dashboard() {
           {/* ── 学习趋势折线图 ────────────────────────────────────── */}
           <div className="dash-card trend-card">
             <h2 className="card-title">学习趋势</h2>
-            {realSessions.length > 1 ? (
-              <TrendChart sessions={realSessions} />
+            {trendSessions.length > 1 ? (
+              <TrendChart sessions={trendSessions} />
             ) : (
               <p className="card-empty">至少需要 2 次答题记录才能显示趋势</p>
             )}
@@ -504,6 +520,11 @@ function TrendChart({ sessions }) {
         {/* 数据点 + X轴标签 */}
         {points.map(([x, y], i) => (
           <g key={i}>
+            <title>
+              {sorted[i].isArchive
+                ? `${sorted[i].session_count} 次历史学习聚合：${Math.round(sorted[i].correct_rate * 100)}%`
+                : `${sorted[i].date || '本次学习'}：${Math.round(sorted[i].correct_rate * 100)}%`}
+            </title>
             <circle cx={x} cy={y} r="4" className="trend-dot" />
             <text x={x} y={h - 8} className="trend-x-label" textAnchor="middle">
               {(sorted[i].date || '').slice(5)}

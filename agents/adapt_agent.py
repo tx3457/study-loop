@@ -15,11 +15,10 @@ from agents.state import OrchestratorState
 from models.grader import GradingReport
 from services.memory import (
     append_decision,
+    commit_learning_memory,
     get_mastery,
     get_preferences,
     get_weak_points,
-    update_semantic_memory,
-    write_episodic_memory,
 )
 from services.tracing import traceable
 
@@ -85,18 +84,27 @@ adapt_reader = _rb.compile()
 async def _write_profile(state: OrchestratorState) -> dict:
     """批改后：session_briefs + error_log + mastery + weak_points 全部更新。"""
     report = GradingReport.model_validate(state["grading_report"])
-    await write_episodic_memory(state["user_id"], report, state["document_id"])
-    await update_semantic_memory(state["user_id"], report, state["document_id"])
 
-    # 一条 decision_log 标记写入了哪些 bank（便于审计）
-    await append_decision(state["user_id"], {
-        "agent": "adapt_writer",
-        "document_id": state["document_id"],
-        "session_id": report.session_id,
-        "score": report.score,
-        "errors_logged": sum(1 for g in report.grades if not g.is_correct),
-        "rationale": f"session {report.session_id} 完成，写入 session_briefs/error_log/mastery/weak_points",
-    })
+    async def record_decision() -> None:
+        # 一条 decision_log 标记写入了哪些 bank（便于审计）
+        await append_decision(state["user_id"], {
+            "agent": "adapt_writer",
+            "document_id": state["document_id"],
+            "session_id": report.session_id,
+            "score": report.score,
+            "errors_logged": sum(1 for g in report.grades if not g.is_correct),
+            "rationale": (
+                f"session {report.session_id} 完成，写入 "
+                "session_briefs/error_log/mastery/weak_points"
+            ),
+        })
+
+    await commit_learning_memory(
+        state["user_id"],
+        report,
+        state["document_id"],
+        after_write=record_decision,
+    )
     return {}
 
 

@@ -14,7 +14,12 @@ import logging
 from typing import Any, Optional
 
 from services.learning_path import generate_learning_path
-from services.memory import append_weak_points, get_user_profile, update_mastery
+from services.memory import (
+    append_weak_points,
+    get_user_profile,
+    persist_memory_snapshot,
+    update_mastery,
+)
 from services.rag import generate_question
 from services.tool_registry import EffectMode, Tool, ToolMetadata, tool_registry
 from services.vectorstore import retrieve_with_rewrite
@@ -146,6 +151,7 @@ async def _update_learning_profile(user_id: str, document_id: str, grade_result:
             gaps.append(str(item))
     if gaps:
         await append_weak_points(user_id, gaps, document_id)
+    await persist_memory_snapshot()
 
     return json.dumps({
         "user_id": user_id,

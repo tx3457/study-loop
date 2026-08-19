@@ -372,24 +372,24 @@ class TestChoiceAnswerNormalization(unittest.IsolatedAsyncioTestCase):
             user_answers=[],
             status="active",
         )
-        episodic = AsyncMock()
-        semantic = AsyncMock()
+        memory_commit = AsyncMock()
 
-        with (
-            patch.object(session_service, "write_episodic_memory", episodic),
-            patch.object(session_service, "update_semantic_memory", semantic),
+        with patch.object(
+            session_service,
+            "commit_learning_memory",
+            memory_commit,
         ):
             answer = await session_service.submit_answer("choice", "C. 检索增强生成")
 
         result = await session_service.get_result("choice")
-        written_report = episodic.await_args.args[1]
+        written_report = memory_commit.await_args.args[1]
 
         self.assertTrue(answer.correct)
         self.assertEqual(result.correct, 1)
         self.assertEqual(result.score, 1.0)
         self.assertEqual(written_report.correct, 1)
         self.assertTrue(written_report.grades[0].is_correct)
-        semantic.assert_awaited_once()
+        memory_commit.assert_awaited_once()
 
     async def test_full_choice_text_does_not_trigger_unnecessary_llm_grading(self):
         session_service.sessions["choice-grade"] = QuizSession(

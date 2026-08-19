@@ -805,6 +805,47 @@ test('dashboard keeps available data visible when one source fails', async ({ pa
   expect(unexpectedRequests).toEqual([])
 })
 
+test('dashboard keeps archived sessions in averages and trend', async ({ page }) => {
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: [] } }
+    }
+    if (request.method() === 'GET' && path === '/user/default_user/sessions') {
+      return {
+        body: [
+          {
+            type: 'archive',
+            date: '2026-07-10',
+            session_count: 4,
+            avg_correct_rate: 0.25,
+          },
+          { date: '2026-07-16', correct_rate: 0.75 },
+          { date: '2026-07-17', correct_rate: 1.0 },
+        ],
+      }
+    }
+    if (request.method() === 'GET' && path === '/user/default_user/profile') {
+      return {
+        body: {
+          topic_mastery: { 'notes.md': 0.7 },
+          weak_points: [],
+          total_sessions: 6,
+          average_correct_rate: 0.458,
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/dashboard')
+
+  await expect(page.locator('.stat-card').filter({ hasText: '学习次数' })).toContainText('6')
+  await expect(page.locator('.stat-card').filter({ hasText: '平均正确率' })).toContainText('46%')
+  await expect(page.locator('.trend-dot')).toHaveCount(3)
+  await expect(page.locator('.trend-svg title').first()).toContainText('4 次历史学习聚合：25%')
+  expect(unexpectedRequests).toEqual([])
+})
+
 test('dashboard keeps a blocking retry state when every source fails', async ({ page }) => {
   let failAll = true
   const unexpectedRequests = await mockApi(page, ({ path, request }) => {

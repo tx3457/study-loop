@@ -187,6 +187,12 @@ class TestAdaptiveRouterLoop(unittest.IsolatedAsyncioTestCase):
 
     def _patches(self, decision_side, grade_score=0.5, mastery_seq=None):
         """统一打桩:出题/批改/画像/决策/注入全 mock。mastery_seq 控制每次 get_mastery 返回。"""
+        async def commit_memory(*args, after_write=None, on_core_written=None, **kwargs):
+            if on_core_written is not None:
+                on_core_written()
+            if after_write is not None:
+                await after_write()
+
         self._p = [
             patch.object(rt, "ensure_document_available", AsyncMock()),
             patch.object(rt, "check_injection", AsyncMock(return_value=(False, ""))),
@@ -194,8 +200,7 @@ class TestAdaptiveRouterLoop(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 rt, "grade_session", AsyncMock(return_value=_report(grade_score))
             ),
-            patch.object(rt, "update_semantic_memory", AsyncMock()),
-            patch.object(rt, "write_episodic_memory", AsyncMock()),
+            patch.object(rt, "commit_learning_memory", AsyncMock(side_effect=commit_memory)),
             patch.object(rt, "append_decision", AsyncMock()),
             patch.object(rt, "get_weak_points", AsyncMock(return_value=[])),
             patch.object(

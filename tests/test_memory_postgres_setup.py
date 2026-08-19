@@ -1,4 +1,6 @@
 import os
+import sys
+import types
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -11,6 +13,18 @@ from services.memory import (
 
 
 class TestPostgresMemorySetup(unittest.TestCase):
+    def setUp(self):
+        fake_psycopg = types.ModuleType("psycopg")
+        fake_psycopg.connect = MagicMock()
+        self.psycopg_module = patch.dict(
+            sys.modules,
+            {"psycopg": fake_psycopg},
+        )
+        self.psycopg_module.start()
+
+    def tearDown(self):
+        self.psycopg_module.stop()
+
     def test_busy_lock_times_out_and_closes_connection(self):
         connection = MagicMock()
         connection.__enter__.return_value = connection
