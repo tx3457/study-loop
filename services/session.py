@@ -139,7 +139,7 @@ async def start_session(req: SessionStartRequest) -> tuple[str, list[QuestionVie
     sessions[session_id] = session
 
     questions_view = [
-        QuestionView(index=i, question=q.question, options=q.options)
+        QuestionView(index=i, question=q.question, options=q.options, type=q.type)
         for i, q in enumerate(session.questions)
     ]
     return session_id, questions_view
@@ -222,7 +222,12 @@ async def _write_back_profile(session: QuizSession, session_id: str) -> None:
         score=round(correct_count / total, 2) if total else 0.0,
         grades=grades,
     )
-    await write_episodic_memory(session.user_id, report, session.document_id)
+    await write_episodic_memory(
+        session.user_id,
+        report,
+        session.document_id,
+        questions=session.questions,
+    )
     await update_semantic_memory(session.user_id, report, session.document_id)
 
 

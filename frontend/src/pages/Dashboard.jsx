@@ -1,5 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { getUserProfile, getUserSessions, getDocuments, getWrongQuestions } from '../api/client'
+import { useNavigate } from 'react-router-dom'
+import {
+  getUserProfile,
+  getUserSessions,
+  getDocuments,
+  getWrongQuestions,
+  startWrongQuestionPractice,
+} from '../api/client'
 import './Dashboard.css'
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -12,6 +19,7 @@ import './Dashboard.css'
    ═══════════════════════════════════════════════════════════════════ */
 
 export default function Dashboard() {
+  const navigate = useNavigate()
   const [profile, setProfile] = useState(null)
   const [sessions, setSessions] = useState([])
   const [documents, setDocuments] = useState([])
@@ -21,10 +29,13 @@ export default function Dashboard() {
   const [noProfile, setNoProfile] = useState(false)
   const [wrongLoading, setWrongLoading] = useState(false)
   const [wrongError, setWrongError] = useState(null)
+  const [practiceError, setPracticeError] = useState(null)
+  const [practiceLoading, setPracticeLoading] = useState(false)
   const [error, setError] = useState(null)
   const [partialError, setPartialError] = useState(null)
   const dashboardRequestId = useRef(0)
   const wrongRequestId = useRef(0)
+  const practiceRequestId = useRef(0)
 
   /* ── 加载数据 ──────────────────────────────────────────────────── */
   const loadDashboard = useCallback(async () => {
@@ -82,6 +93,7 @@ export default function Dashboard() {
     loadDashboard()
     return () => {
       dashboardRequestId.current += 1
+      practiceRequestId.current += 1
     }
   }, [loadDashboard])
 
@@ -90,6 +102,7 @@ export default function Dashboard() {
     const requestId = ++wrongRequestId.current
     setWrongLoading(true)
     setWrongError(null)
+    setPracticeError(null)
     try {
       const data = await getWrongQuestions(documentId)
       if (requestId !== wrongRequestId.current) return
@@ -108,11 +121,46 @@ export default function Dashboard() {
       wrongRequestId.current += 1
       setWrongQuestions(null)
       setWrongError(null)
+      setPracticeError(null)
       setWrongLoading(false)
       return
     }
     loadWrongQuestions(wrongDoc)
   }, [loadWrongQuestions, wrongDoc])
+
+  const handleRepractice = async () => {
+    if (!wrongDoc || practiceLoading) return
+    const documentId = wrongDoc
+    const requestId = ++practiceRequestId.current
+    setPracticeLoading(true)
+    setPracticeError(null)
+    try {
+      const practice = await startWrongQuestionPractice(documentId)
+      if (requestId !== practiceRequestId.current) return
+      navigate('/quiz', {
+        state: {
+          wrongQuestionPractice: {
+            ...practice,
+            document_id: documentId,
+          },
+        },
+      })
+    } catch (err) {
+      if (requestId !== practiceRequestId.current) return
+      setPracticeError(err.message)
+    } finally {
+      if (requestId === practiceRequestId.current) {
+        setPracticeLoading(false)
+      }
+    }
+  }
+
+  const handleWrongDocumentChange = (event) => {
+    practiceRequestId.current += 1
+    setPracticeLoading(false)
+    setPracticeError(null)
+    setWrongDoc(event.target.value)
+  }
 
   /* ── 衍生数据 ──────────────────────────────────────────────────── */
   const mastery = profile?.topic_mastery || {}
@@ -235,15 +283,27 @@ export default function Dashboard() {
           <div className="dash-card wrong-card">
             <div className="wrong-header">
               <h2 className="card-title">错题本</h2>
-              <select
-                className="wrong-select"
-                aria-label="错题文档"
-                value={wrongDoc}
-                onChange={e => setWrongDoc(e.target.value)}
-              >
-                <option value="">-- 选择文档 --</option>
-                {documents.map(d => <option key={d} value={d}>{d}</option>)}
-              </select>
+              <div className="wrong-actions">
+                {wrongQuestions?.total > 0 && !wrongLoading && !wrongError && (
+                  <button
+                    type="button"
+                    className="state-action wrong-practice"
+                    onClick={handleRepractice}
+                    disabled={practiceLoading}
+                  >
+                    {practiceLoading ? '正在准备...' : `开始重练（${wrongQuestions.total}）`}
+                  </button>
+                )}
+                <select
+                  className="wrong-select"
+                  aria-label="错题文档"
+                  value={wrongDoc}
+                  onChange={handleWrongDocumentChange}
+                >
+                  <option value="">-- 选择文档 --</option>
+                  {documents.map(d => <option key={d} value={d}>{d}</option>)}
+                </select>
+              </div>
             </div>
 
             {wrongLoading && <div className="loading-spinner small" />}
@@ -262,7 +322,17 @@ export default function Dashboard() {
               </div>
             )}
 
-            {wrongQuestions && !wrongLoading && !wrongError && (
+            {practiceError && !wrongLoading && !wrongError && (
+              <div className="load-error-state" role="alert">
+                <p className="state-title">无法开始错题重练</p>
+                <p className="state-desc">{practiceError}</p>
+                <button type="button" className="state-action" onClick={handleRepractice}>
+                  重试
+                </button>
+              </div>
+            )}
+
+            {wrongQuestions && !wrongLoading && !wrongError && !practiceError && (
               wrongQuestions.total === 0 ? (
                 <p className="card-empty">该文档暂无错题</p>
               ) : (

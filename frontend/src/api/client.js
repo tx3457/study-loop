@@ -144,8 +144,18 @@ export async function getUserSessions(userId = 'default_user') {
 }
 
 /** 错题本 */
-export async function getWrongQuestions(documentId) {
-  return request(`/wrong-questions/${encodeURIComponent(documentId)}`)
+export async function getWrongQuestions(documentId, userId = 'default_user') {
+  const query = new URLSearchParams({ user_id: userId })
+  return request(`/wrong-questions/${encodeURIComponent(documentId)}?${query}`)
+}
+
+/** 用当前文档的持久错题创建一轮重练会话 */
+export async function startWrongQuestionPractice(documentId, userId = 'default_user') {
+  const query = new URLSearchParams({ user_id: userId })
+  return request(
+    `/wrong-questions/${encodeURIComponent(documentId)}/practice?${query}`,
+    { method: 'POST' },
+  )
 }
 
 /* ═══════════════════════════════════════════════════════════════════

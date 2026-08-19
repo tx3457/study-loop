@@ -17,6 +17,7 @@ class QuestionView(BaseModel):
     index: int
     question: str
     options: list[str] | None = None
+    type: str = "choice"
 
 
 class AnswerRequest(BaseModel):

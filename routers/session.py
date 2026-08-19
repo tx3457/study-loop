@@ -24,7 +24,6 @@ from services.session import (
 )
 from services.grader import grade_session
 from services.report import generate_report
-from services.wrong_questions import collect_wrong_answers
 from services.memory import write_episodic_memory, update_semantic_memory
 from services.idempotency import (
     abort_idempotency_claim,
@@ -164,12 +163,16 @@ async def grade(session_id: str):
     session = _require_completed_session(session_id)
     try:
         report = await grade_session(session_id)
-        collect_wrong_answers(session_id, report)  # 自动收集错题
 
         # 选择题在答完最后一题时已写画像；简答题必须等语义批改完成后再写。
         # profile_written 防止重试 /grade 时重复累积 EMA 与 weak_points。
         if not session.profile_written:
-            await write_episodic_memory(session.user_id, report, session.document_id)
+            await write_episodic_memory(
+                session.user_id,
+                report,
+                session.document_id,
+                questions=session.questions,
+            )
             await update_semantic_memory(session.user_id, report, session.document_id)
             session.profile_written = True
 
