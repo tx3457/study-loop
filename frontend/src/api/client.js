@@ -131,6 +131,7 @@ export async function startSession({
   difficulty,
   type,
   user_id,
+  learning_path_source,
   idempotency_key,
 }) {
   return request('/session/start', {
@@ -139,7 +140,15 @@ export async function startSession({
       'Content-Type': 'application/json',
       ...(idempotency_key ? { 'Idempotency-Key': idempotency_key } : {}),
     },
-    body: JSON.stringify({ document_id, description, count, difficulty, type, user_id }),
+    body: JSON.stringify({
+      document_id,
+      description,
+      count,
+      difficulty,
+      type,
+      user_id,
+      ...(learning_path_source ? { learning_path_source } : {}),
+    }),
   })
 }
 

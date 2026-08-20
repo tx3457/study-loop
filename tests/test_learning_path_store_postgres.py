@@ -67,7 +67,7 @@ class TestPostgresLearningPathStore(unittest.IsolatedAsyncioTestCase):
                 connect_timeout=5,
             ) as connection:
                 connection.execute(
-                    sql.SQL("DROP TABLE IF EXISTS {}").format(
+                    sql.SQL("DROP TABLE IF EXISTS {} CASCADE").format(
                         sql.Identifier(self.table_name)
                     )
                 )
@@ -129,6 +129,39 @@ class TestPostgresLearningPathStore(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(first, second)
         self.assertIn(first.path.title, {"候选一", "候选二"})
+
+    async def test_concurrent_stage_completion_advances_once(self) -> None:
+        created = await self.store.create(
+            "default_user",
+            "notes.md",
+            _path("PostgreSQL progress"),
+            idempotency_key=f"learning-path-{uuid.uuid4().hex}",
+            request_fingerprint=_fingerprint(),
+        )
+        first, second = await asyncio.gather(
+            self.store.complete_stage(
+                created.path_id,
+                1,
+                f"quiz-{uuid.uuid4().hex}",
+                user_id="default_user",
+                document_id="notes.md",
+                grading_report_hash=hashlib.sha256(b"grade-a").hexdigest(),
+            ),
+            self._new_store().complete_stage(
+                created.path_id,
+                1,
+                f"quiz-{uuid.uuid4().hex}",
+                user_id="default_user",
+                document_id="notes.md",
+                grading_report_hash=hashlib.sha256(b"grade-b").hexdigest(),
+            ),
+        )
+        self.assertEqual(first.completed_through, 1)
+        self.assertEqual(second.completed_through, 1)
+        reopened = self._new_store()
+        progress = await reopened.get(created.path_id)
+        self.assertEqual(progress.completed_through, 1)
+        self.assertEqual(progress.progress_revision, 2)
 
 
 if __name__ == "__main__":

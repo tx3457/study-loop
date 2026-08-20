@@ -12,6 +12,8 @@ from models.report import LearningReport
 from models.session import (
     AnswerRequest,
     AnswerResult,
+    LearningPathCompletion,
+    LearningPathQuizSource,
     QuestionView,
     QuizSessionAggregate,
     SessionResult,
@@ -24,6 +26,11 @@ from services.idempotency import (
     normalize_idempotency_key,
 )
 from services.memory import commit_learning_memory
+from services.learning_path_store import (
+    LearningPathCorruptError,
+    LearningPathStageConflictError,
+    learning_path_store,
+)
 from services.quiz_sessions import (
     QuizSessionAlreadyExistsError,
     QuizSessionApiError,
@@ -57,16 +64,21 @@ class StartSessionResponse(BaseModel):
     questions: list[QuestionView]
     revision: int
     expires_at: float
+    learning_path_source: LearningPathQuizSource | None = None
 
 
 class GradingResponse(GradingReport):
     revision: int
     expires_at: float
+    learning_path_source: LearningPathQuizSource | None = None
+    learning_path_completion: LearningPathCompletion | None = None
 
 
 class LearningReportResponse(LearningReport):
     revision: int
     expires_at: float
+    learning_path_source: LearningPathQuizSource | None = None
+    learning_path_completion: LearningPathCompletion | None = None
 
 
 def _not_found() -> QuizSessionApiError:
@@ -169,7 +181,33 @@ def _start_response(record: StoredQuizSession) -> StartSessionResponse:
         questions=question_views(session),
         revision=record.revision,
         expires_at=record.expires_at,
+        learning_path_source=record.aggregate.learning_path_source,
     )
+
+
+async def _find_started_quiz(
+    key: str | None,
+    request_payload: dict,
+) -> StoredQuizSession | None:
+    if key is None:
+        return None
+    try:
+        return await quiz_sessions.find_start(key, request_payload)
+    except QuizSessionStartConflictError as exc:
+        raise IdempotencyConflictError(exc.reason) from exc
+    except QuizSessionCorruptError as exc:
+        raise QuizSessionApiError(
+            503,
+            "quiz_session_corrupt",
+            "答题会话数据无效，请重新开始",
+        ) from exc
+    except Exception as exc:
+        logger.error("durable quiz start lookup failed: %s", type(exc).__name__)
+        raise QuizSessionApiError(
+            503,
+            "quiz_session_store_unavailable",
+            "答题会话存储暂时不可用",
+        ) from exc
 
 
 def _answer_response(record: StoredQuizSession, index: int) -> AnswerResult:
@@ -275,9 +313,78 @@ def _snapshot(record: StoredQuizSession) -> SessionSnapshot:
             if session.learning_report is not None
             else None
         ),
+        learning_path_source=aggregate.learning_path_source,
+        learning_path_completion=aggregate.learning_path_completion,
         expires_at=record.expires_at,
         busy=record.busy,
     )
+
+
+async def _bind_learning_path_start(
+    req: SessionStartRequest,
+) -> SessionStartRequest:
+    source = req.learning_path_source
+    if source is None:
+        return req
+    try:
+        record = await learning_path_store.get(source.learning_path_id)
+    except LearningPathCorruptError as exc:
+        raise QuizSessionApiError(
+            503,
+            "learning_path_corrupt",
+            "学习路径数据无效，请返回学习路径后重试",
+        ) from exc
+    except Exception as exc:
+        logger.error("learning path binding lookup failed: %s", type(exc).__name__)
+        raise QuizSessionApiError(
+            503,
+            "learning_path_store_unavailable",
+            "学习路径存储暂时不可用",
+        ) from exc
+
+    if record is None:
+        raise QuizSessionApiError(
+            404,
+            "learning_path_not_found",
+            "学习路径不存在",
+            reason="missing",
+        )
+    if record.user_id != req.user_id or record.document_id != req.document_id:
+        raise QuizSessionApiError(
+            409,
+            "learning_path_binding_mismatch",
+            "练习与学习路径不匹配",
+            reason="binding_mismatch",
+        )
+    if source.stage_id > record.path.total_stages:
+        raise QuizSessionApiError(
+            409,
+            "learning_path_stage_unavailable",
+            "学习路径阶段不存在",
+            reason="stage_missing",
+        )
+    if source.stage_id <= record.completed_through:
+        raise QuizSessionApiError(
+            409,
+            "learning_path_stage_unavailable",
+            "该学习路径阶段已经完成，请返回路径继续下一阶段",
+            reason="stage_completed",
+        )
+    if source.stage_id != record.completed_through + 1:
+        raise QuizSessionApiError(
+            409,
+            "learning_path_stage_unavailable",
+            "请先完成当前可学习阶段",
+            reason="stage_locked",
+        )
+    stage = record.path.stages[source.stage_id - 1]
+    if stage.stage != source.stage_id:
+        raise QuizSessionApiError(
+            503,
+            "learning_path_corrupt",
+            "学习路径阶段数据无效，请重新生成路径",
+        )
+    return req.model_copy(update={"description": stage.description})
 
 
 async def _release_claim(session_id: str, token: str | None) -> None:
@@ -294,7 +401,16 @@ def _objective_memory_pending(record: StoredQuizSession) -> bool:
     return (
         session.status == "completed"
         and not session.profile_written
-        and all(question.type != "short_answer" for question in session.questions)
+        and (
+            session.grading_report is not None
+            or (
+                record.aggregate.learning_path_source is None
+                and all(
+                    question.type != "short_answer"
+                    for question in session.questions
+                )
+            )
+        )
     )
 
 
@@ -410,6 +526,121 @@ async def _complete_claim(
     return record
 
 
+def _grading_report_hash(report: GradingReport) -> str:
+    canonical = json.dumps(
+        report.model_dump(mode="json"),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _stage_completion_pending(record: StoredQuizSession) -> bool:
+    aggregate = record.aggregate
+    session = aggregate.session
+    return bool(
+        aggregate.learning_path_source is not None
+        and aggregate.learning_path_completion is None
+        and session.status == "completed"
+        and session.grading_report is not None
+        and session.profile_written
+    )
+
+
+async def _ensure_stage_completion(
+    session_id: str,
+    token: str,
+    aggregate: QuizSessionAggregate,
+) -> None:
+    source = aggregate.learning_path_source
+    if source is None or aggregate.learning_path_completion is not None:
+        return
+    session = aggregate.session
+    grading = session.grading_report
+    if session.status != "completed" or grading is None or not session.profile_written:
+        raise RuntimeError("learning path completion prerequisites are not durable")
+    try:
+        path = await learning_path_store.complete_stage(
+            source.learning_path_id,
+            source.stage_id,
+            session.session_id,
+            user_id=session.user_id,
+            document_id=session.document_id,
+            grading_report_hash=_grading_report_hash(grading),
+        )
+    except LearningPathStageConflictError as exc:
+        raise QuizSessionApiError(
+            503,
+            "learning_path_progress_corrupt",
+            "学习路径阶段状态已变化，请返回路径后重试",
+            reason=exc.reason,
+        ) from exc
+    except LearningPathCorruptError as exc:
+        raise QuizSessionApiError(
+            503,
+            "learning_path_progress_corrupt",
+            "学习路径进度数据无效，请返回路径后重试",
+        ) from exc
+    except Exception as exc:
+        logger.error("learning path progress write failed: %s", type(exc).__name__)
+        raise QuizSessionApiError(
+            503,
+            "learning_path_store_unavailable",
+            "学习路径进度暂时无法保存，请稍后重试批改",
+        ) from exc
+
+    if path.completed_through < source.stage_id:
+        raise QuizSessionApiError(
+            503,
+            "learning_path_progress_corrupt",
+            "学习路径进度未确认本阶段完成",
+        )
+    aggregate.learning_path_completion = LearningPathCompletion(
+        learning_path_id=source.learning_path_id,
+        stage_id=source.stage_id,
+        completed_through=path.completed_through,
+        revision=path.progress_revision,
+    )
+    await _checkpoint_claim(session_id, token, aggregate)
+
+
+async def _persist_stage_completion(
+    session_id: str,
+    record: StoredQuizSession,
+) -> StoredQuizSession:
+    """Repair a canonical grade whose Learning Path outbox is still pending."""
+    if not _stage_completion_pending(record):
+        return record
+    claim = None
+    try:
+        claim = await quiz_sessions.claim(session_id, "learning_path_progress")
+        if not claim.claimed or claim.record is None or claim.token is None:
+            return record
+        if not _stage_completion_pending(claim.record):
+            await quiz_sessions.release(session_id, claim.token)
+            refreshed = await quiz_sessions.inspect(session_id)
+            return refreshed or record
+        aggregate = claim.record.aggregate.model_copy(deep=True)
+        await _ensure_stage_completion(session_id, claim.token, aggregate)
+        completed = await quiz_sessions.complete(session_id, claim.token, aggregate)
+        if completed is None:
+            await _release_claim(session_id, claim.token)
+            return record
+        return completed
+    except BaseException as exc:
+        if claim is not None and claim.claimed:
+            await _release_claim(session_id, claim.token)
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        logger.warning(
+            "learning path progress repair failed without hiding quiz: %s",
+            type(exc).__name__,
+        )
+        return record
+
+
 async def _grade_and_write_memory(
     session_id: str,
     token: str,
@@ -430,6 +661,7 @@ async def _grade_and_write_memory(
             on_core_written=lambda: setattr(session, "profile_written", True),
         )
         await checkpoint()
+    await _ensure_stage_completion(session_id, token, aggregate)
     return grading
 
 
@@ -439,42 +671,54 @@ async def start(
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
     key = normalize_idempotency_key(idempotency_key)
-    request_payload = req.model_dump(mode="json")
-    if key:
-        try:
-            existing = await quiz_sessions.find_start(key, request_payload)
-        except QuizSessionStartConflictError as exc:
-            raise IdempotencyConflictError(exc.reason) from exc
-        except QuizSessionCorruptError as exc:
-            raise QuizSessionApiError(
-                503,
-                "quiz_session_corrupt",
-                "答题会话数据无效，请重新开始",
-            ) from exc
-        except Exception as exc:
-            logger.error("durable quiz start lookup failed: %s", type(exc).__name__)
-            raise QuizSessionApiError(
-                503,
-                "quiz_session_store_unavailable",
-                "答题会话存储暂时不可用",
-            ) from exc
-        if existing is not None:
-            return _start_response(_require_live(existing))
+    if req.learning_path_source is not None and key is None:
+        raise HTTPException(
+            status_code=400,
+            detail="学习路径阶段练习必须提供 Idempotency-Key",
+        )
+    # exclude_none preserves hashes created before the optional path binding
+    # existed, so legacy start receipts remain replayable after deployment.
+    request_payload = req.model_dump(mode="json", exclude_none=True)
+    existing = await _find_started_quiz(key, request_payload)
+    if existing is not None:
+        return _start_response(_require_live(existing))
 
     try:
-        session = await prepare_session(req)
+        prepared_request = await _bind_learning_path_start(req)
+        session = await prepare_session(prepared_request)
+        if req.learning_path_source is not None:
+            # A long provider call must not create a new session for a stage
+            # that became unavailable while questions were being generated.
+            await _bind_learning_path_start(req)
     except NotFoundError as exc:
+        existing = await _find_started_quiz(key, request_payload)
+        if existing is not None:
+            return _start_response(_require_live(existing))
         raise HTTPException(status_code=404, detail="文档不存在") from exc
     except ChromaError as exc:
+        existing = await _find_started_quiz(key, request_payload)
+        if existing is not None:
+            return _start_response(_require_live(existing))
         logger.error("session start document lookup failed")
         raise HTTPException(status_code=503, detail="文档存储暂时不可用") from exc
     except (InvalidQuizResponseError, ValidationError) as exc:
+        existing = await _find_started_quiz(key, request_payload)
+        if existing is not None:
+            return _start_response(_require_live(existing))
         logger.warning(
             "quiz provider returned invalid structured output: %s", type(exc).__name__
         )
         raise HTTPException(status_code=503, detail="模型返回的题目格式无效") from exc
+    except Exception:
+        existing = await _find_started_quiz(key, request_payload)
+        if existing is not None:
+            return _start_response(_require_live(existing))
+        raise
 
-    aggregate = QuizSessionAggregate(session=session)
+    aggregate = QuizSessionAggregate(
+        session=session,
+        learning_path_source=req.learning_path_source,
+    )
     try:
         decision = await quiz_sessions.create(
             aggregate,
@@ -482,34 +726,37 @@ async def start(
             start_request=request_payload if key else None,
         )
         return _start_response(_require_live(decision.record))
-    except QuizSessionStartConflictError as exc:
-        raise IdempotencyConflictError(exc.reason) from exc
-    except QuizSessionPayloadTooLargeError as exc:
-        raise QuizSessionApiError(
-            413,
-            "quiz_session_too_large",
-            "本次题目内容过大，请减少题目数量",
-        ) from exc
-    except QuizSessionCapacityError as exc:
-        raise QuizSessionApiError(
-            503,
-            "quiz_session_capacity",
-            "当前进行中的答题会话过多，请稍后重试",
-        ) from exc
-    except QuizSessionAlreadyExistsError as exc:
-        logger.error("generated duplicate quiz session identifier")
-        raise QuizSessionApiError(
-            503,
-            "quiz_session_store_unavailable",
-            "答题会话暂时无法创建",
-        ) from exc
-    except QuizSessionCorruptError as exc:
-        raise QuizSessionApiError(
-            503,
-            "quiz_session_corrupt",
-            "答题会话数据无效，请重新开始",
-        ) from exc
     except Exception as exc:
+        existing = await _find_started_quiz(key, request_payload)
+        if existing is not None:
+            return _start_response(_require_live(existing))
+        if isinstance(exc, QuizSessionStartConflictError):
+            raise IdempotencyConflictError(exc.reason) from exc
+        if isinstance(exc, QuizSessionPayloadTooLargeError):
+            raise QuizSessionApiError(
+                413,
+                "quiz_session_too_large",
+                "本次题目内容过大，请减少题目数量",
+            ) from exc
+        if isinstance(exc, QuizSessionCapacityError):
+            raise QuizSessionApiError(
+                503,
+                "quiz_session_capacity",
+                "当前进行中的答题会话过多，请稍后重试",
+            ) from exc
+        if isinstance(exc, QuizSessionAlreadyExistsError):
+            logger.error("generated duplicate quiz session identifier")
+            raise QuizSessionApiError(
+                503,
+                "quiz_session_store_unavailable",
+                "答题会话暂时无法创建",
+            ) from exc
+        if isinstance(exc, QuizSessionCorruptError):
+            raise QuizSessionApiError(
+                503,
+                "quiz_session_corrupt",
+                "答题会话数据无效，请重新开始",
+            ) from exc
         logger.error("durable quiz session create failed: %s", type(exc).__name__)
         raise QuizSessionApiError(
             503,
@@ -522,6 +769,7 @@ async def start(
 async def snapshot(session_id: str):
     record = await _inspect_live(session_id)
     record = await _persist_objective_memory(session_id, record)
+    record = await _persist_stage_completion(session_id, record)
     return _snapshot(record)
 
 
@@ -543,6 +791,7 @@ async def answer(
         replay = _replay_bound_answer(current, key_hash, request_hash, req)
         if replay is not None:
             current = await _persist_objective_memory(session_id, current)
+            current = await _persist_stage_completion(session_id, current)
             return _replay_bound_answer(current, key_hash, request_hash, req) or replay
 
     claim = None
@@ -561,6 +810,7 @@ async def answer(
                 await _release_claim(session_id, claim.token)
                 claim = None
                 repaired = await _persist_objective_memory(session_id, replay_record)
+                repaired = await _persist_stage_completion(session_id, repaired)
                 return (
                     _replay_bound_answer(repaired, key_hash, request_hash, req)
                     or replay
@@ -602,6 +852,7 @@ async def answer(
 async def result(session_id: str):
     record = await _inspect_live(session_id)
     record = await _persist_objective_memory(session_id, record)
+    record = await _persist_stage_completion(session_id, record)
     try:
         response = build_result(record.aggregate.session)
     except SessionConflictError as exc:
@@ -635,6 +886,8 @@ async def grade(session_id: str):
             **grading.model_dump(mode="json"),
             revision=record.revision,
             expires_at=record.expires_at,
+            learning_path_source=record.aggregate.learning_path_source,
+            learning_path_completion=record.aggregate.learning_path_completion,
         )
     except ValidationError as exc:
         await _release_claim(session_id, claim.token)
@@ -673,6 +926,8 @@ async def report(session_id: str):
             **learning_report.model_dump(mode="json"),
             revision=record.revision,
             expires_at=record.expires_at,
+            learning_path_source=record.aggregate.learning_path_source,
+            learning_path_completion=record.aggregate.learning_path_completion,
         )
     except ValidationError as exc:
         await _release_claim(session_id, claim.token)

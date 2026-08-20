@@ -100,12 +100,25 @@ export function normalizeLearningPathResource(value) {
     return null
   }
   const path = normalizePath(value.path)
-  if (!path) return null
+  const progress = value.progress
+  if (
+    !path
+    || !isObject(progress)
+    || !Number.isInteger(progress.completed_through)
+    || progress.completed_through < 0
+    || progress.completed_through > path.total_stages
+    || !Number.isInteger(progress.revision)
+    || progress.revision !== progress.completed_through + 1
+  ) return null
   return {
     schema_version: SCHEMA_VERSION,
     learning_path_id: value.learning_path_id,
     user_id: DEFAULT_USER_ID,
     path,
+    progress: {
+      completed_through: progress.completed_through,
+      revision: progress.revision,
+    },
     created_at: value.created_at,
     expires_at: null,
   }

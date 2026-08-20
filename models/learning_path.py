@@ -70,6 +70,15 @@ class CreateLearningPathRequest(BaseModel):
     document_id: str = Field(min_length=1, max_length=512)
 
 
+class LearningPathProgress(BaseModel):
+    """Authoritative stage progress derived from durable completion events."""
+
+    model_config = ConfigDict(extra="forbid", revalidate_instances="always")
+
+    revision: int = Field(ge=1, strict=True)
+    completed_through: int = Field(ge=0, le=12, strict=True)
+
+
 class LearningPathResource(BaseModel):
     """生成后不可变、可跨刷新恢复的学习路径资源。"""
 
@@ -83,8 +92,18 @@ class LearningPathResource(BaseModel):
     learning_path_id: str = Field(pattern=r"^lp_[0-9a-f]{32}$")
     user_id: Literal["default_user"]
     path: LearningPath
+    progress: LearningPathProgress
     created_at: float = Field(ge=0, allow_inf_nan=False)
     expires_at: None = None
+
+    @model_validator(mode="after")
+    def validate_progress(self) -> "LearningPathResource":
+        completed = self.progress.completed_through
+        if completed > self.path.total_stages:
+            raise ValueError("learning path progress exceeds the stage count")
+        if self.progress.revision != completed + 1:
+            raise ValueError("learning path progress revision is inconsistent")
+        return self
 
 
 # Provider wire schema intentionally contains only JSON types, required fields,

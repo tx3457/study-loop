@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import sqlite3
 import tempfile
@@ -9,7 +10,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from models.quiz import Question
-from models.session import AnswerResult, QuizSession, QuizSessionAggregate
+from models.session import (
+    AnswerResult,
+    LearningPathQuizSource,
+    QuizSession,
+    QuizSessionAggregate,
+)
 from services.quiz_sessions import (
     QuizSessionCapacityError,
     QuizSessionCorruptError,
@@ -113,6 +119,32 @@ class TestQuizSessionStore(unittest.IsolatedAsyncioTestCase):
                 "start-key-123",
                 {"document_id": "other.md", "count": 1},
             )
+
+    def test_optional_path_binding_preserves_legacy_immutable_hash(self):
+        aggregate = _aggregate("legacy-hash")
+        session = aggregate.session
+        canonical = json.dumps(
+            {
+                "session_id": session.session_id,
+                "document_id": session.document_id,
+                "user_id": session.user_id,
+                "questions": [
+                    question.model_dump(mode="json")
+                    for question in session.questions
+                ],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        legacy_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        self.assertEqual(self.store._immutable_hash(aggregate), legacy_hash)
+
+        aggregate.learning_path_source = LearningPathQuizSource(
+            learning_path_id="lp_00000000000000000000000000000000",
+            stage_id=1,
+        )
+        self.assertNotEqual(self.store._immutable_hash(aggregate), legacy_hash)
 
     async def test_claim_checkpoint_complete_and_fencing_takeover(self):
         await self.store.create(_aggregate("s-1"))
