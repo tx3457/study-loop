@@ -138,6 +138,13 @@ worker 和一个 replica，请勿扩容：向量库使用内嵌的 Chroma `Persi
 但它本身并不会把内嵌 Chroma 变成多进程安全；设置 `WEB_CONCURRENCY>1` 也不会绕过该边界。
 若未来要做多 worker/replica，必须先改成独立 Chroma 服务与 `HttpClient`，并同时配置
 PostgreSQL；这只是必要条件，还要把进程内 BM25 缓存失效和文档写入协调改造成跨进程协议。
+当前进程内所有 Chroma 调用会经过一个 daemon 串行通道：`CHROMA_IO_MAX_PENDING`、
+`CHROMA_IO_QUEUE_WAIT_SECONDS`、`CHROMA_IO_OPERATION_TIMEOUT_SECONDS` 和
+`CHROMA_IO_CANCEL_DRAIN_SECONDS` 分别限制准入、排队、公开等待和取消收尾。请求超时或
+断开不会把已开始的 staging/墓碑事务遗弃在线程中；它会继续收束，且不应把这些参数理解为
+多 worker 支持或对非幂等写入进行自动重试。进程正常关闭还会在
+`CHROMA_IO_SHUTDOWN_DRAIN_SECONDS` 内拒绝新任务并收尾已有工作；超过该预算后进程仍可
+退出，因此强制终止无法保证未完成的本地 Chroma 写入已落盘。
 `MEMORY_STORE_SETUP_LOCK_TIMEOUT_SECONDS`、`QUIZ_SESSION_PG_LOCK_TIMEOUT_MS` 等参数控制
 PostgreSQL 状态组件内部的初始化、连接、语句、并发锁与取消清理；它们并不表示完整应用已经支持
 多 worker/replica。未配置 `DATABASE_URL` 时，学习者

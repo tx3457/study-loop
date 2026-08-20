@@ -4,6 +4,8 @@ import os
 import tempfile
 from pathlib import Path
 
+import pytest
+
 
 _chroma_tmp = tempfile.TemporaryDirectory(prefix="study-loop-pytest-chroma-")
 _state_tmp = tempfile.TemporaryDirectory(prefix="study-loop-pytest-state-")
@@ -37,6 +39,15 @@ os.environ["LANGSMITH_API_KEY"] = ""
 os.environ["LANGFUSE_TRACING_ENABLED"] = "false"
 os.environ["LANGFUSE_PUBLIC_KEY"] = ""
 os.environ["LANGFUSE_SECRET_KEY"] = ""
+
+
+@pytest.fixture(autouse=True)
+def _open_vectorstore_lifecycle_for_each_test():
+    """Tests that call services directly emulate application startup ownership."""
+    from services.vectorstore import start_vectorstore_io
+
+    start_vectorstore_io()
+    yield
 
 
 def pytest_sessionfinish(session, exitstatus) -> None:  # noqa: ARG001
