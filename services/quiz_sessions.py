@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
+import math
 import os
 import secrets
 import sqlite3
@@ -27,6 +29,7 @@ from models.session import QuizSessionAggregate
 
 
 load_dotenv(Path(__file__).parent.parent / ".env")
+logger = logging.getLogger(__name__)
 
 _TABLE = "studyloop_quiz_sessions"
 _POSTGRES_SCHEMA_LOCK_ID = 0x5354554459515549  # ASCII "STUDYQUI"
@@ -102,6 +105,11 @@ class QuizSessionStore:
         operation_lease_seconds: float = 10 * 60,
         max_count: int = 500,
         max_payload_bytes: int = 2 * 1024 * 1024,
+        postgres_connect_timeout_seconds: int = 5,
+        postgres_lock_timeout_ms: int = 5_000,
+        postgres_statement_timeout_ms: int = 15_000,
+        schema_init_wait_timeout_seconds: float = 30,
+        cancel_drain_timeout_seconds: float = 20,
         clock: Callable[[], float] = time.time,
     ) -> None:
         if database_url and sqlite_path:
@@ -114,6 +122,22 @@ class QuizSessionStore:
             raise ValueError("max_count must be positive")
         if max_payload_bytes <= 0:
             raise ValueError("max_payload_bytes must be positive")
+        if (
+            not math.isfinite(postgres_connect_timeout_seconds)
+            or postgres_connect_timeout_seconds <= 0
+        ):
+            raise ValueError("postgres_connect_timeout_seconds must be positive")
+        if not math.isfinite(postgres_lock_timeout_ms) or postgres_lock_timeout_ms <= 0:
+            raise ValueError("postgres_lock_timeout_ms must be positive")
+        if not math.isfinite(postgres_statement_timeout_ms) or postgres_statement_timeout_ms <= 0:
+            raise ValueError("postgres_statement_timeout_ms must be positive")
+        if (
+            not math.isfinite(schema_init_wait_timeout_seconds)
+            or schema_init_wait_timeout_seconds <= 0
+        ):
+            raise ValueError("schema_init_wait_timeout_seconds must be positive")
+        if not math.isfinite(cancel_drain_timeout_seconds) or cancel_drain_timeout_seconds <= 0:
+            raise ValueError("cancel_drain_timeout_seconds must be positive")
 
         self._database_url = database_url
         self._sqlite_path = (
@@ -125,9 +149,15 @@ class QuizSessionStore:
         self._operation_lease_seconds = operation_lease_seconds
         self._max_count = max_count
         self._max_payload_bytes = max_payload_bytes
+        self._postgres_connect_timeout_seconds = postgres_connect_timeout_seconds
+        self._postgres_lock_timeout_ms = postgres_lock_timeout_ms
+        self._postgres_statement_timeout_ms = postgres_statement_timeout_ms
+        self._schema_init_wait_timeout_seconds = schema_init_wait_timeout_seconds
+        self._cancel_drain_timeout_seconds = cancel_drain_timeout_seconds
         self._clock = clock
         self._schema_ready = False
         self._schema_lock = threading.Lock()
+        self._background_workers: set[asyncio.Task] = set()
 
     @classmethod
     def from_environment(cls) -> "QuizSessionStore":
@@ -135,12 +165,23 @@ class QuizSessionStore:
         return cls(
             database_url=database_url,
             ttl_seconds=float(os.getenv("QUIZ_SESSION_TTL_SECONDS", "86400")),
-            operation_lease_seconds=float(
-                os.getenv("QUIZ_SESSION_OPERATION_LEASE_SECONDS", "600")
-            ),
+            operation_lease_seconds=float(os.getenv("QUIZ_SESSION_OPERATION_LEASE_SECONDS", "600")),
             max_count=int(os.getenv("QUIZ_SESSION_MAX_COUNT", "500")),
             max_payload_bytes=int(
                 os.getenv("QUIZ_SESSION_MAX_PAYLOAD_BYTES", str(2 * 1024 * 1024))
+            ),
+            postgres_connect_timeout_seconds=int(
+                os.getenv("QUIZ_SESSION_PG_CONNECT_TIMEOUT_SECONDS", "5")
+            ),
+            postgres_lock_timeout_ms=int(os.getenv("QUIZ_SESSION_PG_LOCK_TIMEOUT_MS", "5000")),
+            postgres_statement_timeout_ms=int(
+                os.getenv("QUIZ_SESSION_PG_STATEMENT_TIMEOUT_MS", "15000")
+            ),
+            schema_init_wait_timeout_seconds=float(
+                os.getenv("QUIZ_SESSION_SCHEMA_INIT_WAIT_TIMEOUT_SECONDS", "30")
+            ),
+            cancel_drain_timeout_seconds=float(
+                os.getenv("QUIZ_SESSION_CANCEL_DRAIN_TIMEOUT_SECONDS", "20")
             ),
         )
 
@@ -200,36 +241,28 @@ class QuizSessionStore:
         )
         try:
             return await asyncio.shield(worker)
-        except asyncio.CancelledError as cancelled:
-            while not worker.done():
-                try:
-                    await asyncio.shield(worker)
-                except asyncio.CancelledError:
-                    continue
-            try:
-                decision = worker.result()
-            except BaseException:
-                raise cancelled
+        except asyncio.CancelledError:
+            deadline = asyncio.get_running_loop().time() + self._cancel_drain_timeout_seconds
+            completed, decision = await self._drain_cancelled_worker(
+                worker,
+                deadline=deadline,
+                track_on_timeout=False,
+            )
 
             # A database thread may have committed ownership just before the
             # request was cancelled. The caller never received the fencing
             # token, so the store must release that otherwise-orphaned claim.
-            if decision.claimed:
-                cleanup = asyncio.create_task(
-                    asyncio.to_thread(
-                        self._release_sync,
-                        session_id,
-                        token,
-                        self._clock(),
+            if completed:
+                if decision is not None and decision.claimed:
+                    cleanup = asyncio.create_task(self.release(session_id, token))
+                    await self._drain_cancelled_worker(
+                        cleanup,
+                        deadline=deadline,
                     )
-                )
-                while not cleanup.done():
-                    try:
-                        await asyncio.shield(cleanup)
-                    except asyncio.CancelledError:
-                        continue
-                cleanup.result()
-            raise cancelled
+            else:
+                cleanup = asyncio.create_task(self._release_late_claim(worker, session_id, token))
+                self._track_background_worker(cleanup)
+            raise
 
     async def checkpoint(
         self,
@@ -279,24 +312,85 @@ class QuizSessionStore:
         worker = asyncio.create_task(asyncio.to_thread(function, *args))
         try:
             return await asyncio.shield(worker)
-        except asyncio.CancelledError as cancelled:
-            while not worker.done():
-                try:
-                    await asyncio.shield(worker)
-                except asyncio.CancelledError:
-                    continue
+        except asyncio.CancelledError:
+            await self._drain_cancelled_worker(worker)
+            raise
+
+    async def _release_late_claim(
+        self,
+        worker: asyncio.Task,
+        session_id: str,
+        token: str,
+    ) -> None:
+        try:
+            decision = await asyncio.shield(worker)
+            if decision.claimed:
+                await self.release(session_id, token)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            logger.error(
+                "late Quiz claim cleanup failed: error_type=%s",
+                type(exc).__name__,
+            )
+
+    async def _drain_cancelled_worker(
+        self,
+        worker: asyncio.Task,
+        *,
+        deadline: float | None = None,
+        track_on_timeout: bool = True,
+    ) -> tuple[bool, Any]:
+        """Drain a shielded database worker without extending its deadline."""
+        loop = asyncio.get_running_loop()
+        if deadline is None:
+            deadline = loop.time() + self._cancel_drain_timeout_seconds
+
+        while not worker.done():
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                if track_on_timeout:
+                    self._track_background_worker(worker)
+                return False, None
             try:
-                worker.result()
+                await asyncio.wait_for(asyncio.shield(worker), timeout=remaining)
+            except asyncio.CancelledError:
+                continue
+            except TimeoutError:
+                continue
             except BaseException:
-                raise cancelled
-            raise cancelled
+                # The worker failure is consumed below so cancellation remains
+                # the public outcome.
+                break
+
+        try:
+            return True, worker.result()
+        except BaseException as exc:
+            logger.error(
+                "cancelled Quiz store worker failed: error_type=%s",
+                type(exc).__name__,
+            )
+            return True, None
+
+    def _track_background_worker(self, worker: asyncio.Task) -> None:
+        self._background_workers.add(worker)
+
+        def on_done(completed: asyncio.Task) -> None:
+            self._background_workers.discard(completed)
+            try:
+                completed.result()
+            except BaseException as exc:
+                logger.error(
+                    "background Quiz store worker failed: error_type=%s",
+                    type(exc).__name__,
+                )
+
+        worker.add_done_callback(on_done)
 
     def _serialize_payload(self, aggregate: QuizSessionAggregate) -> str:
         # Revalidate a deep JSON copy so assignment to nested legacy models can
         # never bypass durable state-machine invariants.
-        validated = QuizSessionAggregate.model_validate(
-            aggregate.model_dump(mode="json")
-        )
+        validated = QuizSessionAggregate.model_validate(aggregate.model_dump(mode="json"))
         payload_json = json.dumps(
             validated.model_dump(mode="json"),
             ensure_ascii=False,
@@ -307,8 +401,7 @@ class QuizSessionStore:
         payload_bytes = len(payload_json.encode("utf-8"))
         if payload_bytes > self._max_payload_bytes:
             raise QuizSessionPayloadTooLargeError(
-                f"quiz session payload is {payload_bytes} bytes; "
-                f"limit is {self._max_payload_bytes}"
+                f"quiz session payload is {payload_bytes} bytes; limit is {self._max_payload_bytes}"
             )
         return payload_json
 
@@ -339,15 +432,13 @@ class QuizSessionStore:
             "session_id": session.session_id,
             "document_id": session.document_id,
             "user_id": session.user_id,
-            "questions": [
-                question.model_dump(mode="json") for question in session.questions
-            ],
+            "questions": [question.model_dump(mode="json") for question in session.questions],
         }
         # Preserve the exact legacy hash for every unbound Quiz.  A stage
         # binding is immutable only for newly-created Learning Path quizzes.
         if aggregate.learning_path_source is not None:
-            immutable["learning_path_source"] = (
-                aggregate.learning_path_source.model_dump(mode="json")
+            immutable["learning_path_source"] = aggregate.learning_path_source.model_dump(
+                mode="json"
             )
         canonical = json.dumps(
             immutable,
@@ -361,8 +452,22 @@ class QuizSessionStore:
     def _connect(self):
         if self._database_url:
             import psycopg
+            from psycopg.conninfo import conninfo_to_dict
 
-            return psycopg.connect(self._database_url)
+            connection_parameters = conninfo_to_dict(self._database_url)
+            if "options" in connection_parameters:
+                existing_options = (connection_parameters.get("options") or "").strip()
+            else:
+                existing_options = os.getenv("PGOPTIONS", "").strip()
+            bounded_options = (
+                f"-c lock_timeout={self._postgres_lock_timeout_ms}ms "
+                f"-c statement_timeout={self._postgres_statement_timeout_ms}ms"
+            )
+            return psycopg.connect(
+                self._database_url,
+                connect_timeout=self._postgres_connect_timeout_seconds,
+                options=f"{existing_options} {bounded_options}".strip(),
+            )
         path = Path(self._sqlite_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(path, timeout=10)
@@ -394,7 +499,10 @@ class QuizSessionStore:
     def _ensure_schema(self) -> None:
         if self._schema_ready:
             return
-        with self._schema_lock:
+        acquired = self._schema_lock.acquire(timeout=self._schema_init_wait_timeout_seconds)
+        if not acquired:
+            raise TimeoutError("quiz session schema initialization timed out")
+        try:
             if self._schema_ready:
                 return
             with self._transaction(write=True) as connection:
@@ -448,6 +556,8 @@ class QuizSessionStore:
                     """
                 )
             self._schema_ready = True
+        finally:
+            self._schema_lock.release()
 
     def _create_sync(
         self,
@@ -503,9 +613,7 @@ class QuizSessionStore:
             row = self._select_by_id(connection, session_id)
             if row is None:
                 raise RuntimeError("quiz session disappeared after create")
-            return QuizSessionCreateResult(
-                record=self._row_to_record(row, now), created=True
-            )
+            return QuizSessionCreateResult(record=self._row_to_record(row, now), created=True)
 
     def _find_start_sync(
         self,
@@ -753,9 +861,7 @@ class QuizSessionStore:
         claim_token = row[9]
         claim_expires_at = row[10]
         busy = bool(
-            claim_token is not None
-            and claim_expires_at is not None
-            and claim_expires_at > now
+            claim_token is not None and claim_expires_at is not None and claim_expires_at > now
         )
         return StoredQuizSession(
             aggregate=aggregate,
