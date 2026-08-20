@@ -120,3 +120,38 @@ jobs:
       - uses: actions/checkout@v7
       - name: Validate Docker Compose security defaults
         run: python scripts/check_compose_security.py
+
+  container-smoke:
+    name: Container smoke (nginx → backend → storage)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      POSTGRES_PASSWORD: ci-container-password
+      ENV_FILE: .env.example
+      COMPOSE_ANSI: never
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build production images
+        run: docker compose build backend frontend
+      - name: Seed a legacy root-owned Chroma volume
+        run: >-
+          docker compose run --rm --no-deps --user 0:0 backend
+          sh -c "touch /app/chroma_db/legacy-root-owned && chown -R 0:0 /app/chroma_db"
+      - name: Start the local stack and wait for health
+        run: docker compose up -d --wait --wait-timeout 180
+      - name: Verify HTTP routing and backend user
+        run: |
+          curl --fail --silent --show-error --retry 10 --retry-delay 2 --retry-connrefused --connect-timeout 2 --max-time 5 http://127.0.0.1:8001/health/live
+          curl --fail --silent --show-error --retry 10 --retry-delay 2 --retry-connrefused --connect-timeout 2 --max-time 5 http://127.0.0.1:4001/
+          curl --fail --silent --show-error --retry 10 --retry-delay 2 --retry-connrefused --connect-timeout 2 --max-time 5 http://127.0.0.1:4001/api/health/live
+          test "$(docker compose exec -T backend id -u)" = "10001"
+          test "$(docker compose exec -T backend id -g)" = "10001"
+          docker compose exec -T backend python -c "from pathlib import Path; p = Path('/app/chroma_db/nonroot-smoke'); p.write_text('ok'); p.unlink()"
+      - name: Show container diagnostics
+        if: ${{ failure() }}
+        run: |
+          docker compose ps --all || true
+          docker compose logs --no-color || true
+      - name: Remove containers and test volumes
+        if: ${{ always() }}
+        run: docker compose down --volumes --remove-orphans
