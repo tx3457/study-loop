@@ -577,6 +577,7 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
             ))
 
         dispatch.assert_not_awaited()
+        self.assertEqual(out.tools_called, [])
         self.assertTrue(out.abstained)
         self.assertEqual(out.citations, [])
         self.assertEqual(out.steps[0].blocked_reason, "document_scope_mismatch")
@@ -608,6 +609,7 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
             ))
 
         dispatch.assert_not_awaited()
+        self.assertEqual(out.tools_called, [])
         self.assertEqual(
             [step.blocked_reason for step in out.steps[:2]],
             ["document_scope_mismatch", "user_scope_mismatch"],

@@ -19,6 +19,7 @@ from services.idempotency import (
     request_idempotency,
 )
 from services.request_context import current_request_id, safe_sse_error
+from services.tool_scope import build_business_tool_scope_guard
 
 conversations: dict[str, list] = {}
 router = APIRouter()
@@ -123,6 +124,8 @@ async def _execute_chat_with_tools(
     context_hint = f"\n当前用户 ID: {req.user_id}"
     if req.document_id:
         context_hint += f"\n当前文档 ID: {req.document_id}"
+    else:
+        context_hint += "\n当前请求未绑定文档，不得调用需要 document_id 的工具"
 
     messages = [
         {"role": "system", "content": _TOOL_SYSTEM + context_hint},
@@ -130,6 +133,11 @@ async def _execute_chat_with_tools(
     ]
 
     tools_called: list[str] = []
+    business_tool_guard = build_business_tool_scope_guard(
+        user_id=req.user_id,
+        document_id=req.document_id,
+        allow_unbound_document_selection=False,
+    )
     for _ in range(MAX_TOOL_ROUNDS):
         if idempotency_lease is not None:
             renewed = await request_idempotency.renew(idempotency_lease)
@@ -147,6 +155,7 @@ async def _execute_chat_with_tools(
                 idempotency_lease.key if idempotency_lease is not None else None
             ),
             idempotency_lease=idempotency_lease,
+            business_tool_guard=business_tool_guard,
         )
 
         # 无 tool_calls → LLM 直接回复，执行第 4 层输出检查后返回

@@ -209,6 +209,30 @@ class TestApiErrorBoundaries(unittest.TestCase):
         self.assertEqual(oversized.status_code, 422)
         injection_check.assert_not_awaited()
 
+    def test_tool_chat_request_boundaries_fail_before_agent_execution(self):
+        invalid_payloads = [
+            {"message": ""},
+            {"message": " "},
+            {"message": "x" * 8001},
+            {"message": "x", "user_id": " "},
+            {"message": "x", "user_id": "x" * 129},
+            {"message": "x", "user_id": "user\nadmin"},
+            {"message": "x", "user_id": "user\x7f"},
+            {"message": "x", "document_id": " "},
+            {"message": "x", "document_id": "x" * 513},
+            {"message": "x", "document_id": "doc\tother"},
+            {"message": "x", "unexpected": True},
+        ]
+        injection_check = AsyncMock()
+
+        with patch.object(chat_router, "check_injection", injection_check):
+            for payload in invalid_payloads:
+                with self.subTest(payload=payload):
+                    response = self.client.post("/chat/tools", json=payload)
+                    self.assertEqual(response.status_code, 422, response.text)
+
+        injection_check.assert_not_awaited()
+
     def test_invalid_persisted_session_version_is_consumed_fail_closed(self):
         conversation_id = "invalid-session-version"
         secret = "sk-123456789012345678901234"
