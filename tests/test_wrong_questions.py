@@ -159,6 +159,49 @@ class TestWrongQuestionMemory(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored.value["resolved_session_id"], "resolved-session")
         self.assertTrue(stored.value["resolved_at"])
 
+    async def test_late_original_retry_cannot_revive_a_resolved_error(self):
+        import services.memory as memory
+        from services.wrong_questions import get_wrong_questions
+
+        source_error_id = f"{self.session_id}:0"
+        original_report = _wrong_report(self.session_id)
+        await memory.write_episodic_memory(
+            self.user_id,
+            original_report,
+            self.document_id,
+            questions=[self.question],
+        )
+        practice_question = self.question.model_copy(
+            update={"source": f"wrong-question:{source_error_id}"}
+        )
+        await memory.write_episodic_memory(
+            self.user_id,
+            _correct_report("resolved-before-retry"),
+            self.document_id,
+            questions=[practice_question],
+        )
+
+        # A delayed memory retry from the original failed commit must be a
+        # no-op instead of overwriting the later monotonic resolution fields.
+        await memory.write_episodic_memory(
+            self.user_id,
+            original_report,
+            self.document_id,
+            questions=[self.question],
+        )
+
+        bank = await get_wrong_questions(self.document_id, user_id=self.user_id)
+        stored = memory.store.get(
+            ("users", self.user_id, "error_log"),
+            source_error_id,
+        )
+        self.assertEqual(bank.total, 0)
+        self.assertEqual(
+            stored.value["resolved_session_id"],
+            "resolved-before-retry",
+        )
+        self.assertTrue(stored.value["resolved_at"])
+
     async def test_legacy_store_key_can_be_resolved_without_creating_a_copy(self):
         import services.memory as memory
         from services.wrong_questions import get_wrong_questions

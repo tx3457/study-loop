@@ -420,6 +420,73 @@ class TestDurableWebQuizGrading(unittest.TestCase):
             self._inspect(session_id).aggregate.session.profile_written
         )
 
+    def test_snapshot_memory_repair_uses_cached_canonical_grading(self):
+        session_id = "durable-objective-memory-repair"
+        self._seed(
+            _completed_session(
+                session_id,
+                questions=[_question(question_type="choice")],
+                answers=["B. Cache"],
+            )
+        )
+        llm_grade = AsyncMock(
+            return_value=_feedback(
+                is_correct=False,
+                label="canonical-ai-feedback",
+            )
+        )
+
+        with (
+            patch.object(grader_service, "_llm_grade", llm_grade),
+            patch.object(
+                session_router,
+                "commit_learning_memory",
+                AsyncMock(side_effect=RuntimeError("memory unavailable")),
+            ),
+        ):
+            failed = self.client.post(f"/session/{session_id}/grade")
+
+        self.assertEqual(failed.status_code, 500, failed.text)
+        checkpoint = self._inspect(session_id)
+        canonical = checkpoint.aggregate.session.grading_report
+        self.assertIsNotNone(canonical)
+        self.assertFalse(checkpoint.aggregate.session.profile_written)
+        self.assertEqual(canonical.grades[0].ai_feedback, "canonical-ai-feedback")
+        self.assertEqual(canonical.grades[0].knowledge_gap, "retrieval order")
+
+        captured = {}
+
+        async def capture_memory(user_id, report, document_id, **kwargs):
+            captured.update(
+                user_id=user_id,
+                report=report.model_copy(deep=True),
+                document_id=document_id,
+            )
+            kwargs["on_core_written"]()
+
+        self._reopen_store()
+        with (
+            patch.object(
+                session_router,
+                "commit_learning_memory",
+                side_effect=capture_memory,
+            ),
+            patch.object(
+                session_router,
+                "write_objective_profile",
+                AsyncMock(side_effect=AssertionError("fallback report was used")),
+            ),
+        ):
+            recovered = self.client.get(f"/session/{session_id}")
+
+        self.assertEqual(recovered.status_code, 200, recovered.text)
+        self.assertEqual(captured["user_id"], "user-1")
+        self.assertEqual(captured["document_id"], "notes.md")
+        self.assertEqual(captured["report"].model_dump(), canonical.model_dump())
+        self.assertTrue(
+            self._inspect(session_id).aggregate.session.profile_written
+        )
+
     def test_report_retry_and_reopen_reuses_canonical_caches_and_memory(self):
         session_id = "durable-report-retry"
         self._seed(_completed_session(session_id))
