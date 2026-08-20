@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import math
 import os
 import secrets
@@ -27,6 +28,7 @@ from models.adaptive_session import AdaptiveSessionAggregate
 
 
 load_dotenv(Path(__file__).parent.parent / ".env")
+logger = logging.getLogger(__name__)
 
 _TABLE = "studyloop_adaptive_sessions"
 _SCHEMA_VERSION = 1
@@ -104,27 +106,39 @@ class AdaptiveSessionStore:
         postgres_connect_timeout_seconds: int = 5,
         postgres_lock_timeout_ms: int = 5_000,
         postgres_statement_timeout_ms: int = 15_000,
+        postgres_tcp_user_timeout_ms: int = 30_000,
+        schema_init_wait_timeout_seconds: float = 30,
+        cancel_drain_timeout_seconds: float = 20,
         clock: Callable[[], float] = time.time,
     ) -> None:
         if database_url and sqlite_path:
             raise ValueError("database_url and sqlite_path are mutually exclusive")
         if not math.isfinite(ttl_seconds) or ttl_seconds <= 0:
             raise ValueError("ttl_seconds must be positive")
-        if (
-            not math.isfinite(operation_lease_seconds)
-            or operation_lease_seconds <= 0
-        ):
+        if not math.isfinite(operation_lease_seconds) or operation_lease_seconds <= 0:
             raise ValueError("operation_lease_seconds must be positive")
         if max_count <= 0:
             raise ValueError("max_count must be positive")
         if max_payload_bytes <= 0:
             raise ValueError("max_payload_bytes must be positive")
-        if postgres_connect_timeout_seconds <= 0:
+        if (
+            not math.isfinite(postgres_connect_timeout_seconds)
+            or postgres_connect_timeout_seconds <= 0
+        ):
             raise ValueError("postgres_connect_timeout_seconds must be positive")
-        if postgres_lock_timeout_ms <= 0:
+        if not math.isfinite(postgres_lock_timeout_ms) or postgres_lock_timeout_ms <= 0:
             raise ValueError("postgres_lock_timeout_ms must be positive")
-        if postgres_statement_timeout_ms <= 0:
+        if not math.isfinite(postgres_statement_timeout_ms) or postgres_statement_timeout_ms <= 0:
             raise ValueError("postgres_statement_timeout_ms must be positive")
+        if not math.isfinite(postgres_tcp_user_timeout_ms) or postgres_tcp_user_timeout_ms <= 0:
+            raise ValueError("postgres_tcp_user_timeout_ms must be positive")
+        if (
+            not math.isfinite(schema_init_wait_timeout_seconds)
+            or schema_init_wait_timeout_seconds <= 0
+        ):
+            raise ValueError("schema_init_wait_timeout_seconds must be positive")
+        if not math.isfinite(cancel_drain_timeout_seconds) or cancel_drain_timeout_seconds <= 0:
+            raise ValueError("cancel_drain_timeout_seconds must be positive")
 
         self._database_url = database_url
         self._sqlite_path = (
@@ -139,9 +153,13 @@ class AdaptiveSessionStore:
         self._postgres_connect_timeout_seconds = postgres_connect_timeout_seconds
         self._postgres_lock_timeout_ms = postgres_lock_timeout_ms
         self._postgres_statement_timeout_ms = postgres_statement_timeout_ms
+        self._postgres_tcp_user_timeout_ms = postgres_tcp_user_timeout_ms
+        self._schema_init_wait_timeout_seconds = schema_init_wait_timeout_seconds
+        self._cancel_drain_timeout_seconds = cancel_drain_timeout_seconds
         self._clock = clock
         self._schema_ready = False
         self._schema_lock = threading.Lock()
+        self._background_workers: set[asyncio.Task] = set()
 
     @classmethod
     def from_environment(cls) -> "AdaptiveSessionStore":
@@ -161,11 +179,18 @@ class AdaptiveSessionStore:
             postgres_connect_timeout_seconds=int(
                 os.getenv("ADAPTIVE_SESSION_PG_CONNECT_TIMEOUT_SECONDS", "5")
             ),
-            postgres_lock_timeout_ms=int(
-                os.getenv("ADAPTIVE_SESSION_PG_LOCK_TIMEOUT_MS", "5000")
-            ),
+            postgres_lock_timeout_ms=int(os.getenv("ADAPTIVE_SESSION_PG_LOCK_TIMEOUT_MS", "5000")),
             postgres_statement_timeout_ms=int(
                 os.getenv("ADAPTIVE_SESSION_PG_STATEMENT_TIMEOUT_MS", "15000")
+            ),
+            postgres_tcp_user_timeout_ms=int(
+                os.getenv("ADAPTIVE_SESSION_PG_TCP_USER_TIMEOUT_MS", "30000")
+            ),
+            schema_init_wait_timeout_seconds=float(
+                os.getenv("ADAPTIVE_SESSION_SCHEMA_INIT_WAIT_TIMEOUT_SECONDS", "30")
+            ),
+            cancel_drain_timeout_seconds=float(
+                os.getenv("ADAPTIVE_SESSION_CANCEL_DRAIN_TIMEOUT_SECONDS", "20")
             ),
         )
 
@@ -176,9 +201,7 @@ class AdaptiveSessionStore:
         start_key: str | None = None,
         start_request: dict[str, Any] | None = None,
     ) -> AdaptiveSessionCreateResult:
-        validated, payload_json, immutable_hash, row_status = (
-            self._prepare_aggregate(aggregate)
-        )
+        validated, payload_json, immutable_hash, row_status = self._prepare_aggregate(aggregate)
         key_hash, request_hash = self._start_hashes(start_key, start_request)
         return await self._run_thread(
             self._create_sync,
@@ -212,11 +235,7 @@ class AdaptiveSessionStore:
     async def claim(self, session_id: str, operation: str) -> AdaptiveSessionClaim:
         if not session_id:
             return AdaptiveSessionClaim(claimed=False, reason="missing")
-        if (
-            not isinstance(operation, str)
-            or not operation
-            or len(operation) > 64
-        ):
+        if not isinstance(operation, str) or not operation or len(operation) > 64:
             raise ValueError("invalid adaptive session operation")
 
         token = secrets.token_urlsafe(32)
@@ -231,32 +250,23 @@ class AdaptiveSessionStore:
         try:
             return await asyncio.shield(worker)
         except asyncio.CancelledError as cancelled:
-            while not worker.done():
-                try:
-                    await asyncio.shield(worker)
-                except asyncio.CancelledError:
-                    continue
-            try:
-                decision = worker.result()
-            except BaseException:
-                raise cancelled
-
-            # The database thread can commit after its caller is cancelled. A
-            # token that was never returned must not leave an orphaned claim.
-            if decision.claimed:
+            deadline = asyncio.get_running_loop().time() + self._cancel_drain_timeout_seconds
+            completed, _ = await self._drain_cancelled_worker(
+                worker,
+                deadline=deadline,
+                track_on_timeout=False,
+            )
+            if completed:
                 cleanup = asyncio.create_task(
-                    asyncio.to_thread(
-                        self._release_sync,
-                        session_id,
-                        token,
-                    )
+                    self._run_thread(self._release_sync, session_id, token)
                 )
-                while not cleanup.done():
-                    try:
-                        await asyncio.shield(cleanup)
-                    except asyncio.CancelledError:
-                        continue
-                cleanup.result()
+                await self._drain_cancelled_worker(
+                    cleanup,
+                    deadline=deadline,
+                )
+            else:
+                cleanup = asyncio.create_task(self._release_late_claim(worker, session_id, token))
+                self._track_background_worker(cleanup)
             raise cancelled
 
     async def checkpoint(
@@ -268,9 +278,7 @@ class AdaptiveSessionStore:
     ) -> StoredAdaptiveSession | None:
         self._validate_claim_token(claim_token)
         self._validate_expected_revision(expected_revision)
-        validated, payload_json, immutable_hash, row_status = (
-            self._prepare_aggregate(aggregate)
-        )
+        validated, payload_json, immutable_hash, row_status = self._prepare_aggregate(aggregate)
         if validated.adaptive_session_id != session_id:
             raise ValueError("adaptive session id does not match aggregate")
         return await self._run_thread(
@@ -292,9 +300,7 @@ class AdaptiveSessionStore:
     ) -> StoredAdaptiveSession | None:
         self._validate_claim_token(claim_token)
         self._validate_expected_revision(expected_revision)
-        validated, payload_json, immutable_hash, row_status = (
-            self._prepare_aggregate(aggregate)
-        )
+        validated, payload_json, immutable_hash, row_status = self._prepare_aggregate(aggregate)
         if validated.adaptive_session_id != session_id:
             raise ValueError("adaptive session id does not match aggregate")
         return await self._run_thread(
@@ -322,24 +328,89 @@ class AdaptiveSessionStore:
         try:
             return await asyncio.shield(worker)
         except asyncio.CancelledError as cancelled:
-            while not worker.done():
-                try:
-                    await asyncio.shield(worker)
-                except asyncio.CancelledError:
-                    continue
-            try:
-                worker.result()
-            except BaseException:
-                raise cancelled
+            await self._drain_cancelled_worker(worker)
             raise cancelled
+
+    async def _release_late_claim(
+        self,
+        worker: asyncio.Task,
+        session_id: str,
+        token: str,
+    ) -> None:
+        """Release only the captured token after a late claim worker settles."""
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            logger.error(
+                "late Adaptive claim worker failed: error_type=%s",
+                type(exc).__name__,
+            )
+        try:
+            await self._run_thread(self._release_sync, session_id, token)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            logger.error(
+                "late Adaptive claim cleanup failed: error_type=%s",
+                type(exc).__name__,
+            )
+
+    async def _drain_cancelled_worker(
+        self,
+        worker: asyncio.Task,
+        *,
+        deadline: float | None = None,
+        track_on_timeout: bool = True,
+    ) -> tuple[bool, Any]:
+        """Drain a shielded database worker without extending its deadline."""
+        loop = asyncio.get_running_loop()
+        if deadline is None:
+            deadline = loop.time() + self._cancel_drain_timeout_seconds
+
+        while not worker.done():
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                if track_on_timeout:
+                    self._track_background_worker(worker)
+                return False, None
+            try:
+                await asyncio.wait_for(asyncio.shield(worker), timeout=remaining)
+            except asyncio.CancelledError:
+                continue
+            except TimeoutError:
+                continue
+            except BaseException:
+                break
+
+        try:
+            return True, worker.result()
+        except BaseException as exc:
+            logger.error(
+                "cancelled Adaptive store worker failed: error_type=%s",
+                type(exc).__name__,
+            )
+            return True, None
+
+    def _track_background_worker(self, worker: asyncio.Task) -> None:
+        self._background_workers.add(worker)
+
+        def on_done(completed: asyncio.Task) -> None:
+            self._background_workers.discard(completed)
+            try:
+                completed.result()
+            except BaseException as exc:
+                logger.error(
+                    "background Adaptive store worker failed: error_type=%s",
+                    type(exc).__name__,
+                )
+
+        worker.add_done_callback(on_done)
 
     @staticmethod
     def _validate_claim_token(claim_token: str) -> None:
-        if (
-            not isinstance(claim_token, str)
-            or not claim_token
-            or len(claim_token) > 256
-        ):
+        if not isinstance(claim_token, str) or not claim_token or len(claim_token) > 256:
             raise ValueError("invalid adaptive session claim token")
 
     @staticmethod
@@ -410,11 +481,7 @@ class AdaptiveSessionStore:
             if start_request is not None:
                 raise ValueError("start_key is required with start_request")
             return None, None
-        if (
-            not isinstance(start_key, str)
-            or not start_key
-            or len(start_key) > 1024
-        ):
+        if not isinstance(start_key, str) or not start_key or len(start_key) > 1024:
             raise ValueError("invalid adaptive start key")
         if not isinstance(start_request, dict):
             raise ValueError("start_request is required with start_key")
@@ -435,14 +502,37 @@ class AdaptiveSessionStore:
     def _connect(self):
         if self._database_url:
             import psycopg
+            from psycopg.conninfo import conninfo_to_dict
+
+            try:
+                connection_parameters = conninfo_to_dict(self._database_url)
+            except Exception:
+                raise ValueError("PostgreSQL Adaptive session DATABASE_URL is invalid") from None
+            explicit_options = connection_parameters.get("options")
+            environment_options = os.getenv("PGOPTIONS", "").strip()
+            service_configured = bool(
+                connection_parameters.get("service") or os.getenv("PGSERVICE")
+            )
+            if service_configured and explicit_options is None and not environment_options:
+                raise ValueError(
+                    "PostgreSQL service DSNs must expose connection options "
+                    "through DATABASE_URL or PGOPTIONS so Adaptive session "
+                    "safety limits can be merged without silently discarding "
+                    "service-file options"
+                )
+            existing_options = (
+                str(explicit_options) if explicit_options is not None else environment_options
+            ).strip()
+            bounded_options = (
+                f"-c lock_timeout={self._postgres_lock_timeout_ms}ms "
+                f"-c statement_timeout={self._postgres_statement_timeout_ms}ms"
+            )
 
             connection = psycopg.connect(
                 self._database_url,
                 connect_timeout=self._postgres_connect_timeout_seconds,
-                options=(
-                    f"-c lock_timeout={self._postgres_lock_timeout_ms}ms "
-                    f"-c statement_timeout={self._postgres_statement_timeout_ms}ms"
-                ),
+                tcp_user_timeout=self._postgres_tcp_user_timeout_ms,
+                options=f"{existing_options} {bounded_options}".strip(),
             )
             return connection
         path = Path(self._sqlite_path)
@@ -477,9 +567,7 @@ class AdaptiveSessionStore:
         try:
             value = float(self._clock())
         except (TypeError, ValueError) as exc:
-            raise ValueError(
-                "adaptive session clock returned an invalid value"
-            ) from exc
+            raise ValueError("adaptive session clock returned an invalid value") from exc
         if not math.isfinite(value):
             raise ValueError("adaptive session clock returned an invalid value")
         return value
@@ -491,7 +579,10 @@ class AdaptiveSessionStore:
     def _ensure_schema(self) -> None:
         if self._schema_ready:
             return
-        with self._schema_lock:
+        acquired = self._schema_lock.acquire(timeout=self._schema_init_wait_timeout_seconds)
+        if not acquired:
+            raise TimeoutError("Adaptive session schema initialization timed out")
+        try:
             if self._schema_ready:
                 return
             with self._transaction(write=True) as connection:
@@ -549,6 +640,8 @@ class AdaptiveSessionStore:
                     """
                 )
             self._schema_ready = True
+        finally:
+            self._schema_lock.release()
 
     def _create_sync(
         self,
@@ -654,11 +747,7 @@ class AdaptiveSessionStore:
                 return AdaptiveSessionClaim(claimed=False, reason="expired")
             if row[3] == "done":
                 return AdaptiveSessionClaim(claimed=False, reason="done")
-            if (
-                row[9] is not None
-                and row[10] is not None
-                and float(row[10]) > now
-            ):
+            if row[9] is not None and row[10] is not None and float(row[10]) > now:
                 return AdaptiveSessionClaim(claimed=False, reason="in_progress")
 
             lease_expires = now + self._operation_lease_seconds
@@ -840,9 +929,7 @@ class AdaptiveSessionStore:
             (now,),
         ).fetchall()
         if len(rows) < required:
-            raise AdaptiveSessionCapacityError(
-                "all adaptive session capacity is active"
-            )
+            raise AdaptiveSessionCapacityError("all adaptive session capacity is active")
         for (session_id,) in rows[:required]:
             connection.execute(
                 f"DELETE FROM {_TABLE} WHERE session_id = {p}",
@@ -898,31 +985,23 @@ class AdaptiveSessionStore:
             ValidationError,
             ValueError,
         ) as exc:
-            raise AdaptiveSessionCorruptError(
-                "invalid durable adaptive session payload"
-            ) from exc
+            raise AdaptiveSessionCorruptError("invalid durable adaptive session payload") from exc
 
     def _row_to_record(self, row, now: float) -> StoredAdaptiveSession:
         if row[1] != _SCHEMA_VERSION:
-            raise AdaptiveSessionCorruptError(
-                "unsupported adaptive session schema version"
-            )
+            raise AdaptiveSessionCorruptError("unsupported adaptive session schema version")
         if row[3] not in _ROW_TO_AGGREGATE_STATUS:
             raise AdaptiveSessionCorruptError("invalid adaptive session status")
         immutable_hash = row[5]
         if not isinstance(immutable_hash, str) or not immutable_hash:
-            raise AdaptiveSessionCorruptError(
-                "invalid adaptive session immutable hash"
-            )
+            raise AdaptiveSessionCorruptError("invalid adaptive session immutable hash")
         aggregate = self._decode_payload(row[2])
         if (
             aggregate.adaptive_session_id != row[0]
             or _AGGREGATE_TO_ROW_STATUS.get(aggregate.status) != row[3]
             or self._immutable_hash(aggregate) != immutable_hash
         ):
-            raise AdaptiveSessionCorruptError(
-                "adaptive session row does not match payload"
-            )
+            raise AdaptiveSessionCorruptError("adaptive session row does not match payload")
         claim_token = row[9]
         claim_expires_at = row[10]
         busy = bool(
