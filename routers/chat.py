@@ -7,7 +7,10 @@ from fastapi.responses import StreamingResponse
 from models.chat import ChatRequest, HistoryRequest, ToolChatRequest, ToolChatResponse
 from services.llm import _client as _client, chat, chat_structured, chat_stream, chat_history
 from services.compression import compress_chat_history, COMPRESS_THRESHOLD
-from services.tools import get_tool_definitions
+from services.tools import (
+    get_read_only_tool_capabilities,
+    get_tool_definitions,
+)
 from services.tool_loop import run_tool_round
 from services.tool_registry import SideEffectAmbiguousError, tool_registry
 from services.injection import check_injection, check_output_leak
@@ -106,6 +109,7 @@ async def _execute_chat_with_tools(
 
     LLM 根据用户自然语言自主决定调用哪些工具，执行后生成最终回复。
     支持多轮 tool calling（最多 3 轮），覆盖需要多步推理的场景。
+    未持有幂等收据时仅暴露只读工具；有效收据会启用全量工具。
 
     示例：
       用户: "帮我出 5 道关于 Transformer 的选择题"
@@ -126,9 +130,16 @@ async def _execute_chat_with_tools(
         context_hint += f"\n当前文档 ID: {req.document_id}"
     else:
         context_hint += "\n当前请求未绑定文档，不得调用需要 document_id 的工具"
+    if idempotency_lease is None:
+        receipt_hint = (
+            "\n本请求未提供幂等键，仅可使用本轮暴露的只读工具；"
+            "不得调用画像读写等有状态工具。"
+        )
+    else:
+        receipt_hint = "\n本请求已启用幂等收据，可使用本轮暴露的有状态工具。"
 
     messages = [
-        {"role": "system", "content": _TOOL_SYSTEM + context_hint},
+        {"role": "system", "content": _TOOL_SYSTEM + context_hint + receipt_hint},
         {"role": "user", "content": req.message},
     ]
 
@@ -138,6 +149,11 @@ async def _execute_chat_with_tools(
         document_id=req.document_id,
         allow_unbound_document_selection=False,
     )
+    if idempotency_lease is None:
+        tool_definitions, business_tool_allowlist = get_read_only_tool_capabilities()
+    else:
+        tool_definitions = None
+        business_tool_allowlist = None
     for _ in range(MAX_TOOL_ROUNDS):
         if idempotency_lease is not None:
             renewed = await request_idempotency.renew(idempotency_lease)
@@ -147,8 +163,13 @@ async def _execute_chat_with_tools(
         # 传 client=_client 保留测试注入；白名单从 registry 派生。
         round_result = await run_tool_round(
             messages,
-            tools=get_tool_definitions(),
+            tools=(
+                get_tool_definitions()
+                if tool_definitions is None
+                else tool_definitions
+            ),
             client=_client,
+            business_tool_allowlist=business_tool_allowlist,
             run_id=run_id,
             user_id=req.user_id,
             idempotency_key=(
@@ -192,7 +213,7 @@ async def chat_with_tools(
         default=None, alias="Idempotency-Key"
     ),
 ) -> ToolChatResponse:
-    """Run tool chat with an optional durable replay receipt."""
+    """Run read-only tool chat, enabling stateful tools with a durable receipt."""
     key = normalize_idempotency_key(idempotency_key)
     receipt_lease = None
     if key:

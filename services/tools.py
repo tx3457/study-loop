@@ -383,8 +383,9 @@ _register_all()
 # ═══════════════════════════════════════════════════════════════════════════
 
 # 保留 TOOL_DEFINITIONS import 兼容快照。
-# 允许未知工具的 standalone agent/chat 使用 get_tool_definitions() 动态发现 MCP；
-# interrupt-capable 节点必须使用下面的 replay-safe schema + allowlist 双重约束。
+# standalone agent 与带收据的 Chat 可用 get_tool_definitions() 动态发现全量工具；
+# 无收据 Chat 仅使用严格只读快照，interrupt-capable 节点则使用下面的
+# replay-safe schema + allowlist 双重约束。
 TOOL_DEFINITIONS = tool_registry.get_openai_schemas()
 
 
@@ -400,6 +401,21 @@ def allowed_tool_names() -> set[str]:
     控制工具（finalize / ask_user）不在 registry，由 autonomous 端点自行处理。
     """
     return set(tool_registry.list_tools())
+
+
+def get_read_only_tool_capabilities() -> tuple[list[dict], set[str]]:
+    """Return one consistent schema/name snapshot of strictly read-only tools.
+
+    This is narrower than ``replay_safe_tool_names``: an idempotent tool is
+    safe only when the same arguments are replayed, while a receipt-less HTTP
+    retry may ask the model to generate different arguments.
+    """
+    tools = []
+    for name in tool_registry.list_tools():
+        tool = tool_registry.get(name)
+        if tool is not None and tool.metadata.effect_mode is EffectMode.READ_ONLY:
+            tools.append(tool)
+    return [tool.to_openai_schema() for tool in tools], {tool.name for tool in tools}
 
 
 def replay_safe_tool_names() -> set[str]:

@@ -46,6 +46,15 @@ def _mock_client(responses):
     return client
 
 
+def _receipt_lease(key="scope-test-key"):
+    return ReceiptLease(
+        key=key,
+        owner_token="owner",
+        recovery_token="recovery",
+        expires_at=9999999999.0,
+    )
+
+
 class TestToolChatRequestValidation(unittest.TestCase):
     def test_strips_outer_whitespace_but_keeps_message_line_breaks(self):
         request = ToolChatRequest(
@@ -112,14 +121,22 @@ class TestChatToolLoop(unittest.IsolatedAsyncioTestCase):
         # LLM 每轮都调工具，永不给纯文字 → 跑满 MAX_TOOL_ROUNDS
         def always_tool():
             return _assistant_msg(
-                tool_calls=[_tool_call("c", "get_user_profile", '{"user_id": "u"}')]
+                tool_calls=[_tool_call(
+                    "c",
+                    "search_document",
+                    '{"document_id":"d","query":"q"}',
+                )]
             )
 
         responses = [always_tool() for _ in range(chat.MAX_TOOL_ROUNDS + 2)]
         with patch.object(chat, "_client", _mock_client(responses)), \
              patch.object(chat, "check_injection", AsyncMock(return_value=(False, ""))), \
-             patch.object(tool_loop, "dispatch_tool", AsyncMock(return_value='{"profile": 1}')) as disp:
-            out = await chat.chat_with_tools(ToolChatRequest(message="x", user_id="u"))
+             patch.object(tool_loop, "dispatch_tool", AsyncMock(return_value='{"chunks":[]}')) as disp:
+            out = await chat.chat_with_tools(ToolChatRequest(
+                message="x",
+                user_id="u",
+                document_id="d",
+            ))
         # dispatch 被调了 MAX_TOOL_ROUNDS 次（每轮一次）
         self.assertEqual(disp.await_count, chat.MAX_TOOL_ROUNDS)
         self.assertEqual(len(out.tools_called), chat.MAX_TOOL_ROUNDS)
@@ -138,6 +155,8 @@ class TestChatToolLoop(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out.response, "已处理")
 
     async def test_cross_user_and_document_reads_and_writes_are_blocked(self):
+        lease = _receipt_lease("scope-cross-boundary-key")
+        mark_effect_started = AsyncMock()
         responses = [
             _assistant_msg(tool_calls=[
                 _tool_call(
@@ -167,18 +186,33 @@ class TestChatToolLoop(unittest.IsolatedAsyncioTestCase):
         ]
         with patch.object(chat, "_client", _mock_client(responses)), \
              patch.object(chat, "check_injection", AsyncMock(return_value=(False, ""))), \
+             patch.object(
+                 chat.request_idempotency,
+                 "renew",
+                 AsyncMock(return_value=lease),
+             ), patch.object(
+                 chat.request_idempotency,
+                 "mark_effect_started",
+                 mark_effect_started,
+             ), \
              patch.object(tool_loop, "dispatch_tool", AsyncMock()) as dispatch:
-            out = await chat.chat_with_tools(ToolChatRequest(
-                message="检查范围",
-                user_id="selected-user",
-                document_id="selected.md",
-            ))
+            out = await chat._execute_chat_with_tools(
+                ToolChatRequest(
+                    message="检查范围",
+                    user_id="selected-user",
+                    document_id="selected.md",
+                ),
+                run_id="scope-cross-boundary-run",
+                idempotency_lease=lease,
+            )
 
         dispatch.assert_not_awaited()
+        mark_effect_started.assert_not_awaited()
         self.assertEqual(out.tools_called, [])
         self.assertEqual(out.response, "范围检查完成")
 
     async def test_matching_user_and_document_scope_is_dispatched(self):
+        lease = _receipt_lease("scope-matching-boundary-key")
         responses = [
             _assistant_msg(tool_calls=[
                 _tool_call(
@@ -197,20 +231,30 @@ class TestChatToolLoop(unittest.IsolatedAsyncioTestCase):
         with patch.object(chat, "_client", _mock_client(responses)), \
              patch.object(chat, "check_injection", AsyncMock(return_value=(False, ""))), \
              patch.object(
+                 chat.request_idempotency,
+                 "renew",
+                 AsyncMock(return_value=lease),
+             ), \
+             patch.object(
                  tool_loop,
                  "dispatch_tool",
                  AsyncMock(side_effect=['{"profile":1}', '{"chunks":[]}']),
              ) as dispatch:
-            out = await chat.chat_with_tools(ToolChatRequest(
-                message="读取当前范围",
-                user_id="selected-user",
-                document_id="selected.md",
-            ))
+            out = await chat._execute_chat_with_tools(
+                ToolChatRequest(
+                    message="读取当前范围",
+                    user_id="selected-user",
+                    document_id="selected.md",
+                ),
+                run_id="scope-matching-boundary-run",
+                idempotency_lease=lease,
+            )
 
         self.assertEqual(dispatch.await_count, 2)
         self.assertEqual(out.tools_called, ["get_user_profile", "search_document"])
 
     async def test_mixed_scope_batch_dispatches_only_matching_call(self):
+        lease = _receipt_lease("scope-mixed-boundary-key")
         responses = [
             _assistant_msg(tool_calls=[
                 _tool_call(
@@ -230,15 +274,24 @@ class TestChatToolLoop(unittest.IsolatedAsyncioTestCase):
         with patch.object(chat, "_client", _mock_client(responses)), \
              patch.object(chat, "check_injection", AsyncMock(return_value=(False, ""))), \
              patch.object(
+                 chat.request_idempotency,
+                 "renew",
+                 AsyncMock(return_value=lease),
+             ), \
+             patch.object(
                  tool_loop,
                  "dispatch_tool",
                  AsyncMock(return_value='{"chunks":[]}'),
              ) as dispatch:
-            out = await chat.chat_with_tools(ToolChatRequest(
-                message="只执行当前范围",
-                user_id="selected-user",
-                document_id="selected.md",
-            ))
+            out = await chat._execute_chat_with_tools(
+                ToolChatRequest(
+                    message="只执行当前范围",
+                    user_id="selected-user",
+                    document_id="selected.md",
+                ),
+                run_id="scope-mixed-boundary-run",
+                idempotency_lease=lease,
+            )
 
         dispatch.assert_awaited_once()
         self.assertEqual(out.tools_called, ["search_document"])
@@ -249,12 +302,7 @@ class TestChatToolLoop(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(tool)
         original_audit = list(tool_registry._audit_log)
         handler = AsyncMock(return_value='{"status":"unexpected"}')
-        lease = ReceiptLease(
-            key="scope-test-key",
-            owner_token="owner",
-            recovery_token="recovery",
-            expires_at=9999999999.0,
-        )
+        lease = _receipt_lease()
         renew = AsyncMock(return_value=lease)
         mark_effect_started = AsyncMock()
         responses = [
