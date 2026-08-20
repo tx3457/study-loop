@@ -760,13 +760,21 @@ class TestLearningPathStore(unittest.IsolatedAsyncioTestCase):
             return Connection()
 
         fake_psycopg = types.SimpleNamespace(connect=connect)
+        fake_conninfo = types.SimpleNamespace(conninfo_to_dict=lambda _database_url: {})
         postgres = LearningPathStore(
             database_url="postgresql://example.invalid/studyloop",
             postgres_connect_timeout_seconds=7,
             postgres_lock_timeout_ms=1_234,
             postgres_statement_timeout_ms=5_678,
+            postgres_tcp_user_timeout_ms=9_876,
         )
-        with patch.dict(sys.modules, {"psycopg": fake_psycopg}):
+        with (
+            patch.dict(
+                sys.modules,
+                {"psycopg": fake_psycopg, "psycopg.conninfo": fake_conninfo},
+            ),
+            patch.dict(os.environ, {"PGOPTIONS": ""}, clear=True),
+        ):
             connection = postgres._connect()
             connection.close()
 
@@ -775,6 +783,7 @@ class TestLearningPathStore(unittest.IsolatedAsyncioTestCase):
             "postgresql://example.invalid/studyloop",
         )
         self.assertEqual(captured["connect_timeout"], 7)
+        self.assertEqual(captured["tcp_user_timeout"], 9_876)
         self.assertEqual(
             captured["options"],
             "-c lock_timeout=1234ms -c statement_timeout=5678ms",
