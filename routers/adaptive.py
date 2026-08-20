@@ -1,36 +1,48 @@
-"""
-自适应学习闭环端点
+"""Durable Adaptive learning-loop HTTP endpoints.
 
-该端点运行多轮「出题 → 作答 → 批改 → 决策」闭环，由 LLM 根据学生表现
-决定下一步主题和难度，直到掌握度达标或达到轮次上限。
-
-两段式 HTTP(复用 autonomous 的 HITL 思路,前端无状态):
-  POST /agent/adaptive/start  {user_id, document_id, goal}
-      → agent 决策开场 → 出题 → {adaptive_session_id, questions, decision, turn=1}
-  POST /agent/adaptive/submit {adaptive_session_id, answers[], turn}
-      → 批改 → 更新画像(EMA mastery + weak_points)→ agent 决策下一步 → 终止?
-            是 → {done:true, summary, trajectory}
-            否 → {questions, decision, turn+1, last_report}
-
+Every externally visible turn is backed by ``AdaptiveSessionStore``. The full
+``QuizSession`` remains private inside the aggregate; HTTP responses project
+only browser-safe question views.
 """
 
-import asyncio
+from __future__ import annotations
+
+import hashlib
+import json
 import logging
-import time
 import uuid
-from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any
 
 from chromadb.errors import ChromaError, NotFoundError
 from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import ValidationError
 
 from models.adaptive import AdaptiveTurn, NextStepDecision
+from models.adaptive_session import (
+    AdaptivePendingSubmit,
+    AdaptiveQuestionFeedback,
+    AdaptiveSessionAggregate,
+    AdaptiveStartRequest,
+    AdaptiveSubmitReceipt,
+    AdaptiveSubmitRequest,
+    AdaptiveTurnArtifact,
+    AdaptiveTurnResponse,
+)
 from models.grader import GradingReport
 from models.session import QuestionView, QuizSession
 from services.adaptive_loop import decide_next_step, generate_lesson, should_terminate
+from services.adaptive_sessions import (
+    AdaptiveSessionAlreadyExistsError,
+    AdaptiveSessionCapacityError,
+    AdaptiveSessionCorruptError,
+    AdaptiveSessionPayloadTooLargeError,
+    AdaptiveSessionStartConflictError,
+    StoredAdaptiveSession,
+    adaptive_sessions,
+)
+from services.grader import grade_quiz_session
+from services.idempotency import IdempotencyConflictError, normalize_idempotency_key
 from services.injection import check_injection
-from services.grader import grade_session
 from services.learning_path import generate_learning_path
 from services.memory import (
     append_decision,
@@ -38,254 +50,314 @@ from services.memory import (
     get_mastery,
     get_weak_points,
 )
+from services.quiz_sessions import QuizSessionApiError
 from services.rag import generate_question
-from services.idempotency import (
-    abort_idempotency_claim,
-    normalize_idempotency_key,
-    request_idempotency,
-)
-from services.session import (
-    InvalidQuizResponseError,
-    sessions,
-    validate_provider_questions,
-)
-from services.tool_registry import SideEffectAmbiguousError
+from services.session import InvalidQuizResponseError, validate_provider_questions
 from services.vectorstore import ensure_document_available
+
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-SESSION_TTL_SEC = 3600  # 1 小时未续跑视为过期
-SESSION_MAX_COUNT = 200  # 最多保 200 个 session(FIFO 淘汰)
 
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 会话状态(多轮闭环跨 HTTP 请求保存)
-# ═══════════════════════════════════════════════════════════════════════════
-@dataclass
-class AdaptiveSession:
-    adaptive_session_id: str
-    user_id: str
-    document_id: str
-    goal: str
-    turn: int
-    history: list[AdaptiveTurn]
-    current_quiz_session_id: Optional[str] = None
-    current_decision: Optional[NextStepDecision] = None
-    current_turn_type: str = "quiz"  # "quiz" | "teach"
-    last_report: Optional[GradingReport] = None  # 最近一次批改(teach 轮承接表现上下文)
-    done: bool = False
-    created_at: float = field(default_factory=time.time)
-
-
-_sessions: dict[str, AdaptiveSession] = {}
-_submit_locks: dict[str, asyncio.Lock] = {}
-
-
-def _purge_expired() -> None:
-    now = time.time()
-    for cid in [
-        c for c, s in _sessions.items() if now - s.created_at > SESSION_TTL_SEC
-    ]:
-        _sessions.pop(cid, None)
-        _submit_locks.pop(cid, None)
-
-
-def _save_session(s: AdaptiveSession) -> None:
-    _purge_expired()
-    if len(_sessions) >= SESSION_MAX_COUNT and s.adaptive_session_id not in _sessions:
-        oldest = min(_sessions.values(), key=lambda x: x.created_at)
-        _sessions.pop(oldest.adaptive_session_id, None)
-        _submit_locks.pop(oldest.adaptive_session_id, None)
-    _sessions[s.adaptive_session_id] = s
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 请求 / 响应模型
-# ═══════════════════════════════════════════════════════════════════════════
-class AdaptiveStartRequest(BaseModel):
-    user_id: str = Field(default="default", description="用户 ID")
-    document_id: str = Field(..., description="已建库的文档 ID")
-    goal: str = Field(..., description="学习目标 / 主题")
-
-
-class AdaptiveSubmitRequest(BaseModel):
-    adaptive_session_id: str
-    turn: int = Field(ge=1, description="客户端正在回答的轮次")
-    answers: list[str] = Field(..., description="本轮逐题作答,顺序与下发题目一致")
-
-
-class AdaptiveTurnResponse(BaseModel):
-    adaptive_session_id: str
-    turn: int
-    done: bool = False
-    turn_type: str = "quiz"  # "quiz"(出题轮)| "teach"(讲解轮)
-    questions: list[QuestionView] = Field(default_factory=list)
-    lesson: Optional[str] = None  # turn_type=teach 时的纯讲解内容
-    decision: Optional[NextStepDecision] = None  # agent 本步的决策(含 reason,可解释)
-    last_report_score: Optional[float] = None
-    last_report_gaps: list[str] = Field(default_factory=list)
-    last_report_feedback: list[dict] = Field(
-        default_factory=list
-    )  # 逐题反馈(grader 已产出)
-    mastery: Optional[float] = None
-    trajectory: list[AdaptiveTurn] = Field(default_factory=list)
-    summary: str = ""
-    terminate_reason: str = ""
-    learning_path: Optional[dict] = None  # switch_to_plan 时填
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 编排 helper
-# ═══════════════════════════════════════════════════════════════════════════
-async def _serve_turn(
-    asess: AdaptiveSession, decision: NextStepDecision, turn: int
-) -> list[QuestionView]:
-    """按 agent 决策出一轮题,建底层 QuizSession,记一条轨迹(得分待批改后回填)。"""
-    quiz = await generate_question(
-        asess.document_id,
-        decision.topic,
-        decision.count,
-        decision.difficulty,
-        decision.question_type,
-        difficulty_score=decision.difficulty_score,
-        weak_points=decision.target_weak_points,
+def _not_found() -> QuizSessionApiError:
+    return QuizSessionApiError(
+        404,
+        "adaptive_session_not_found",
+        "自适应学习会话不存在",
+        reason="missing",
     )
-    questions = getattr(quiz, "questions", None)
-    if not isinstance(questions, list):
-        raise InvalidQuizResponseError("模型题目响应结构无效")
-    validate_provider_questions(questions, decision.question_type)
-    qsid = str(uuid.uuid4())
-    sessions[qsid] = QuizSession(
-        session_id=qsid,
-        document_id=asess.document_id,
-        user_id=asess.user_id,
-        questions=questions,
-        user_answers=[],
-        status="active",
+
+
+def _expired() -> QuizSessionApiError:
+    return QuizSessionApiError(
+        410,
+        "adaptive_session_expired",
+        "自适应学习会话已过期，请重新开始",
+        reason="expired",
     )
-    asess.current_quiz_session_id = qsid
-    asess.current_decision = decision
-    asess.current_turn_type = "quiz"
-    asess.history.append(
-        AdaptiveTurn(
-            turn=turn,
-            action=decision.action,
-            topic=decision.topic,
-            difficulty_score=decision.difficulty_score,
-            reason=decision.reason,
+
+
+def _busy() -> QuizSessionApiError:
+    return QuizSessionApiError(
+        409,
+        "adaptive_session_busy",
+        "自适应学习会话正在处理上一项操作，请稍后重试",
+        reason="in_progress",
+    )
+
+
+def _stale() -> QuizSessionApiError:
+    return QuizSessionApiError(
+        409,
+        "adaptive_session_stale",
+        "自适应学习进度已变化，请刷新后继续",
+        reason="stale",
+    )
+
+
+def _completed() -> QuizSessionApiError:
+    return QuizSessionApiError(
+        409,
+        "adaptive_session_completed",
+        "自适应学习会话已经结束",
+        reason="completed",
+    )
+
+
+def _corrupt() -> QuizSessionApiError:
+    return QuizSessionApiError(
+        503,
+        "adaptive_session_corrupt",
+        "自适应学习会话数据无效，请重新开始",
+        reason="corrupt",
+    )
+
+
+def _unavailable() -> QuizSessionApiError:
+    return QuizSessionApiError(
+        503,
+        "adaptive_session_store_unavailable",
+        "自适应学习会话存储暂时不可用",
+    )
+
+
+def _too_large() -> QuizSessionApiError:
+    return QuizSessionApiError(
+        413,
+        "adaptive_session_too_large",
+        "自适应学习会话内容过大，无法继续保存",
+    )
+
+
+def _canonical_hash(payload: dict[str, Any]) -> str:
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _request_hash(req: AdaptiveSubmitRequest) -> str:
+    return _canonical_hash(req.model_dump(mode="json"))
+
+
+def _key_hash(key: str | None) -> str | None:
+    return hashlib.sha256(key.encode("utf-8")).hexdigest() if key else None
+
+
+def _quiz_id(adaptive_session_id: str, turn: int) -> str:
+    return f"adaptive:{adaptive_session_id}:turn:{turn}"
+
+
+def _validate_aggregate(
+    value: AdaptiveSessionAggregate | dict[str, Any],
+) -> AdaptiveSessionAggregate:
+    return AdaptiveSessionAggregate.validate_for_persistence(value)
+
+
+def _validate_record(
+    record: StoredAdaptiveSession | None,
+) -> tuple[StoredAdaptiveSession, AdaptiveSessionAggregate]:
+    if record is None:
+        raise _not_found()
+    if record.expired:
+        raise _expired()
+    try:
+        aggregate = AdaptiveSessionAggregate.model_validate(
+            record.aggregate.model_dump(mode="json")
         )
-    )
-    return [
-        QuestionView(index=i, question=q.question, options=q.options, type=q.type)
-        for i, q in enumerate(quiz.questions)
-    ]
+        aggregate = _validate_aggregate(aggregate)
+    except (TypeError, ValueError, ValidationError) as exc:
+        logger.error("durable adaptive session aggregate is invalid")
+        raise _corrupt() from exc
+    return record, aggregate
 
 
-async def _serve_teach_turn(
-    asess: AdaptiveSession, decision: NextStepDecision, turn: int
-) -> str:
-    """teach 轮:生成纯讲解(不出题),记一条轨迹(无得分)。返回讲解文本。"""
-    # 薄弱点:优先用 agent 指定的;没有则取上一轮(刚批改的题)暴露的盲点
-    wp = decision.target_weak_points
-    if not wp and asess.history:
-        wp = asess.history[-1].knowledge_gaps
-    lesson = await generate_lesson(
-        document_id=asess.document_id,
+async def _inspect_live(
+    session_id: str,
+) -> tuple[StoredAdaptiveSession, AdaptiveSessionAggregate]:
+    try:
+        return _validate_record(await adaptive_sessions.inspect(session_id))
+    except QuizSessionApiError:
+        raise
+    except AdaptiveSessionCorruptError as exc:
+        logger.error("durable adaptive session envelope is invalid")
+        raise _corrupt() from exc
+    except Exception as exc:
+        logger.error("durable adaptive session read failed: %s", type(exc).__name__)
+        raise _unavailable() from exc
+
+
+async def _find_start(
+    key: str,
+    request_payload: dict[str, Any],
+) -> tuple[StoredAdaptiveSession, AdaptiveSessionAggregate] | None:
+    try:
+        record = await adaptive_sessions.find_start(key, request_payload)
+        return None if record is None else _validate_record(record)
+    except AdaptiveSessionStartConflictError as exc:
+        raise IdempotencyConflictError(exc.reason) from exc
+    except QuizSessionApiError:
+        raise
+    except AdaptiveSessionCorruptError as exc:
+        raise _corrupt() from exc
+    except Exception as exc:
+        logger.error("durable adaptive start lookup failed: %s", type(exc).__name__)
+        raise _unavailable() from exc
+
+
+async def _claim_live(
+    session_id: str,
+) -> tuple[Any, StoredAdaptiveSession, AdaptiveSessionAggregate]:
+    try:
+        claim = await adaptive_sessions.claim(session_id, "adaptive_submit")
+    except AdaptiveSessionCorruptError as exc:
+        raise _corrupt() from exc
+    except Exception as exc:
+        logger.error("durable adaptive claim failed: %s", type(exc).__name__)
+        raise _unavailable() from exc
+
+    if not claim.claimed:
+        if claim.reason == "missing":
+            raise _not_found()
+        if claim.reason == "expired":
+            raise _expired()
+        if claim.reason == "done":
+            raise _completed()
+        raise _busy()
+    if claim.record is None or claim.token is None:
+        raise _unavailable()
+    record, aggregate = _validate_record(claim.record)
+    return claim, record, aggregate
+
+
+async def _release(session_id: str, token: str | None) -> None:
+    if not token:
+        return
+    try:
+        await adaptive_sessions.release(session_id, token)
+    except Exception:
+        logger.exception("durable adaptive claim release failed")
+
+
+async def _checkpoint(
+    record: StoredAdaptiveSession,
+    token: str,
+    aggregate: AdaptiveSessionAggregate,
+) -> StoredAdaptiveSession:
+    try:
+        validated = _validate_aggregate(aggregate)
+        updated = await adaptive_sessions.checkpoint(
+            record.aggregate.adaptive_session_id,
+            token,
+            validated,
+            expected_revision=record.revision,
+        )
+        if updated is None:
+            raise _stale()
+        _validate_record(updated)
+        return updated
+    except QuizSessionApiError:
+        raise
+    except AdaptiveSessionPayloadTooLargeError as exc:
+        raise _too_large() from exc
+    except AdaptiveSessionCorruptError as exc:
+        raise _corrupt() from exc
+    except (TypeError, ValueError, ValidationError) as exc:
+        logger.error("adaptive checkpoint model validation failed")
+        raise _corrupt() from exc
+    except Exception as exc:
+        logger.error("durable adaptive checkpoint failed: %s", type(exc).__name__)
+        raise _unavailable() from exc
+
+
+async def _complete_claim(
+    record: StoredAdaptiveSession,
+    token: str,
+    aggregate: AdaptiveSessionAggregate,
+) -> StoredAdaptiveSession:
+    try:
+        validated = _validate_aggregate(aggregate)
+        updated = await adaptive_sessions.complete(
+            record.aggregate.adaptive_session_id,
+            token,
+            validated,
+            expected_revision=record.revision,
+        )
+        if updated is None:
+            raise _stale()
+        _validate_record(updated)
+        return updated
+    except QuizSessionApiError:
+        raise
+    except AdaptiveSessionPayloadTooLargeError as exc:
+        raise _too_large() from exc
+    except AdaptiveSessionCorruptError as exc:
+        raise _corrupt() from exc
+    except (TypeError, ValueError, ValidationError) as exc:
+        logger.error("adaptive completion model validation failed")
+        raise _corrupt() from exc
+    except Exception as exc:
+        logger.error("durable adaptive completion failed: %s", type(exc).__name__)
+        raise _unavailable() from exc
+
+
+def _turn_from_decision(turn: int, decision: NextStepDecision) -> AdaptiveTurn:
+    return AdaptiveTurn(
+        turn=turn,
+        action=decision.action,
         topic=decision.topic,
-        weak_points=wp or [],
-        last_report=asess.last_report,
+        difficulty_score=decision.difficulty_score,
+        reason=decision.reason,
     )
-    asess.current_quiz_session_id = None
-    asess.current_decision = decision
-    asess.current_turn_type = "teach"
-    asess.history.append(
-        AdaptiveTurn(
-            turn=turn,
-            action="teach",
-            topic=decision.topic,
-            difficulty_score=decision.difficulty_score,
-            reason=decision.reason,
-        )
-    )
-    return lesson
 
 
-def _report_feedback(report: GradingReport) -> list[dict]:
-    """把 grader 已产出的逐题反馈整理给前端(现成内容,别浪费)。"""
+def _question_views(quiz: QuizSession) -> list[QuestionView]:
     return [
-        {
-            "index": g.index,
-            "question": g.question,
-            "your_answer": g.user_answer,
-            "correct_answer": g.correct_answer,
-            "is_correct": g.is_correct,
-            "ai_feedback": g.ai_feedback,
-            "knowledge_gap": g.knowledge_gap,
-        }
-        for g in report.grades
+        QuestionView(
+            index=index,
+            question=question.question,
+            options=question.options,
+            type=question.type,
+        )
+        for index, question in enumerate(quiz.questions)
     ]
 
 
-async def _grade_and_update(
-    asess: AdaptiveSession, answers: list[str]
-) -> GradingReport:
-    """填答案 → 批改 → 更新画像(EMA mastery + weak_points + 审计)→ 回填本轮轨迹得分。"""
-    qsid = asess.current_quiz_session_id
-    qs = sessions.get(qsid) if qsid else None
-    if qs is None:
-        raise HTTPException(status_code=400, detail="当前没有待批改的题目")
-    if len(answers) != len(qs.questions):
-        raise HTTPException(
-            status_code=400,
-            detail=f"答案数 {len(answers)} 与题目数 {len(qs.questions)} 不符",
+def _report_feedback(report: GradingReport | None) -> list[AdaptiveQuestionFeedback]:
+    if report is None:
+        return []
+    return [
+        AdaptiveQuestionFeedback(
+            index=grade.index,
+            question=grade.question,
+            your_answer=grade.user_answer,
+            correct_answer=grade.correct_answer,
+            is_correct=grade.is_correct,
+            ai_feedback=grade.ai_feedback,
+            knowledge_gap=grade.knowledge_gap,
         )
-    qs.user_answers = list(answers)
-    qs.status = "completed"
+        for grade in report.grades
+    ]
 
-    report = await grade_session(qsid)
-    asess.last_report = report
 
-    async def record_decision() -> None:
-        if asess.current_decision is not None:
-            await append_decision(
-                asess.user_id,
-                {  # 决策审计 trace
-                    "agent": "adaptive_loop",
-                    "decision": asess.current_decision.action,
-                    "rationale": asess.current_decision.reason,
-                    "turn": asess.turn,
-                    "score": report.score,
-                },
-            )
-
-    await commit_learning_memory(
-        asess.user_id,
-        report,
-        asess.document_id,
-        questions=qs.questions,
-        after_write=record_decision,
-        on_core_written=lambda: setattr(qs, "profile_written", True),
-    )
-
-    # 回填本轮轨迹(history[-1] 对应刚答完这套题)
-    if asess.history:
-        gaps = [
-            g.knowledge_gap
-            for g in report.grades
-            if not g.is_correct and g.knowledge_gap
-        ]
-        asess.history[-1].score = report.score
-        asess.history[-1].mastery_after = await get_mastery(
-            asess.user_id, asess.document_id
-        )
-        asess.history[-1].knowledge_gaps = gaps
-    return report
+def _report_gaps(report: GradingReport | None) -> list[str]:
+    if report is None:
+        return []
+    return [
+        grade.knowledge_gap
+        for grade in report.grades
+        if not grade.is_correct and grade.knowledge_gap
+    ]
 
 
 def _build_summary(
-    asess: AdaptiveSession,
-    mastery: Optional[float],
+    history: list[AdaptiveTurn],
+    mastery: float | None,
     term_reason: str,
     decision: NextStepDecision,
 ) -> str:
@@ -295,30 +367,126 @@ def _build_summary(
         "max_turns": "达到最大轮次",
         "switch_to_plan": "转入系统学习路径",
     }
-    traj = " → ".join(
-        f"T{t.turn}({t.score:.2f})" if t.score is not None else f"T{t.turn}(-)"
-        for t in asess.history
+    trajectory = " → ".join(
+        f"T{turn.turn}({turn.score:.2f})"
+        if turn.score is not None
+        else f"T{turn.turn}(-)"
+        for turn in history
     )
-    m = f"{mastery:.2f}" if mastery is not None else "未知"
+    mastery_text = f"{mastery:.2f}" if mastery is not None else "未知"
     return (
-        f"结束原因:{reason_map.get(term_reason, term_reason)}。共 {len(asess.history)} 轮,"
-        f"最终掌握度 {m}。得分轨迹:{traj}。最后评估:{decision.reason}"
+        f"结束原因:{reason_map.get(term_reason, term_reason)}。"
+        f"共 {len(history)} 轮,最终掌握度 {mastery_text}。"
+        f"得分轨迹:{trajectory}。最后评估:{decision.reason}"
     )
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# 端点
-# ═══════════════════════════════════════════════════════════════════════════
-async def _execute_adaptive_start(req: AdaptiveStartRequest) -> AdaptiveTurnResponse:
-    """开启一个自适应辅导会话:agent 决策开场策略 → 出第一轮题。"""
-    is_injection, reason = await check_injection(req.goal)
-    if is_injection:
-        raise HTTPException(status_code=400, detail=f"输入安全检查未通过:{reason}")
+def _artifact(
+    *,
+    session_id: str,
+    turn: int,
+    decision: NextStepDecision,
+    trajectory: list[AdaptiveTurn],
+    mastery: float | None,
+    report: GradingReport | None = None,
+    quiz: QuizSession | None = None,
+    lesson: str | None = None,
+    done: bool = False,
+    terminate_reason: str = "",
+    learning_path: dict[str, Any] | None = None,
+) -> AdaptiveTurnArtifact:
+    if done:
+        turn_type = "quiz"
+        questions: list[QuestionView] = []
+        lesson = None
+        summary = _build_summary(trajectory, mastery, terminate_reason, decision)
+    else:
+        turn_type = "teach" if lesson is not None else "quiz"
+        questions = [] if quiz is None else _question_views(quiz)
+        summary = ""
+    return AdaptiveTurnArtifact(
+        adaptive_session_id=session_id,
+        turn=turn,
+        done=done,
+        turn_type=turn_type,
+        questions=questions,
+        lesson=lesson,
+        decision=decision,
+        last_report_score=report.score if report is not None else None,
+        last_report_gaps=_report_gaps(report),
+        last_report_feedback=_report_feedback(report),
+        mastery=mastery,
+        trajectory=trajectory,
+        summary=summary,
+        terminate_reason=terminate_reason,
+        learning_path=learning_path,
+    )
 
+
+def _response(
+    record: StoredAdaptiveSession,
+    artifact: AdaptiveTurnArtifact,
+) -> AdaptiveTurnResponse:
+    return AdaptiveTurnResponse(
+        **artifact.model_dump(mode="json"),
+        revision=record.revision,
+        expires_at=record.expires_at,
+        busy=record.busy,
+    )
+
+
+async def _generate_quiz(
+    *,
+    session_id: str,
+    user_id: str,
+    document_id: str,
+    decision: NextStepDecision,
+    turn: int,
+) -> QuizSession:
+    generated = await generate_question(
+        document_id,
+        decision.topic,
+        decision.count,
+        decision.difficulty,
+        decision.question_type,
+        difficulty_score=decision.difficulty_score,
+        weak_points=decision.target_weak_points,
+    )
+    questions = getattr(generated, "questions", None)
+    if not isinstance(questions, list):
+        raise InvalidQuizResponseError("模型题目响应结构无效")
+    validate_provider_questions(questions, decision.question_type)
+    return QuizSession(
+        session_id=_quiz_id(session_id, turn),
+        document_id=document_id,
+        user_id=user_id,
+        questions=questions,
+        user_answers=[],
+        status="active",
+    )
+
+
+async def _generate_lesson(
+    aggregate: AdaptiveSessionAggregate,
+    decision: NextStepDecision,
+) -> str:
+    weak_points = decision.target_weak_points
+    if not weak_points and aggregate.current_artifact.trajectory:
+        weak_points = aggregate.current_artifact.trajectory[-1].knowledge_gaps
+    return await generate_lesson(
+        document_id=aggregate.document_id,
+        topic=decision.topic,
+        weak_points=weak_points or [],
+        last_report=aggregate.last_report,
+    )
+
+
+async def _opening_state(
+    req: AdaptiveStartRequest,
+    session_id: str,
+) -> AdaptiveSessionAggregate:
     mastery = await get_mastery(req.user_id, req.document_id)
     weak_points = await get_weak_points(req.user_id, req.document_id)
-
-    # 开场也走 agent 决策(last_report=None),让闭环端到端由 agent 驱动
     decision = await decide_next_step(
         goal=req.goal,
         mastery=mastery,
@@ -326,264 +494,595 @@ async def _execute_adaptive_start(req: AdaptiveStartRequest) -> AdaptiveTurnResp
         history=[],
         last_report=None,
     )
+    history = [_turn_from_decision(1, decision)]
 
-    asess = AdaptiveSession(
-        adaptive_session_id=f"adapt_{uuid.uuid4().hex[:16]}",
+    if decision.action == "switch_to_plan":
+        path = await generate_learning_path(req.document_id)
+        artifact = _artifact(
+            session_id=session_id,
+            turn=1,
+            decision=decision,
+            trajectory=history,
+            mastery=mastery,
+            done=True,
+            terminate_reason="switch_to_plan",
+            learning_path=path.model_dump(),
+        )
+        return AdaptiveSessionAggregate(
+            adaptive_session_id=session_id,
+            user_id=req.user_id,
+            document_id=req.document_id,
+            goal=req.goal,
+            status="completed",
+            current_artifact=artifact,
+        )
+
+    terminate, reason = should_terminate(
+        mastery=mastery,
+        turn=1,
+        decision=decision,
+    )
+    if terminate:
+        artifact = _artifact(
+            session_id=session_id,
+            turn=1,
+            decision=decision,
+            trajectory=history,
+            mastery=mastery,
+            done=True,
+            terminate_reason=reason,
+        )
+        return AdaptiveSessionAggregate(
+            adaptive_session_id=session_id,
+            user_id=req.user_id,
+            document_id=req.document_id,
+            goal=req.goal,
+            status="completed",
+            current_artifact=artifact,
+        )
+
+    if decision.action == "teach":
+        lesson = await generate_lesson(
+            document_id=req.document_id,
+            topic=decision.topic,
+            weak_points=decision.target_weak_points or weak_points,
+            last_report=None,
+        )
+        artifact = _artifact(
+            session_id=session_id,
+            turn=1,
+            decision=decision,
+            trajectory=history,
+            mastery=mastery,
+            lesson=lesson,
+        )
+        return AdaptiveSessionAggregate(
+            adaptive_session_id=session_id,
+            user_id=req.user_id,
+            document_id=req.document_id,
+            goal=req.goal,
+            current_artifact=artifact,
+        )
+
+    quiz = await _generate_quiz(
+        session_id=session_id,
+        user_id=req.user_id,
+        document_id=req.document_id,
+        decision=decision,
+        turn=1,
+    )
+    artifact = _artifact(
+        session_id=session_id,
+        turn=1,
+        decision=decision,
+        trajectory=history,
+        mastery=mastery,
+        quiz=quiz,
+    )
+    return AdaptiveSessionAggregate(
+        adaptive_session_id=session_id,
         user_id=req.user_id,
         document_id=req.document_id,
         goal=req.goal,
-        turn=1,
-        history=[],
-    )
-    logger.info(
-        f"[adaptive] start sid={asess.adaptive_session_id} open={decision.action} "
-        f"topic={decision.topic} diff={decision.difficulty_score:.2f}"
+        current_quiz=quiz,
+        current_artifact=artifact,
     )
 
-    # 开场可能直接讲解(teach)或出题(其余动作)
-    if decision.action == "teach":
-        lesson = await _serve_teach_turn(asess, decision, turn=1)
-        _save_session(asess)
-        return AdaptiveTurnResponse(
-            adaptive_session_id=asess.adaptive_session_id,
-            turn=1,
-            turn_type="teach",
-            lesson=lesson,
-            decision=decision,
-            mastery=mastery,
-            trajectory=asess.history,
+
+async def _create_start(
+    req: AdaptiveStartRequest,
+    key: str | None,
+    request_payload: dict[str, Any],
+) -> tuple[StoredAdaptiveSession, AdaptiveSessionAggregate]:
+    session_id = f"adapt_{uuid.uuid4().hex[:16]}"
+    aggregate = _validate_aggregate(await _opening_state(req, session_id))
+    try:
+        result = await adaptive_sessions.create(
+            aggregate,
+            start_key=key,
+            start_request=request_payload if key else None,
         )
-    views = await _serve_turn(asess, decision, turn=1)
-    _save_session(asess)
-    return AdaptiveTurnResponse(
-        adaptive_session_id=asess.adaptive_session_id,
-        turn=1,
-        turn_type="quiz",
-        questions=views,
-        decision=decision,
-        mastery=mastery,
-        trajectory=asess.history,
-    )
+        return _validate_record(result.record)
+    except AdaptiveSessionStartConflictError as exc:
+        raise IdempotencyConflictError(exc.reason) from exc
+    except AdaptiveSessionPayloadTooLargeError as exc:
+        raise _too_large() from exc
+    except AdaptiveSessionCapacityError as exc:
+        logger.warning("adaptive session capacity is full")
+        raise _unavailable() from exc
+    except AdaptiveSessionAlreadyExistsError as exc:
+        logger.error("adaptive UUID collision")
+        raise _unavailable() from exc
+    except AdaptiveSessionCorruptError as exc:
+        raise _corrupt() from exc
+    except QuizSessionApiError:
+        raise
+    except Exception as exc:
+        logger.error("durable adaptive create failed: %s", type(exc).__name__)
+        raise _unavailable() from exc
 
 
 @router.post("/agent/adaptive/start", response_model=AdaptiveTurnResponse)
-async def adaptive_start(req: AdaptiveStartRequest) -> AdaptiveTurnResponse:
+async def adaptive_start(
+    req: AdaptiveStartRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> AdaptiveTurnResponse:
+    key = normalize_idempotency_key(idempotency_key)
+    request_payload = req.model_dump(mode="json")
+    if key:
+        existing = await _find_start(key, request_payload)
+        if existing is not None:
+            record, aggregate = existing
+            return _response(record, aggregate.current_artifact)
+
     try:
         await ensure_document_available(req.document_id)
-        return await _execute_adaptive_start(req)
+        injection, _reason = await check_injection(req.goal)
+        if injection:
+            logger.warning("adaptive start input safety check rejected")
+            raise HTTPException(status_code=400, detail="输入安全检查未通过")
+        record, aggregate = await _create_start(req, key, request_payload)
+        return _response(record, aggregate.current_artifact)
     except NotFoundError as exc:
         raise HTTPException(status_code=404, detail="文档不存在") from exc
     except ChromaError as exc:
         logger.exception("adaptive start document lookup failed")
         raise HTTPException(status_code=503, detail="文档存储暂时不可用") from exc
     except (InvalidQuizResponseError, ValidationError) as exc:
-        logger.warning(
-            "adaptive provider returned invalid structured output: %s",
-            type(exc).__name__,
-        )
-        raise HTTPException(status_code=503, detail="模型返回的题目格式无效") from exc
+        logger.warning("adaptive provider returned invalid structured output")
+        raise HTTPException(status_code=503, detail="模型返回的内容格式无效") from exc
 
 
-async def _execute_adaptive_submit(
+@router.get("/agent/adaptive/{adaptive_session_id}", response_model=AdaptiveTurnResponse)
+async def adaptive_snapshot(adaptive_session_id: str) -> AdaptiveTurnResponse:
+    record, aggregate = await _inspect_live(adaptive_session_id)
+    return _response(record, aggregate.current_artifact)
+
+
+def _find_receipt(
+    aggregate: AdaptiveSessionAggregate,
+    key_hash: str | None,
+    request_hash: str,
+) -> AdaptiveTurnArtifact | None:
+    if key_hash is None:
+        return None
+    receipt = aggregate.submit_receipts.get(key_hash)
+    if receipt is None:
+        return None
+    if receipt.request_hash != request_hash:
+        raise IdempotencyConflictError("payload_mismatch")
+    return receipt.response.model_copy(deep=True)
+
+
+def _validate_submit_binding(
     req: AdaptiveSubmitRequest,
-    *,
-    before_effect,
-) -> AdaptiveTurnResponse:
-    """推进闭环:出题轮→批改+更新画像;讲解轮→直接推进。再 agent 决策下一步 → 终止/下一轮。
+    aggregate: AdaptiveSessionAggregate,
+    request_hash: str,
+    key_hash: str | None,
+    record: StoredAdaptiveSession,
+) -> None:
+    if aggregate.status == "completed":
+        raise _completed()
+    pending = aggregate.pending
+    if pending is None:
+        if req.turn != aggregate.current_artifact.turn or req.revision != record.revision:
+            raise _stale()
+        return
+    if req.turn != pending.turn or req.revision != pending.revision:
+        raise _stale()
+    if pending.request_hash != request_hash:
+        if pending.key_hash is not None and pending.key_hash == key_hash:
+            raise IdempotencyConflictError("payload_mismatch")
+        raise _busy()
+    if pending.key_hash != key_hash:
+        raise _busy()
 
-    前端约定:讲解(teach)轮没有题,前端读完点"继续",submit 传 answers=[] 即可推进。
-    """
-    asess = _sessions.get(req.adaptive_session_id)
-    if asess is None:
-        raise HTTPException(status_code=404, detail="会话不存在或已过期")
-    if asess.done:
-        raise HTTPException(status_code=409, detail="会话已结束")
-    if req.turn != asess.turn:
-        raise HTTPException(status_code=409, detail="提交轮次已过期，请刷新后重试")
 
-    prev_was_teach = asess.current_turn_type == "teach"
-    if prev_was_teach:
+async def _checkpoint_pending_input(
+    req: AdaptiveSubmitRequest,
+    aggregate: AdaptiveSessionAggregate,
+    record: StoredAdaptiveSession,
+    token: str,
+    request_hash: str,
+    key_hash: str | None,
+) -> StoredAdaptiveSession:
+    if aggregate.pending is not None:
+        return record
+    artifact = aggregate.current_artifact
+    if artifact.turn_type == "teach":
         if req.answers:
             raise HTTPException(status_code=400, detail="讲解轮不接受题目答案")
-        # 讲解轮无题可批,直接推进;承接上一份成绩上下文(asess.last_report)
-        report = asess.last_report
-        feedback: list[dict] = []
-        last_score = None
-        last_gaps: list[str] = []
     else:
-        qsid = asess.current_quiz_session_id
-        quiz_session = sessions.get(qsid) if qsid else None
-        if quiz_session is None:
-            raise HTTPException(status_code=409, detail="当前没有待批改的题目")
-        if len(req.answers) != len(quiz_session.questions):
+        quiz = aggregate.current_quiz
+        if quiz is None:
+            raise _corrupt()
+        if len(req.answers) != len(quiz.questions):
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    f"答案数 {len(req.answers)} 与题目数 "
-                    f"{len(quiz_session.questions)} 不符"
-                ),
+                detail=f"答案数 {len(req.answers)} 与题目数 {len(quiz.questions)} 不符",
             )
-        # 出题轮:批改 + 更新画像 + 回填轨迹
-        await before_effect()
-        report = await _grade_and_update(asess, req.answers)
-        feedback = _report_feedback(report)
-        last_score = report.score
-        last_gaps = [
-            g.knowledge_gap
-            for g in report.grades
-            if not g.is_correct and g.knowledge_gap
-        ]
+    aggregate.pending = AdaptivePendingSubmit(
+        key_hash=key_hash,
+        request_hash=request_hash,
+        turn=req.turn,
+        revision=req.revision,
+        answers=list(req.answers),
+    )
+    return await _checkpoint(record, token, aggregate)
 
-    mastery = await get_mastery(asess.user_id, asess.document_id)
-    weak_points = await get_weak_points(asess.user_id, asess.document_id)
 
-    # agent 推理下一步;上一步若是 teach,禁止再 teach(强制出题验证)
+async def _checkpoint_quiz_answers(
+    aggregate: AdaptiveSessionAggregate,
+    record: StoredAdaptiveSession,
+    token: str,
+) -> StoredAdaptiveSession:
+    quiz = aggregate.current_quiz
+    pending = aggregate.pending
+    if quiz is None or pending is None:
+        raise _corrupt()
+    if quiz.status == "active":
+        quiz.user_answers = list(pending.answers)
+        quiz.status = "completed"
+        record = await _checkpoint(record, token, aggregate)
+    return record
+
+
+async def _grade_checkpointed_quiz(
+    aggregate: AdaptiveSessionAggregate,
+    record: StoredAdaptiveSession,
+    token: str,
+) -> tuple[StoredAdaptiveSession, GradingReport]:
+    quiz = aggregate.current_quiz
+    if quiz is None:
+        raise _corrupt()
+    if quiz.grading_report is None:
+
+        async def checkpoint_grade() -> None:
+            nonlocal record
+            if quiz.grading_report is not None:
+                aggregate.last_report = quiz.grading_report.model_copy(deep=True)
+            record = await _checkpoint(record, token, aggregate)
+
+        report = await grade_quiz_session(quiz, checkpoint=checkpoint_grade)
+    else:
+        report = quiz.grading_report.model_copy(deep=True)
+    aggregate.last_report = report.model_copy(deep=True)
+    record = await _checkpoint(record, token, aggregate)
+    return record, report
+
+
+async def _write_checkpointed_memory(
+    aggregate: AdaptiveSessionAggregate,
+    record: StoredAdaptiveSession,
+    token: str,
+    report: GradingReport,
+) -> StoredAdaptiveSession:
+    quiz = aggregate.current_quiz
+    pending = aggregate.pending
+    if quiz is None or pending is None:
+        raise _corrupt()
+    if quiz.profile_written:
+        return record
+    answered_decision = aggregate.current_artifact.decision
+    decision_written = answered_decision is None
+
+    async def record_decision() -> None:
+        nonlocal decision_written
+        if answered_decision is None:
+            return
+        await append_decision(
+            aggregate.user_id,
+            {
+                "decision_id": (
+                    f"adaptive:{aggregate.adaptive_session_id}:"
+                    f"turn:{pending.turn}:decision"
+                ),
+                "agent": "adaptive_loop",
+                "decision": answered_decision.action,
+                "rationale": answered_decision.reason,
+                "turn": pending.turn,
+                "session_id": report.session_id,
+                "score": report.score,
+            },
+        )
+        decision_written = True
+
+    await commit_learning_memory(
+        aggregate.user_id,
+        report,
+        aggregate.document_id,
+        questions=quiz.questions,
+        after_write=record_decision,
+        on_core_written=lambda: setattr(quiz, "profile_written", True),
+    )
+    # ``commit_learning_memory`` deliberately treats its audit callback as
+    # fail-soft. Adaptive cannot checkpoint the shared memory marker until the
+    # deterministic decision event has also succeeded, otherwise a transient
+    # audit failure would be skipped forever on retry.
+    if not decision_written:
+        raise RuntimeError("adaptive decision audit was not written")
+    return await _checkpoint(record, token, aggregate)
+
+
+async def _checkpoint_mastery_and_decision(
+    aggregate: AdaptiveSessionAggregate,
+    record: StoredAdaptiveSession,
+    token: str,
+    *,
+    previous_was_teach: bool,
+) -> tuple[StoredAdaptiveSession, NextStepDecision]:
+    pending = aggregate.pending
+    if pending is None:
+        raise _corrupt()
+    if pending.next_decision is not None:
+        return record, pending.next_decision
+
+    mastery = await get_mastery(aggregate.user_id, aggregate.document_id)
+    pending.mastery = mastery
+    if not previous_was_teach:
+        report = aggregate.last_report
+        if report is None:
+            raise _corrupt()
+        history = [item.model_copy(deep=True) for item in aggregate.current_artifact.trajectory]
+        current = history[-1]
+        current.score = report.score
+        current.mastery_after = mastery
+        current.knowledge_gaps = _report_gaps(report)
+        aggregate.current_artifact.trajectory = history
+    record = await _checkpoint(record, token, aggregate)
+
+    weak_points = await get_weak_points(aggregate.user_id, aggregate.document_id)
     decision = await decide_next_step(
-        goal=asess.goal,
+        goal=aggregate.goal,
         mastery=mastery,
         weak_points=weak_points,
-        history=asess.history,
-        last_report=report,
-        allow_teach=not prev_was_teach,
+        history=aggregate.current_artifact.trajectory,
+        last_report=aggregate.last_report,
+        allow_teach=not previous_was_teach,
     )
+    pending.next_decision = decision
+    record = await _checkpoint(record, token, aggregate)
+    return record, decision
 
-    # Quiz 轮在批改前已经越过副作用边界；teach 轮直到这里仍可安全重试。
-    if prev_was_teach:
-        await before_effect()
 
-    # 终止判定(达标 / 轮数 / agent 主动结束)
-    terminate, term_reason = should_terminate(
-        mastery=mastery, turn=asess.turn, decision=decision
+async def _next_artifact(
+    aggregate: AdaptiveSessionAggregate,
+    decision: NextStepDecision,
+) -> tuple[AdaptiveTurnArtifact, QuizSession | None, str]:
+    pending = aggregate.pending
+    if pending is None:
+        raise _corrupt()
+    mastery = pending.mastery
+    history = [item.model_copy(deep=True) for item in aggregate.current_artifact.trajectory]
+    report = aggregate.last_report
+
+    # Explicit planning takes precedence over generic mastery/max-turn exits.
+    if decision.action == "switch_to_plan":
+        path = await generate_learning_path(aggregate.document_id)
+        return (
+            _artifact(
+                session_id=aggregate.adaptive_session_id,
+                turn=pending.turn,
+                decision=decision,
+                trajectory=history,
+                mastery=mastery,
+                report=report,
+                done=True,
+                terminate_reason="switch_to_plan",
+                learning_path=path.model_dump(),
+            ),
+            aggregate.current_quiz,
+            "completed",
+        )
+
+    terminate, reason = should_terminate(
+        mastery=mastery,
+        turn=pending.turn,
+        decision=decision,
     )
     if terminate:
-        asess.done = True
-        _save_session(asess)
-        return AdaptiveTurnResponse(
-            adaptive_session_id=asess.adaptive_session_id,
-            turn=asess.turn,
-            done=True,
-            decision=decision,
-            last_report_score=last_score,
-            last_report_gaps=last_gaps,
-            last_report_feedback=feedback,
-            mastery=mastery,
-            trajectory=asess.history,
-            summary=_build_summary(asess, mastery, term_reason, decision),
-            terminate_reason=term_reason,
+        return (
+            _artifact(
+                session_id=aggregate.adaptive_session_id,
+                turn=pending.turn,
+                decision=decision,
+                trajectory=history,
+                mastery=mastery,
+                report=report,
+                done=True,
+                terminate_reason=reason,
+            ),
+            aggregate.current_quiz,
+            "completed",
         )
 
-    # agent 决定转系统学习路径规划 → 生成路径并结束
-    if decision.action == "switch_to_plan":
-        asess.done = True
-        _save_session(asess)
-        path = await generate_learning_path(asess.document_id)
-        return AdaptiveTurnResponse(
-            adaptive_session_id=asess.adaptive_session_id,
-            turn=asess.turn,
-            done=True,
-            decision=decision,
-            last_report_score=last_score,
-            last_report_gaps=last_gaps,
-            last_report_feedback=feedback,
-            mastery=mastery,
-            trajectory=asess.history,
-            learning_path=path.model_dump(),
-            summary=_build_summary(asess, mastery, "switch_to_plan", decision),
-            terminate_reason="switch_to_plan",
-        )
-
-    asess.turn += 1
-
-    # 讲解轮:生成纯讲解,不出题
+    next_turn = pending.turn + 1
+    history.append(_turn_from_decision(next_turn, decision))
     if decision.action == "teach":
-        lesson = await _serve_teach_turn(asess, decision, turn=asess.turn)
-        _save_session(asess)
-        return AdaptiveTurnResponse(
-            adaptive_session_id=asess.adaptive_session_id,
-            turn=asess.turn,
-            turn_type="teach",
-            lesson=lesson,
+        lesson = await _generate_lesson(aggregate, decision)
+        artifact = _artifact(
+            session_id=aggregate.adaptive_session_id,
+            turn=next_turn,
             decision=decision,
-            last_report_score=last_score,
-            last_report_gaps=last_gaps,
-            last_report_feedback=feedback,
+            trajectory=history,
             mastery=mastery,
-            trajectory=asess.history,
+            report=report,
+            lesson=lesson,
+        )
+        return artifact, None, "active"
+
+    quiz = await _generate_quiz(
+        session_id=aggregate.adaptive_session_id,
+        user_id=aggregate.user_id,
+        document_id=aggregate.document_id,
+        decision=decision,
+        turn=next_turn,
+    )
+    artifact = _artifact(
+        session_id=aggregate.adaptive_session_id,
+        turn=next_turn,
+        decision=decision,
+        trajectory=history,
+        mastery=mastery,
+        report=report,
+        quiz=quiz,
+    )
+    return artifact, quiz, "active"
+
+
+async def _execute_claimed_submit(
+    req: AdaptiveSubmitRequest,
+    key_hash: str | None,
+    request_hash: str,
+    record: StoredAdaptiveSession,
+    aggregate: AdaptiveSessionAggregate,
+    token: str,
+) -> tuple[StoredAdaptiveSession, AdaptiveTurnArtifact]:
+    _validate_submit_binding(req, aggregate, request_hash, key_hash, record)
+    previous_was_teach = aggregate.current_artifact.turn_type == "teach"
+    record = await _checkpoint_pending_input(
+        req,
+        aggregate,
+        record,
+        token,
+        request_hash,
+        key_hash,
+    )
+
+    if not previous_was_teach:
+        record = await _checkpoint_quiz_answers(aggregate, record, token)
+        record, report = await _grade_checkpointed_quiz(aggregate, record, token)
+        record = await _write_checkpointed_memory(
+            aggregate,
+            record,
+            token,
+            report,
         )
 
-    # 出题轮
-    views = await _serve_turn(asess, decision, turn=asess.turn)
-    _save_session(asess)
-    return AdaptiveTurnResponse(
-        adaptive_session_id=asess.adaptive_session_id,
-        turn=asess.turn,
-        turn_type="quiz",
-        questions=views,
-        decision=decision,
-        last_report_score=last_score,
-        last_report_gaps=last_gaps,
-        last_report_feedback=feedback,
-        mastery=mastery,
-        trajectory=asess.history,
+    record, decision = await _checkpoint_mastery_and_decision(
+        aggregate,
+        record,
+        token,
+        previous_was_teach=previous_was_teach,
     )
+    artifact, current_quiz, status = await _next_artifact(aggregate, decision)
+
+    pending = aggregate.pending
+    if pending is None:
+        raise _corrupt()
+    aggregate.current_artifact = artifact
+    aggregate.current_quiz = current_quiz
+    aggregate.status = status
+    aggregate.pending = None
+    if key_hash is not None:
+        aggregate.submit_receipts[key_hash] = AdaptiveSubmitReceipt(
+            key_hash=key_hash,
+            request_hash=request_hash,
+            turn=pending.turn,
+            revision=pending.revision,
+            response=artifact,
+        )
+
+    completed = await _complete_claim(record, token, aggregate)
+    committed = _validate_aggregate(completed.aggregate)
+    if key_hash is not None:
+        return completed, committed.submit_receipts[key_hash].response.model_copy(deep=True)
+    return completed, artifact
 
 
 @router.post("/agent/adaptive/submit", response_model=AdaptiveTurnResponse)
 async def adaptive_submit(
     req: AdaptiveSubmitRequest,
-    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> AdaptiveTurnResponse:
-    """Advance one adaptive turn with optional durable retry protection."""
     key = normalize_idempotency_key(idempotency_key)
-    claimed = False
-    if key:
-        decision = await request_idempotency.begin(
-            key, "agent.adaptive.submit", req.model_dump(mode="json")
-        )
-        if decision.replayed:
-            return AdaptiveTurnResponse.model_validate(decision.response)
-        claimed = True
+    request_hash = _request_hash(req)
+    key_hash = _key_hash(key)
 
-    effect_started = False
-
-    async def mark_effect() -> None:
-        nonlocal effect_started
-        if effect_started:
-            return
-        if key:
-            await request_idempotency.mark_effect_started(key, "adaptive_submit")
-        effect_started = True
+    inspected_record, inspected = await _inspect_live(req.adaptive_session_id)
+    replay = _find_receipt(inspected, key_hash, request_hash)
+    if replay is not None:
+        return _response(inspected_record, replay)
+    _validate_submit_binding(
+        req,
+        inspected,
+        request_hash,
+        key_hash,
+        inspected_record,
+    )
 
     try:
-        if req.adaptive_session_id not in _sessions:
-            raise HTTPException(status_code=404, detail="会话不存在或已过期")
-
-        lock = _submit_locks.setdefault(req.adaptive_session_id, asyncio.Lock())
-        async with lock:
-            response = await _execute_adaptive_submit(req, before_effect=mark_effect)
-            if key:
-                await request_idempotency.complete(
-                    key, response.model_dump(mode="json")
-                )
-            return response
-    except BaseException as exc:
-        durable_effect = False
-        if claimed and key:
-            try:
-                durable_effect = await abort_idempotency_claim(
-                    request_idempotency,
-                    key,
-                )
-            except BaseException:
-                logger.exception("adaptive submit receipt cleanup failed")
-
-        ambiguous = effect_started or durable_effect
-        if ambiguous:
-            _sessions.pop(req.adaptive_session_id, None)
-            _submit_locks.pop(req.adaptive_session_id, None)
-
-        if isinstance(exc, asyncio.CancelledError):
-            raise
-        if ambiguous and not isinstance(exc, SideEffectAmbiguousError):
-            raise SideEffectAmbiguousError("adaptive_submit") from exc
+        claim, record, aggregate = await _claim_live(req.adaptive_session_id)
+    except QuizSessionApiError as exc:
+        # A worker can complete after our optimistic inspect but before our
+        # claim. Re-read once so a response-loss retry with the same key still
+        # receives its durable receipt instead of a misleading completed error.
+        if exc.code == "adaptive_session_completed" and key_hash is not None:
+            raced_record, raced_aggregate = await _inspect_live(
+                req.adaptive_session_id
+            )
+            raced_replay = _find_receipt(
+                raced_aggregate,
+                key_hash,
+                request_hash,
+            )
+            if raced_replay is not None:
+                return _response(raced_record, raced_replay)
         raise
+    token = claim.token
+    completed = False
+    try:
+        replay = _find_receipt(aggregate, key_hash, request_hash)
+        if replay is not None:
+            await _release(req.adaptive_session_id, token)
+            completed = True
+            settled_record, settled_aggregate = await _inspect_live(
+                req.adaptive_session_id
+            )
+            settled_replay = _find_receipt(
+                settled_aggregate,
+                key_hash,
+                request_hash,
+            )
+            if settled_replay is None:
+                raise _corrupt()
+            return _response(settled_record, settled_replay)
+        final_record, artifact = await _execute_claimed_submit(
+            req,
+            key_hash,
+            request_hash,
+            record,
+            aggregate,
+            token,
+        )
+        completed = True
+        return _response(final_record, artifact)
+    except (InvalidQuizResponseError, ValidationError) as exc:
+        logger.warning("adaptive provider returned invalid structured output")
+        raise HTTPException(
+            status_code=503,
+            detail="模型返回的内容格式无效",
+        ) from exc
+    finally:
+        if not completed:
+            await _release(req.adaptive_session_id, token)

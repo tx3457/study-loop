@@ -4,6 +4,7 @@ const API_PREFIX = '/api'
 const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const AUTONOMOUS_SESSION_KEY = 'study-loop.autonomous.awaiting.v1'
 const QUIZ_RECOVERY_KEY = 'study-loop.quiz.recovery.v1'
+const ADAPTIVE_RECOVERY_KEY = 'study-loop.adaptive.recovery.v1'
 const FUTURE_EXPIRES_AT = 4_102_444_800
 
 test.beforeEach(async ({ page }) => {
@@ -59,6 +60,11 @@ async function mockApi(page, handler) {
         return
       }
 
+      if (response.abort) {
+        await route.abort(response.abort)
+        return
+      }
+
       await route.fulfill({
         status: response.status || 200,
         contentType: 'application/json',
@@ -68,6 +74,68 @@ async function mockApi(page, handler) {
   )
 
   return unexpectedRequests
+}
+
+function adaptiveSnapshot(overrides = {}) {
+  return {
+    schema_version: 1,
+    adaptive_session_id: 'adapt-fixture',
+    turn: 1,
+    done: false,
+    turn_type: 'quiz',
+    questions: [{
+      index: 0,
+      question: '请选择首字母',
+      options: ['Alpha', 'Beta'],
+      type: 'choice',
+    }],
+    lesson: null,
+    decision: {
+      action: 'continue',
+      topic: '首字母',
+      reason: '继续验证掌握情况',
+      difficulty: 'medium',
+      difficulty_score: 0.5,
+      question_type: 'choice',
+      count: 1,
+      target_weak_points: [],
+    },
+    last_report_score: null,
+    last_report_gaps: [],
+    last_report_feedback: [],
+    mastery: 0.4,
+    trajectory: [{
+      turn: 1,
+      action: 'continue',
+      topic: '首字母',
+      difficulty_score: 0.5,
+      score: null,
+      mastery_after: 0.4,
+      knowledge_gaps: [],
+    }],
+    summary: '',
+    terminate_reason: '',
+    learning_path: null,
+    revision: 1,
+    expires_at: FUTURE_EXPIRES_AT,
+    busy: false,
+    ...overrides,
+  }
+}
+
+function adaptiveRecovery(snapshot, pendingSubmit = null) {
+  return {
+    schema_version: 1,
+    intent: {
+      user_id: 'default_user',
+      document_id: 'notes.md',
+      goal: '掌握首字母',
+    },
+    start_idempotency_key: 'adaptive-start-key-1234',
+    session: { adaptive_session_id: snapshot.adaptive_session_id },
+    snapshot,
+    pending_submit: pendingSubmit,
+  }
 }
 
 test('mobile navigation traps focus and restores it on close', async ({ page }) => {
@@ -386,48 +454,75 @@ test('adaptive loads documents on entry and refresh clears the recovered error',
   expect(unexpectedRequests).toEqual([])
 })
 
-test('adaptive retries a turn safely and rotates the key only when answers change', async ({ page }) => {
-  const submitAttempts = []
+test('adaptive start response loss retries the same intent with the same key', async ({ page }) => {
+  const starts = []
   const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
     if (request.method() === 'POST' && path === '/agent/adaptive/start') {
-      return {
-        body: {
-          adaptive_session_id: 'adapt-retry',
-          turn: 1,
-          done: false,
-          turn_type: 'quiz',
-          questions: [{ index: 0, question: '请选择首字母', options: ['Alpha', 'Beta'] }],
-          trajectory: [],
-        },
-      }
-    }
-    if (request.method() === 'POST' && path === '/agent/adaptive/submit') {
-      submitAttempts.push({
+      starts.push({
         body: await request.postDataJSON(),
         key: await request.headerValue('idempotency-key'),
       })
-      if (submitAttempts.length === 1) {
-        return { status: 503, body: { detail: '自适应批改暂时不可用' } }
-      }
-      if (submitAttempts.length === 2) {
-        return {
-          status: 409,
-          body: {
-            detail: '本轮仍在处理中',
-            code: 'idempotency_conflict',
-            reason: 'in_progress',
-          },
-        }
-      }
+      if (starts.length === 1) return { abort: 'failed' }
       return {
-        body: {
-          adaptive_session_id: 'adapt-retry',
-          turn: 1,
-          done: true,
-          summary: '已安全完成本轮',
-          trajectory: [],
-        },
+        body: adaptiveSnapshot({ adaptive_session_id: 'adapt-start-replay' }),
       }
+    }
+    return null
+  })
+
+  await page.goto('/adaptive')
+  await expect(page.getByLabel('用户 ID')).toHaveCount(0)
+  await page.getByLabel('学习目标').fill('学习首字母')
+  await page.getByLabel('文档 ID').fill('notes.md')
+  await page.getByRole('button', { name: '开始自适应辅导' }).click()
+
+  await expect(page.getByRole('alert')).toBeVisible()
+  await expect(page.getByLabel('学习目标')).toBeDisabled()
+  await page.reload()
+  await expect(page.getByText('请选择首字母')).toBeVisible()
+
+  expect(starts).toHaveLength(2)
+  expect(starts[0].body).toEqual({
+    user_id: 'default_user',
+    document_id: 'notes.md',
+    goal: '学习首字母',
+  })
+  expect(starts[1].body).toEqual(starts[0].body)
+  expect(starts[0].key).toMatch(UUID_V4_PATTERN)
+  expect(starts[1].key).toBe(starts[0].key)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('adaptive submit response loss survives refresh with an identical key and body', async ({ page }) => {
+  const active = adaptiveSnapshot({ adaptive_session_id: 'adapt-submit-replay' })
+  const completed = adaptiveSnapshot({
+    adaptive_session_id: 'adapt-submit-replay',
+    done: true,
+    questions: [],
+    summary: '已安全完成本轮',
+    terminate_reason: 'agent_finish',
+    decision: {
+      ...active.decision,
+      action: 'finish',
+      reason: '本轮目标已完成',
+    },
+    revision: 2,
+  })
+  const submits = []
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'POST' && path === '/agent/adaptive/start') {
+      return { body: active }
+    }
+    if (request.method() === 'GET' && path === '/agent/adaptive/adapt-submit-replay') {
+      return { body: active }
+    }
+    if (request.method() === 'POST' && path === '/agent/adaptive/submit') {
+      submits.push({
+        body: await request.postDataJSON(),
+        key: await request.headerValue('idempotency-key'),
+      })
+      if (submits.length === 1) return { abort: 'failed' }
+      return { body: completed }
     }
     return null
   })
@@ -436,69 +531,451 @@ test('adaptive retries a turn safely and rotates the key only when answers chang
   await page.getByLabel('学习目标').fill('学习首字母')
   await page.getByLabel('文档 ID').fill('notes.md')
   await page.getByRole('button', { name: '开始自适应辅导' }).click()
-
   await page.getByRole('radio', { name: 'Alpha' }).check()
   await page.getByRole('button', { name: /提交本轮/ }).click()
-  await expect(page.getByRole('alert')).toContainText('自适应批改暂时不可用')
 
-  await page.getByRole('button', { name: /提交本轮/ }).click()
-  await expect(page.getByRole('alert')).toContainText('本轮仍在处理中')
+  await expect(page.getByRole('alert')).toBeVisible()
+  await expect(page.getByRole('radio', { name: 'Alpha' })).toBeDisabled()
+  const pendingBeforeReload = await page.evaluate(key => (
+    JSON.parse(sessionStorage.getItem(key)).pending_submit
+  ), ADAPTIVE_RECOVERY_KEY)
 
-  await page.getByRole('radio', { name: 'Beta' }).check()
-  await page.getByRole('button', { name: /提交本轮/ }).click()
+  await page.reload()
   await expect(page.getByText('已安全完成本轮')).toBeVisible()
 
-  expect(submitAttempts.map(attempt => attempt.body)).toEqual([
-    { adaptive_session_id: 'adapt-retry', answers: ['Alpha'], turn: 1 },
-    { adaptive_session_id: 'adapt-retry', answers: ['Alpha'], turn: 1 },
-    { adaptive_session_id: 'adapt-retry', answers: ['Beta'], turn: 1 },
-  ])
-  expect(submitAttempts[0].key).toMatch(UUID_V4_PATTERN)
-  expect(submitAttempts[1].key).toBe(submitAttempts[0].key)
-  expect(submitAttempts[2].key).toMatch(UUID_V4_PATTERN)
-  expect(submitAttempts[2].key).not.toBe(submitAttempts[0].key)
+  expect(submits).toHaveLength(2)
+  expect(submits[0].body).toEqual({
+    adaptive_session_id: 'adapt-submit-replay',
+    answers: ['Alpha'],
+    turn: 1,
+    revision: 1,
+  })
+  expect(submits[1].body).toEqual(submits[0].body)
+  expect(submits[0].key).toMatch(UUID_V4_PATTERN)
+  expect(submits[1].key).toBe(submits[0].key)
+  expect(pendingBeforeReload.body).toEqual(submits[0].body)
+  expect(pendingBeforeReload.idempotency_key).toBe(submits[0].key)
   expect(unexpectedRequests).toEqual([])
 })
 
-test('adaptive discards a session after a terminal submit conflict', async ({ page }) => {
-  let submitRequests = 0
+test('adaptive GET restores quiz, lesson, and readable completed learning path states', async ({ page }) => {
+  const quiz = adaptiveSnapshot({ adaptive_session_id: 'adapt-get-quiz' })
+  const lesson = adaptiveSnapshot({
+    adaptive_session_id: 'adapt-get-teach',
+    turn_type: 'teach',
+    questions: [],
+    lesson: '先比较两个算法的递归边界，再观察合并步骤。',
+    decision: {
+      ...quiz.decision,
+      action: 'teach',
+      topic: '递归边界',
+    },
+  })
+  const done = adaptiveSnapshot({
+    adaptive_session_id: 'adapt-get-done',
+    done: true,
+    questions: [],
+    summary: '建议按新路径继续练习。',
+    terminate_reason: 'switch_to_plan',
+    decision: {
+      ...quiz.decision,
+      action: 'switch_to_plan',
+      topic: '排序算法',
+    },
+    learning_path: {
+      document_id: 'notes.md',
+      title: '排序算法强化路径',
+      total_stages: 2,
+      stages: [{
+        stage: 1,
+        title: '比较排序基础',
+        topics: ['快速排序'],
+        description: '先掌握分区和递归边界。',
+        estimated_minutes: 20,
+      }, {
+        stage: 2,
+        title: '稳定性与复杂度',
+        topics: ['归并排序'],
+        description: '比较稳定性和空间复杂度。',
+        estimated_minutes: 25,
+      }],
+    },
+    revision: 4,
+  })
+  const snapshots = new Map([
+    [quiz.adaptive_session_id, quiz],
+    [lesson.adaptive_session_id, lesson],
+    [done.adaptive_session_id, done],
+  ])
   const unexpectedRequests = await mockApi(page, ({ path, request }) => {
-    if (request.method() === 'POST' && path === '/agent/adaptive/start') {
-      return {
-        body: {
-          adaptive_session_id: 'adapt-terminal',
-          turn: 2,
-          done: false,
-          turn_type: 'quiz',
-          questions: [{ index: 0, question: '旧会话题目', options: ['继续', '停止'] }],
-          trajectory: [],
-        },
-      }
+    if (request.method() === 'GET' && path.startsWith('/agent/adaptive/')) {
+      return { body: snapshots.get(path.split('/').at(-1)) }
+    }
+    return null
+  })
+
+  await page.goto('/adaptive')
+
+  for (const snapshot of [quiz, lesson, done]) {
+    await page.evaluate(({ key, value }) => {
+      sessionStorage.setItem(key, JSON.stringify(value))
+    }, {
+      key: ADAPTIVE_RECOVERY_KEY,
+      value: adaptiveRecovery(snapshot),
+    })
+    await page.reload()
+
+    if (snapshot === quiz) {
+      await expect(page.getByText('请选择首字母')).toBeVisible()
+    } else if (snapshot === lesson) {
+      await expect(page.getByText('先比较两个算法的递归边界，再观察合并步骤。')).toBeVisible()
+    } else {
+      await expect(page.getByText('排序算法强化路径')).toBeVisible()
+      await expect(page.getByText('先掌握分区和递归边界。')).toBeVisible()
+      await expect(page.locator('.learning-path pre')).toHaveCount(0)
+      await expect(page.getByRole('link', { name: '从第一阶段开始练习' })).toHaveAttribute(
+        'href',
+        '/quiz?document_id=notes.md&topic=%E5%BF%AB%E9%80%9F%E6%8E%92%E5%BA%8F',
+      )
+    }
+  }
+
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('adaptive clears a corrupt persisted snapshot before rendering it', async ({ page }) => {
+  const corrupt = adaptiveSnapshot({
+    adaptive_session_id: 'adapt-corrupt',
+    decision: {
+      ...adaptiveSnapshot().decision,
+      difficulty_score: 'not-a-number',
+    },
+  })
+  let snapshotRequests = 0
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path.startsWith('/agent/adaptive/')) {
+      snapshotRequests += 1
+      return { status: 500, body: { detail: '不应读取损坏会话' } }
+    }
+    return null
+  })
+  await page.addInitScript(({ key, value }) => {
+    sessionStorage.setItem(key, JSON.stringify(value))
+  }, {
+    key: ADAPTIVE_RECOVERY_KEY,
+    value: adaptiveRecovery(corrupt),
+  })
+
+  await page.goto('/adaptive')
+  await expect(page.getByLabel('学习目标')).toBeEditable()
+  await expect(page.getByRole('button', { name: '开始自适应辅导' })).toBeVisible()
+  await expect.poll(() => page.evaluate(key => sessionStorage.getItem(key), ADAPTIVE_RECOVERY_KEY))
+    .toBeNull()
+  expect(snapshotRequests).toBe(0)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('adaptive busy and stale recovery keeps frozen answers then hydrates canonical progress', async ({ page }) => {
+  const active = adaptiveSnapshot({ adaptive_session_id: 'adapt-stale' })
+  const advanced = adaptiveSnapshot({
+    adaptive_session_id: 'adapt-stale',
+    turn: 2,
+    revision: 3,
+    questions: [{
+      index: 0,
+      question: '服务端第二轮题目',
+      options: ['继续', '结束'],
+      type: 'choice',
+    }],
+    decision: {
+      ...active.decision,
+      topic: '第二轮',
+    },
+    trajectory: [active.trajectory[0], {
+      ...active.trajectory[0],
+      turn: 2,
+      topic: '第二轮',
+    }],
+  })
+  const pending = {
+    idempotency_key: 'adaptive-submit-key-1234',
+    body: {
+      adaptive_session_id: 'adapt-stale',
+      answers: ['Alpha'],
+      turn: 1,
+      revision: 1,
+    },
+  }
+  let getCount = 0
+  const submitted = []
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/agent/adaptive/adapt-stale') {
+      getCount += 1
+      if (getCount === 1) return { body: { ...active, busy: true } }
+      if (getCount === 2) return { body: active }
+      return { body: advanced }
     }
     if (request.method() === 'POST' && path === '/agent/adaptive/submit') {
-      submitRequests += 1
+      submitted.push({
+        body: await request.postDataJSON(),
+        key: await request.headerValue('idempotency-key'),
+      })
       return {
         status: 409,
         body: {
-          detail: '提交轮次已过期，请重新开始',
+          detail: '进度已变化',
+          code: 'adaptive_session_stale',
+          reason: 'stale',
         },
+      }
+    }
+    return null
+  })
+  await page.addInitScript(({ key, value }) => {
+    sessionStorage.setItem(key, JSON.stringify(value))
+  }, {
+    key: ADAPTIVE_RECOVERY_KEY,
+    value: adaptiveRecovery(active, pending),
+  })
+
+  await page.goto('/adaptive')
+  await expect(page.getByRole('radio', { name: 'Alpha' })).toBeDisabled()
+  await expect(page.getByText('服务端第二轮题目')).toBeVisible()
+
+  expect(submitted).toEqual([{
+    body: pending.body,
+    key: pending.idempotency_key,
+  }])
+  const recovered = await page.evaluate(key => (
+    JSON.parse(sessionStorage.getItem(key))
+  ), ADAPTIVE_RECOVERY_KEY)
+  expect(recovered.pending_submit).toBeNull()
+  expect(recovered.snapshot.turn).toBe(2)
+  expect(getCount).toBeGreaterThanOrEqual(3)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('adaptive same-turn stale recovery preserves the original pending request', async ({ page }) => {
+  const active = adaptiveSnapshot({ adaptive_session_id: 'adapt-partial-stale' })
+  const checkpointed = { ...active, revision: 2 }
+  const completed = adaptiveSnapshot({
+    adaptive_session_id: 'adapt-partial-stale',
+    done: true,
+    questions: [],
+    summary: '已从服务端检查点继续完成',
+    terminate_reason: 'agent_finish',
+    decision: {
+      ...active.decision,
+      action: 'finish',
+      reason: '已完成',
+    },
+    revision: 3,
+  })
+  const pending = {
+    idempotency_key: 'adaptive-partial-stale-key',
+    body: {
+      adaptive_session_id: 'adapt-partial-stale',
+      answers: ['Alpha'],
+      turn: 1,
+      revision: 1,
+    },
+  }
+  let getCount = 0
+  const submits = []
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/agent/adaptive/adapt-partial-stale') {
+      getCount += 1
+      return { body: getCount === 1 ? active : checkpointed }
+    }
+    if (request.method() === 'POST' && path === '/agent/adaptive/submit') {
+      submits.push({
+        body: await request.postDataJSON(),
+        key: await request.headerValue('idempotency-key'),
+      })
+      if (submits.length === 1) {
+        return {
+          status: 409,
+          body: {
+            detail: '处理租约已变化',
+            code: 'adaptive_session_stale',
+            reason: 'stale',
+          },
+        }
+      }
+      return { body: completed }
+    }
+    return null
+  })
+  await page.addInitScript(({ key, value }) => {
+    sessionStorage.setItem(key, JSON.stringify(value))
+  }, {
+    key: ADAPTIVE_RECOVERY_KEY,
+    value: adaptiveRecovery(active, pending),
+  })
+
+  await page.goto('/adaptive')
+  await expect(page.getByText('已从服务端检查点继续完成')).toBeVisible()
+
+  expect(submits).toHaveLength(2)
+  expect(submits[0]).toEqual({ body: pending.body, key: pending.idempotency_key })
+  expect(submits[1]).toEqual(submits[0])
+  expect(getCount).toBeGreaterThanOrEqual(2)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('adaptive rejected submit unlocks the canonical turn for a corrected request', async ({ page }) => {
+  const active = adaptiveSnapshot({ adaptive_session_id: 'adapt-rejected' })
+  const completed = adaptiveSnapshot({
+    adaptive_session_id: 'adapt-rejected',
+    done: true,
+    questions: [],
+    summary: '修正后的答案已提交',
+    terminate_reason: 'agent_finish',
+    decision: {
+      ...active.decision,
+      action: 'finish',
+      reason: '已完成',
+    },
+    revision: 2,
+  })
+  const submits = []
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'POST' && path === '/agent/adaptive/start') {
+      return { body: active }
+    }
+    if (request.method() === 'GET' && path === '/agent/adaptive/adapt-rejected') {
+      return { body: active }
+    }
+    if (request.method() === 'POST' && path === '/agent/adaptive/submit') {
+      submits.push({
+        body: await request.postDataJSON(),
+        key: await request.headerValue('idempotency-key'),
+      })
+      if (submits.length === 1) {
+        return { status: 422, body: { detail: '答案格式无效' } }
+      }
+      return { body: completed }
+    }
+    return null
+  })
+
+  await page.goto('/adaptive')
+  await page.getByLabel('学习目标').fill('学习首字母')
+  await page.getByLabel('文档 ID').fill('notes.md')
+  await page.getByRole('button', { name: '开始自适应辅导' }).click()
+  await page.getByRole('radio', { name: 'Alpha' }).check()
+  await page.getByRole('button', { name: /提交本轮/ }).click()
+
+  await expect(page.getByRole('radio', { name: 'Alpha' })).toBeEnabled()
+  await expect.poll(() => page.evaluate(key => (
+    JSON.parse(sessionStorage.getItem(key)).pending_submit
+  ), ADAPTIVE_RECOVERY_KEY)).toBeNull()
+
+  await page.getByRole('radio', { name: 'Beta' }).check()
+  await page.getByRole('button', { name: /提交本轮/ }).click()
+  await expect(page.getByText('修正后的答案已提交')).toBeVisible()
+
+  expect(submits).toHaveLength(2)
+  expect(submits[0].body.answers).toEqual(['Alpha'])
+  expect(submits[1].body.answers).toEqual(['Beta'])
+  expect(submits[1].key).not.toBe(submits[0].key)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('adaptive expired recovery clears only the expired session and returns to setup', async ({ page }) => {
+  const expired = adaptiveSnapshot({ adaptive_session_id: 'adapt-expired' })
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/agent/adaptive/adapt-expired') {
+      return {
+        status: 410,
+        body: {
+          detail: '自适应学习会话已过期',
+          code: 'adaptive_session_expired',
+          reason: 'expired',
+        },
+      }
+    }
+    return null
+  })
+  await page.addInitScript(({ key, value }) => {
+    sessionStorage.setItem(key, JSON.stringify(value))
+  }, {
+    key: ADAPTIVE_RECOVERY_KEY,
+    value: adaptiveRecovery(expired),
+  })
+
+  await page.goto('/adaptive')
+  await expect(page.getByRole('alert')).toContainText('自适应学习会话已过期')
+  await expect(page.getByLabel('学习目标')).toBeEditable()
+  await expect(page.getByRole('button', { name: '开始自适应辅导' })).toBeVisible()
+  await expect(page.getByText('请选择首字母')).toHaveCount(0)
+  await expect.poll(() => page.evaluate(key => sessionStorage.getItem(key), ADAPTIVE_RECOVERY_KEY))
+    .toBeNull()
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('adaptive ignores a late start response after reset and a newer start', async ({ page }) => {
+  let releaseOld
+  let markOldStarted
+  const oldStarted = new Promise(resolve => { markOldStarted = resolve })
+  const oldBlocked = new Promise(resolve => { releaseOld = resolve })
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'POST' && path === '/agent/adaptive/start') {
+      const body = await request.postDataJSON()
+      if (body.goal === '旧目标') {
+        markOldStarted()
+        await oldBlocked
+        return {
+          body: adaptiveSnapshot({
+            adaptive_session_id: 'adapt-old',
+            questions: [{
+              index: 0,
+              question: '不应出现的旧题目',
+              options: ['旧答案'],
+              type: 'choice',
+            }],
+          }),
+        }
+      }
+      return {
+        body: adaptiveSnapshot({
+          adaptive_session_id: 'adapt-new',
+          questions: [{
+            index: 0,
+            question: '新的有效题目',
+            options: ['新答案'],
+            type: 'choice',
+          }],
+        }),
       }
     }
     return null
   })
 
   await page.goto('/adaptive')
-  await page.getByLabel('学习目标').fill('测试终端冲突')
+  await page.getByLabel('学习目标').fill('旧目标')
   await page.getByLabel('文档 ID').fill('notes.md')
   await page.getByRole('button', { name: '开始自适应辅导' }).click()
-  await page.getByRole('radio', { name: '继续' }).check()
-  await page.getByRole('button', { name: /提交本轮/ }).click()
+  await oldStarted
 
-  await expect(page.getByRole('alert')).toContainText('提交轮次已过期')
-  await expect(page.getByText('旧会话题目')).toHaveCount(0)
-  await expect(page.getByLabel('学习目标')).toBeEditable()
-  await expect(page.getByRole('button', { name: /提交本轮/ })).toHaveCount(0)
-  expect(submitRequests).toBe(1)
+  await page.getByRole('button', { name: '重新开始' }).click()
+  await page.getByLabel('学习目标').fill('新目标')
+  await page.getByLabel('文档 ID').fill('notes.md')
+  await page.getByRole('button', { name: '开始自适应辅导' }).click()
+  await expect(page.getByText('新的有效题目')).toBeVisible()
+
+  const oldResponseDelivered = page.waitForResponse(response => {
+    const request = response.request()
+    return request.method() === 'POST'
+      && new URL(request.url()).pathname.endsWith('/agent/adaptive/start')
+      && request.postDataJSON()?.goal === '旧目标'
+  })
+  releaseOld()
+  await oldResponseDelivered
+  await expect(page.getByText('新的有效题目')).toBeVisible()
+  await expect(page.getByText('不应出现的旧题目')).toHaveCount(0)
+  const stored = await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), ADAPTIVE_RECOVERY_KEY)
+  expect(stored.session.adaptive_session_id).toBe('adapt-new')
   expect(unexpectedRequests).toEqual([])
 })
 

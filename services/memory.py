@@ -895,8 +895,6 @@ async def commit_learning_memory(
             questions=questions,
         )
         await update_semantic_memory(user_id, report, document_id)
-        if on_core_written is not None:
-            on_core_written()
         if after_write is not None:
             try:
                 await after_write()
@@ -907,7 +905,11 @@ async def commit_learning_memory(
                     exc,
                 )
         await maybe_archive_session_briefs(user_id)
-        await persist_memory_snapshot()
+        snapshot_written = await persist_memory_snapshot()
+        if not DATABASE_URL and not snapshot_written:
+            raise RuntimeError("learner-memory snapshot was not persisted")
+        if on_core_written is not None:
+            on_core_written()
 
     await _complete_memory_commit(operation())
 

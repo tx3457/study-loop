@@ -74,14 +74,20 @@ example configuration.
   sets `AUDIT_PAYLOAD_ENABLED=true`; this switch is not a substitute for
   authentication.
 - Session transitions and idempotency receipts share the configured database by
-  default; `AUTONOMOUS_SESSION_DB_PATH` may override the local session file.
+  default; `QUIZ_SESSION_DB_PATH`, `ADAPTIVE_SESSION_DB_PATH`, and
+  `AUTONOMOUS_SESSION_DB_PATH` may override their local SQLite files.
   They are still separate transactions. This is fail-closed at-most-once
   protection, not exactly-once execution: a process crash between transitions
   can leave a pending receipt or an abandoned claim that requires operator
   cleanup. `Idempotency-Key` also remains optional.
-- Quiz and adaptive sessions remain process-local. A backend restart invalidates
-  them even when their idempotency receipts are durable, so clients must start a
-  new session after a 404 or terminal conflict.
+- Web Quiz and Adaptive sessions use versioned private aggregates in PostgreSQL
+  when `DATABASE_URL` is set, or SQLite for local development. Lease claims,
+  fencing tokens, revision checks, TTL checks, and payload bounds prevent stale
+  workers from overwriting newer state. Browser recovery data in
+  `sessionStorage` includes stable idempotency keys and, while an Adaptive turn
+  is pending, the user's submitted answers. It remains accessible to scripts in
+  the same origin and tab. Tutor Lab workflow state has separate experimental
+  boundaries and must not be inferred to have these guarantees.
 - A resumed LangGraph node may replay earlier code before an `interrupt`.
   The interrupt-capable assistant therefore exposes and dispatches only tools
   declared read-only or idempotent; unknown MCP tools and profile writes are

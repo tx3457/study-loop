@@ -96,18 +96,19 @@ npm run dev
 | Structured Output | `STRUCTURED_API_KEY`、`STRUCTURED_BASE_URL`、`STRUCTURED_MODEL` |
 | Embeddings | `EMBEDDING_API_KEY`、`EMBEDDING_BASE_URL`、`LLM_EMBEDDING_MODEL` |
 
-Web 前端会为 Autonomous 请求、Quiz 创建与单题答案、Adaptive 单轮提交生成
-`Idempotency-Key`；同一内容重试时复用原 key，修改答案后生成新 key。Quiz 的
-题号和 Adaptive 的轮次也会随请求提交，服务端会拒绝过期提交。Web Quiz 会话、
-出题请求绑定和逐题答案绑定使用同一份持久状态，因此刷新、切页或后端重启后可从
-服务端快照恢复；未作答题目的答案与解析不会返回浏览器。使用 `DATABASE_URL` 时，
-重试 receipt、Web Quiz 会话和人工确认暂停快照保存在 PostgreSQL；本地无数据库时
-默认使用 `IDEMPOTENCY_DB_PATH` 指定的 SQLite 文件，也可用功能专属路径覆盖。
-Autonomous 暂停快照默认保留 1 小时，Web Quiz 默认保留 24 小时。相关容量和 TTL 配置见
+Web 前端会为 Autonomous 请求、Quiz 创建与单题答案、Adaptive 创建与单轮提交生成
+`Idempotency-Key`；同一内容重试时复用原 key，修改答案后生成新 key。Quiz 的题号以及
+Adaptive 的轮次与状态版本也会随请求提交，服务端会拒绝过期覆盖。Web Quiz 与
+Adaptive 都把完整私有题目、阶段性批改、画像写入标记和规范进度保存在服务端；浏览器
+只保存恢复意图、最近一次安全快照和尚未确认的完整请求。因此刷新、切页、响应丢失或
+后端重启后可以继续，未作答题目的答案、解析和来源不会返回浏览器。使用
+`DATABASE_URL` 时，重试 receipt、Web Quiz、Adaptive 与人工确认暂停快照保存在
+PostgreSQL；本地无数据库时默认使用 `IDEMPOTENCY_DB_PATH` 指定的 SQLite 文件，也可用
+功能专属路径覆盖。Autonomous 与 Adaptive 默认保留 1 小时，Web Quiz 默认保留 24 小时。
+相关容量和 TTL 配置见
 [`.env.example`](.env.example)。多 worker 首次初始化 PostgreSQL learner memory
 时，其他 worker 最多等待 `MEMORY_STORE_SETUP_LOCK_TIMEOUT_SECONDS`（默认 300
-秒）；初始化连接需直连 PostgreSQL 或使用 session pooling。Adaptive 会话仍保存在
-进程内存中，后端重启后需要重新开始。未配置
+秒）；初始化连接需直连 PostgreSQL 或使用 session pooling。未配置
 `DATABASE_URL` 时，学习者记忆由单进程内存和本地 JSON 快照兜底，只支持一个
 后端 worker；需要多 worker 时必须配置 PostgreSQL，不能让多个进程共写同一快照。
 
@@ -162,6 +163,7 @@ TEST_DATABASE_URL=postgresql://user:password@127.0.0.1:5432/studyloop_test \
   python -m pytest -q \
     tests/test_idempotency_postgres.py \
     tests/test_quiz_sessions_postgres.py \
+    tests/test_adaptive_sessions_postgres.py \
     tests/test_autonomous_sessions_postgres.py \
     tests/test_memory_postgres.py
 

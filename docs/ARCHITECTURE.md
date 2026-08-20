@@ -74,8 +74,14 @@ authorization or Pydantic-validation boundary; see `SECURITY.md`.
   deployments must configure PostgreSQL rather than share one snapshot file.
 - `services/quiz_sessions.py` persists stable Web Quiz and wrong-question
   practice sessions. SQLite supports local restart recovery; PostgreSQL adds
-  cross-worker claims and fencing. Adaptive and Tutor keep their separate,
-  explicitly in-process workflow state.
+  cross-worker claims and fencing.
+- `services/adaptive_sessions.py` persists the complete private Adaptive
+  aggregate, including partial grades, memory-write markers, decisions, and
+  replay artifacts. Its browser projection excludes answers, explanations, and
+  source chunks; SQLite supports local restart recovery and PostgreSQL adds
+  cross-worker claims, revision CAS, and fencing.
+- Tutor remains an opt-in experimental Lab with its own narrower workflow-state
+  boundary; it must not inherit Quiz or Adaptive durability claims by analogy.
 
 Checkpoint state and learner memory solve different problems and should not be
 described as one generic “memory” feature.
