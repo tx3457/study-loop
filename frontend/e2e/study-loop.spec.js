@@ -3136,6 +3136,139 @@ test('a late learning-report response cannot replace a new quiz', async ({ page 
   expect(problems).toEqual([])
 })
 
+test('Dashboard requires an explicit choice before replacing Quiz recovery', async ({ page }) => {
+  const problems = trackBrowserProblems(page)
+  const oldRecovery = {
+    schema_version: 1,
+    intent: {
+      kind: 'standard',
+      request: {
+        document_id: 'old.md',
+        description: '旧练习',
+        count: 1,
+        difficulty: 'medium',
+        type: 'choice',
+        user_id: 'default_user',
+      },
+    },
+    launch_id: null,
+    launch_preset: null,
+    start_idempotency_key: 'old-start-key-1234',
+    session: null,
+    acknowledged_answer_count: 0,
+    pending_answer: null,
+  }
+  await page.addInitScript(({ key, value }) => {
+    sessionStorage.setItem(key, JSON.stringify(value))
+  }, { key: QUIZ_RECOVERY_KEY, value: oldRecovery })
+
+  let oldStarts = 0
+  let practiceStarts = 0
+  const wrongEntry = {
+    entry_id: 'new.md:0',
+    document_id: 'new.md',
+    question: '只属于新材料的错题',
+    options: ['错误', '正确'],
+    question_type: 'choice',
+    correct_answer: '正确',
+    explanation: '新材料解析',
+    user_answer: '错误',
+    knowledge_gap: '新材料知识点',
+    session_id: 'new-source-session',
+  }
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['old.md', 'new.md'] } }
+    }
+    if (request.method() === 'GET' && path === '/user/default_user/sessions') {
+      return { body: [] }
+    }
+    if (request.method() === 'GET' && path === '/user/default_user/profile') {
+      return {
+        body: {
+          topic_mastery: { 'old.md': 0.5, 'new.md': 0.2 },
+          weak_points: [],
+          total_sessions: 1,
+        },
+      }
+    }
+    if (request.method() === 'GET' && path === '/wrong-questions/new.md') {
+      return { body: { document_id: 'new.md', total: 1, entries: [wrongEntry] } }
+    }
+    if (request.method() === 'POST' && path === '/session/start') {
+      oldStarts += 1
+      return {
+        body: {
+          session_id: 'old-session',
+          total: 1,
+          questions: [{
+            index: 0,
+            question: '应继续显示的旧练习',
+            options: ['A', 'B'],
+            type: 'choice',
+          }],
+          revision: 1,
+          expires_at: FUTURE_EXPIRES_AT,
+        },
+      }
+    }
+    if (request.method() === 'POST' && path === '/wrong-questions/new.md/practice') {
+      practiceStarts += 1
+      return {
+        body: {
+          session_id: 'new-practice',
+          total: 1,
+          questions: [{
+            index: 0,
+            question: '只属于新材料的错题',
+            options: ['错误', '正确'],
+            type: 'choice',
+          }],
+          revision: 1,
+          expires_at: FUTURE_EXPIRES_AT,
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/dashboard')
+  await page.getByLabel('错题文档').selectOption('new.md')
+  await page.getByRole('button', { name: /开始重练/ }).click()
+
+  await expect(page).toHaveURL(/\/dashboard$/)
+  await expect(page.getByRole('heading', { name: '检测到尚未结束的练习' })).toBeVisible()
+  expect(practiceStarts).toBe(0)
+  expect(
+    await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), QUIZ_RECOVERY_KEY)
+  ).toMatchObject({ start_idempotency_key: 'old-start-key-1234' })
+
+  await page.getByRole('button', { name: '继续当前练习' }).click()
+  await expect(page.getByText('应继续显示的旧练习')).toBeVisible()
+  expect(oldStarts).toBe(1)
+  expect(practiceStarts).toBe(0)
+
+  await page.goto('/dashboard')
+  await page.getByLabel('错题文档').selectOption('new.md')
+  await page.getByRole('button', { name: /开始重练/ }).click()
+  await page.getByRole('button', { name: '放弃并开始错题重练' }).click()
+
+  await expect(page).toHaveURL(/\/quiz$/)
+  await expect(page.getByText('只属于新材料的错题')).toBeVisible()
+  expect(practiceStarts).toBe(1)
+  expect(
+    await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), QUIZ_RECOVERY_KEY)
+  ).toMatchObject({
+    intent: {
+      kind: 'wrong_question',
+      request: { document_id: 'new.md', user_id: 'default_user' },
+    },
+    session: { session_id: 'new-practice' },
+  })
+  expect(unexpectedRequests).toEqual([])
+  expect(problems).toEqual([])
+})
+
 test('Dashboard starts a persisted wrong-question practice in Quiz', async ({ page }) => {
   const problems = trackBrowserProblems(page)
   let practiceKey
@@ -3448,6 +3581,17 @@ test('a response from an unmounted Quiz cannot overwrite a newer Dashboard recov
   await page.getByRole('link', { name: '学习报告' }).click()
   await page.getByLabel('错题文档').selectOption('b.md')
   await page.getByRole('button', { name: '开始重练（1）' }).click()
+  await expect(page.getByRole('heading', { name: '检测到尚未结束的练习' })).toBeVisible()
+  expect(
+    await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), QUIZ_RECOVERY_KEY),
+  ).toMatchObject({
+    intent: {
+      kind: 'standard',
+      request: { document_id: 'a.md', user_id: 'default_user' },
+    },
+    session: { session_id: 'old-a-session' },
+  })
+  await page.getByRole('button', { name: '放弃并开始错题重练' }).click()
   await expect(page).toHaveURL(/\/quiz$/)
   await practiceStarted
 

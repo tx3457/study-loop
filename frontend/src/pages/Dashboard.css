@@ -301,6 +301,63 @@
   opacity: 0.65;
 }
 
+.practice-intent-conflict {
+  margin: 16px 0;
+  padding: 16px;
+  border: 1px solid #f0c36b;
+  border-radius: 12px;
+  background: #fff9eb;
+}
+
+.practice-intent-conflict h3,
+.practice-intent-conflict p {
+  margin: 0;
+}
+
+.practice-intent-conflict p {
+  margin-top: 8px;
+  color: var(--text-secondary);
+}
+
+.practice-intent-conflict dl {
+  display: grid;
+  gap: 8px;
+  margin: 14px 0;
+}
+
+.practice-intent-conflict dl > div {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 8px;
+}
+
+.practice-intent-conflict dt {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.practice-intent-conflict dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.practice-intent-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.practice-intent-actions .danger {
+  border: 1px solid #b91c1c;
+  background: #b91c1c;
+  color: #fff;
+}
+
+.practice-intent-actions .danger:hover {
+  border-color: #991b1b;
+  background: #991b1b;
+}
+
 .wrong-select {
   padding: 8px 32px 8px 12px;
   border: 1px solid var(--border);
