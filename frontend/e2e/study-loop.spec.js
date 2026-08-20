@@ -1809,10 +1809,14 @@ test('document load failure is recoverable and never shown as an empty library',
 })
 
 test('dashboard keeps available data visible when one source fails', async ({ page }) => {
-  let failSessions = true
+  let failDocuments = true
+  let failSessions = false
+  let invalidProfile = false
   const unexpectedRequests = await mockApi(page, ({ path, request }) => {
     if (request.method() === 'GET' && path === '/documents') {
-      return { body: { documents: ['notes.md'] } }
+      return failDocuments
+        ? { status: 503, body: { detail: '文档列表暂时不可用' } }
+        : { body: { documents: ['notes.md'] } }
     }
     if (request.method() === 'GET' && path === '/user/default_user/sessions') {
       return failSessions
@@ -1820,11 +1824,32 @@ test('dashboard keeps available data visible when one source fails', async ({ pa
         : { body: [{ date: '2026-07-16', correct_rate: 0.75 }] }
     }
     if (request.method() === 'GET' && path === '/user/default_user/profile') {
+      if (invalidProfile) return { body: [] }
       return {
         body: {
           topic_mastery: { 'notes.md': 0.8 },
           weak_points: ['检索'],
           total_sessions: 2,
+        },
+      }
+    }
+    if (request.method() === 'GET' && path === '/wrong-questions/notes.md') {
+      return {
+        body: {
+          document_id: 'notes.md',
+          total: 1,
+          entries: [{
+            entry_id: 'notes.md:0',
+            document_id: 'notes.md',
+            question: '不应残留的旧错题',
+            options: ['错误', '正确'],
+            question_type: 'choice',
+            correct_answer: '正确',
+            explanation: '旧错题解析',
+            user_answer: '错误',
+            knowledge_gap: '旧错题',
+            session_id: 'old-session',
+          }],
         },
       }
     }
@@ -1834,14 +1859,38 @@ test('dashboard keeps available data visible when one source fails', async ({ pa
   await page.goto('/dashboard')
 
   await expect(page.getByRole('alert')).toContainText('部分数据暂不可用')
-  await expect(page.getByRole('alert')).toContainText('学习记录')
+  await expect(page.getByRole('alert')).toContainText('文档列表')
   await expect(page.locator('.stat-card').filter({ hasText: '学习次数' })).toContainText('2')
+  await expect(page.locator('.stat-card').filter({ hasText: '平均正确率' })).toContainText('75%')
+  await expect(page.getByText('文档列表暂不可用，暂时无法查看错题')).toBeVisible()
   await expect(page.getByText('还没有学习数据')).toHaveCount(0)
 
+  failDocuments = false
+  failSessions = true
+  await page.getByRole('button', { name: '重新加载' }).click()
+  await expect(page.getByRole('alert')).toContainText('学习记录')
+  await expect(page.locator('.stat-card').filter({ hasText: '平均正确率' })).toContainText('—')
+  await expect(page.getByText('学习记录暂不可用')).toBeVisible()
+  await page.getByLabel('错题文档').selectOption('notes.md')
+  await expect(page.getByText('不应残留的旧错题')).toBeVisible()
+
+  failDocuments = true
   failSessions = false
   await page.getByRole('button', { name: '重新加载' }).click()
-  await expect(page.getByRole('alert')).toHaveCount(0)
+  await expect(page.getByRole('alert')).toContainText('文档列表')
   await expect(page.locator('.stat-card').filter({ hasText: '平均正确率' })).toContainText('75%')
+  await expect(page.getByLabel('错题文档')).toBeDisabled()
+  await expect(page.getByText('不应残留的旧错题')).toHaveCount(0)
+  await expect(page.getByText('文档列表暂不可用，暂时无法查看错题')).toBeVisible()
+  await expect(page.getByRole('heading', { name: '材料掌握度' })).toBeVisible()
+
+  failDocuments = false
+  invalidProfile = true
+  await page.getByRole('button', { name: '重新加载' }).click()
+  await expect(page.getByRole('alert')).toContainText('学习画像（响应格式无效）')
+  await expect(page.locator('.stat-card').filter({ hasText: '学习次数' })).toContainText('—')
+  await expect(page.locator('.stat-card').filter({ hasText: '平均正确率' })).toContainText('75%')
+  await expect(page.getByText('学习画像暂不可用').first()).toBeVisible()
   expect(unexpectedRequests).toEqual([])
 })
 

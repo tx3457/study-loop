@@ -17,7 +17,7 @@ import './Dashboard.css'
 /* ═══════════════════════════════════════════════════════════════════
    Dashboard — 学习评估仪表盘
 
-   - SVG 雷达图：各文档知识点掌握度
+   - SVG 雷达图：各学习材料掌握度
    - SVG 折线图：学习趋势（正确率随时间变化）
    - 薄弱知识点列表
    - 错题本（选择文档查看）
@@ -38,6 +38,11 @@ export default function Dashboard() {
   const [practiceConflict, setPracticeConflict] = useState(null)
   const [error, setError] = useState(null)
   const [partialError, setPartialError] = useState(null)
+  const [sourceStatus, setSourceStatus] = useState({
+    documents: 'loading',
+    sessions: 'loading',
+    profile: 'loading',
+  })
   const dashboardRequestId = useRef(0)
   const wrongRequestId = useRef(0)
 
@@ -47,21 +52,47 @@ export default function Dashboard() {
     setLoading(true)
     setError(null)
     setPartialError(null)
+    setSourceStatus({ documents: 'loading', sessions: 'loading', profile: 'loading' })
+    setDocuments([])
+    setSessions([])
+    setProfile(null)
+    setNoProfile(false)
+    wrongRequestId.current += 1
+    setWrongDoc('')
+    setWrongQuestions(null)
+    setWrongLoading(false)
+    setWrongError(null)
+    setPracticeError(null)
+    setPracticeConflict(null)
     const sources = [
       {
+        key: 'documents',
         label: '文档列表',
         load: getDocuments,
-        apply: data => setDocuments(data.documents || []),
+        apply: data => {
+          if (!data || !Array.isArray(data.documents)) {
+            throw new Error('响应格式无效')
+          }
+          setDocuments(data.documents)
+        },
       },
       {
+        key: 'sessions',
         label: '学习记录',
         load: getUserSessions,
-        apply: data => setSessions(Array.isArray(data) ? data : []),
+        apply: data => {
+          if (!Array.isArray(data)) throw new Error('响应格式无效')
+          setSessions(data)
+        },
       },
       {
+        key: 'profile',
         label: '学习画像',
         load: getUserProfile,
         apply: data => {
+          if (data !== null && (typeof data !== 'object' || Array.isArray(data))) {
+            throw new Error('响应格式无效')
+          }
           setProfile(data)
           setNoProfile(!data)
         },
@@ -72,16 +103,24 @@ export default function Dashboard() {
       if (requestId !== dashboardRequestId.current) return
 
       const failures = []
+      const nextStatus = { documents: 'failed', sessions: 'failed', profile: 'failed' }
       results.forEach((result, index) => {
         if (result.status === 'fulfilled') {
-          sources[index].apply(result.value)
-          return
+          try {
+            sources[index].apply(result.value)
+            nextStatus[sources[index].key] = 'available'
+            return
+          } catch (validationError) {
+            failures.push(`${sources[index].label}（${validationError.message}）`)
+            return
+          }
         }
         const message = result.reason?.message
         failures.push(message
           ? `${sources[index].label}（${message}）`
           : sources[index].label)
       })
+      setSourceStatus(nextStatus)
 
       if (failures.length === sources.length) {
         setError(`全部数据源加载失败：${failures.join('、')}`)
@@ -194,9 +233,12 @@ export default function Dashboard() {
   }
 
   /* ── 衍生数据 ──────────────────────────────────────────────────── */
-  const mastery = profile?.topic_mastery || {}
+  const documentsAvailable = sourceStatus.documents === 'available'
+  const sessionsAvailable = sourceStatus.sessions === 'available'
+  const profileAvailable = sourceStatus.profile === 'available'
+  const mastery = profileAvailable ? profile?.topic_mastery || {} : {}
   const masteryEntries = Object.entries(mastery)
-  const weakPoints = profile?.weak_points || []
+  const weakPoints = profileAvailable ? profile?.weak_points || [] : []
   // 归档代表多次历史学习：平均分按 session_count 加权，趋势中保留一个聚合点，
   // 避免归档后 Dashboard 只展示最近几次记录。
   const trendSessions = sessions
@@ -211,12 +253,12 @@ export default function Dashboard() {
       count: summary.count + weight,
     }
   }, { weightedScore: 0, count: 0 })
-  const profileAverage = profile?.average_correct_rate
+  const profileAverage = profileAvailable ? profile?.average_correct_rate : null
   const avgScore = typeof profileAverage === 'number' && Number.isFinite(profileAverage)
     ? Math.round(profileAverage * 100)
-    : scoreSummary.count
+    : sessionsAvailable && scoreSummary.count
       ? Math.round((scoreSummary.weightedScore / scoreSummary.count) * 100)
-      : 0
+      : null
 
   if (loading) {
     return (
@@ -236,7 +278,7 @@ export default function Dashboard() {
     <div className="dash-page">
       <header className="page-header">
         <h1 className="page-title">学习报告</h1>
-        <p className="page-desc">基于三层记忆系统的学习分析：知识点掌握度、学习趋势、错题回顾。</p>
+        <p className="page-desc">基于学习记忆的分析：材料掌握度、薄弱知识点、学习趋势与错题回顾。</p>
       </header>
 
       {partialError && !error && (
@@ -272,19 +314,23 @@ export default function Dashboard() {
           {/* ── 概览卡片 ──────────────────────────────────────────── */}
           <div className="stats-row">
             <div className="stat-card">
-              <span className="stat-value">{profile?.total_sessions || 0}</span>
+              <span className="stat-value">
+                {profileAvailable ? profile?.total_sessions || 0 : '—'}
+              </span>
               <span className="stat-label">学习次数</span>
             </div>
             <div className="stat-card">
-              <span className="stat-value">{avgScore}<small>%</small></span>
+              <span className="stat-value">
+                {avgScore == null ? '—' : <>{avgScore}<small>%</small></>}
+              </span>
               <span className="stat-label">平均正确率</span>
             </div>
             <div className="stat-card">
-              <span className="stat-value">{masteryEntries.length}</span>
+              <span className="stat-value">{profileAvailable ? masteryEntries.length : '—'}</span>
               <span className="stat-label">学习文档</span>
             </div>
             <div className="stat-card">
-              <span className="stat-value">{weakPoints.length}</span>
+              <span className="stat-value">{profileAvailable ? weakPoints.length : '—'}</span>
               <span className="stat-label">薄弱知识点</span>
             </div>
           </div>
@@ -292,8 +338,10 @@ export default function Dashboard() {
           {/* ── 雷达图 + 薄弱知识点 ──────────────────────────────── */}
           <div className="dash-row">
             <div className="dash-card radar-card">
-              <h2 className="card-title">知识点掌握度</h2>
-              {masteryEntries.length > 0 ? (
+              <h2 className="card-title">材料掌握度</h2>
+              {!profileAvailable ? (
+                <p className="card-empty">学习画像暂不可用</p>
+              ) : masteryEntries.length > 0 ? (
                 <RadarChart data={masteryEntries} />
               ) : (
                 <p className="card-empty">暂无掌握度数据</p>
@@ -302,7 +350,9 @@ export default function Dashboard() {
 
             <div className="dash-card weak-card">
               <h2 className="card-title">薄弱知识点</h2>
-              {weakPoints.length > 0 ? (
+              {!profileAvailable ? (
+                <p className="card-empty">学习画像暂不可用</p>
+              ) : weakPoints.length > 0 ? (
                 <div className="weak-list">
                   {weakPoints.slice(0, 12).map((wp, i) => (
                     <span key={i} className="weak-tag" style={{ animationDelay: `${i * 0.04}s` }}>
@@ -319,7 +369,9 @@ export default function Dashboard() {
           {/* ── 学习趋势折线图 ────────────────────────────────────── */}
           <div className="dash-card trend-card">
             <h2 className="card-title">学习趋势</h2>
-            {trendSessions.length > 1 ? (
+            {!sessionsAvailable ? (
+              <p className="card-empty">学习记录暂不可用</p>
+            ) : trendSessions.length > 1 ? (
               <TrendChart sessions={trendSessions} />
             ) : (
               <p className="card-empty">至少需要 2 次答题记录才能显示趋势</p>
@@ -348,6 +400,7 @@ export default function Dashboard() {
                   aria-label="错题文档"
                   value={wrongDoc}
                   onChange={handleWrongDocumentChange}
+                  disabled={!documentsAvailable}
                 >
                   <option value="">-- 选择文档 --</option>
                   {documents.map(d => <option key={d} value={d}>{d}</option>)}
@@ -356,6 +409,10 @@ export default function Dashboard() {
             </div>
 
             {wrongLoading && <div className="loading-spinner small" />}
+
+            {!documentsAvailable && (
+              <p className="card-empty">文档列表暂不可用，暂时无法查看错题</p>
+            )}
 
             {practiceConflict && !wrongLoading && !wrongError && (
               <section
@@ -443,7 +500,7 @@ export default function Dashboard() {
               )
             )}
 
-            {!wrongDoc && !wrongLoading && (
+            {documentsAvailable && !wrongDoc && !wrongLoading && (
               <p className="card-empty">选择文档查看错题</p>
             )}
           </div>
