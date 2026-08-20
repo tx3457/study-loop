@@ -17,6 +17,11 @@ import {
   readLearningPathRecovery,
   writeLearningPathRecovery,
 } from '../state/learningPathRecovery'
+import {
+  abortRecoveryRequests,
+  runRecoveryRequest,
+  startRecoveryRequest,
+} from '../state/recoveryRequest'
 import './LearningPath.css'
 
 function recoveryDescriptor(queryPathId) {
@@ -69,6 +74,14 @@ function normalizeExpectedResource(
   return resource
 }
 
+function isTerminalCreateError(error) {
+  return [400, 404, 410, 413, 422].includes(error?.status)
+    || (
+      error?.status === 409
+      && error?.reason === 'payload_mismatch'
+    )
+}
+
 export default function LearningPath() {
   const navigate = useNavigate()
   const location = useLocation()
@@ -91,6 +104,7 @@ export default function LearningPath() {
   const documentsEpochRef = useRef(0)
   const documentsFlightRef = useRef(null)
   const recoveryFlightRef = useRef(null)
+  const activeRecoveryControllers = useRef(new Set())
   const actionInFlightRef = useRef(false)
   const resourceRef = useRef(null)
 
@@ -105,6 +119,7 @@ export default function LearningPath() {
   }, [resource])
 
   useEffect(() => {
+    const recoveryControllers = activeRecoveryControllers.current
     mountedRef.current = true
     return () => {
       mountedRef.current = false
@@ -112,6 +127,9 @@ export default function LearningPath() {
         if (!mountedRef.current) {
           operationEpochRef.current += 1
           documentsEpochRef.current += 1
+          abortRecoveryRequests(recoveryControllers)
+          recoveryFlightRef.current = null
+          actionInFlightRef.current = false
         }
       })
     }
@@ -161,6 +179,8 @@ export default function LearningPath() {
   useEffect(() => {
     if (!queryPathIdValid) {
       operationEpochRef.current += 1
+      abortRecoveryRequests(activeRecoveryControllers.current)
+      recoveryFlightRef.current = null
       actionInFlightRef.current = false
       setGenerating(false)
       setError('学习路径链接无效')
@@ -174,10 +194,15 @@ export default function LearningPath() {
         return
       }
       operationEpochRef.current += 1
+      abortRecoveryRequests(activeRecoveryControllers.current)
+      recoveryFlightRef.current = null
       actionInFlightRef.current = false
       setGenerating(false)
     }
     if (queryPathId && resourceRef.current?.learning_path_id === queryPathId) {
+      operationEpochRef.current += 1
+      abortRecoveryRequests(activeRecoveryControllers.current)
+      recoveryFlightRef.current = null
       setRecovering(false)
       return
     }
@@ -185,23 +210,33 @@ export default function LearningPath() {
     const descriptor = recoveryDescriptor(queryPathId)
     let active = true
     const epoch = ++operationEpochRef.current
+    if (descriptor.kind === 'create') {
+      setSelectedDoc(descriptor.recovery.intent.document_id)
+    }
     setRecovering(true)
     setError(null)
     setCanRetryRecovery(false)
 
     let flight = recoveryFlightRef.current
     if (!flight || flight.identity !== descriptor.identity) {
-      const promise = descriptor.kind === 'get'
-        ? getLearningPathResource(descriptor.pathId)
-        : descriptor.kind === 'current'
-          ? getCurrentLearningPathResource()
-          : createLearningPathResource({
-          ...descriptor.recovery.intent,
-          idempotency_key: descriptor.recovery.start_idempotency_key,
-        })
-      flight = { identity: descriptor.identity, promise }
+      flight?.abort()
+      const request = startRecoveryRequest(signal => (
+        descriptor.kind === 'get'
+          ? getLearningPathResource(descriptor.pathId, { signal })
+          : descriptor.kind === 'current'
+            ? getCurrentLearningPathResource(null, { signal })
+            : createLearningPathResource({
+                ...descriptor.recovery.intent,
+                idempotency_key: descriptor.recovery.start_idempotency_key,
+                signal,
+              })
+      ), activeRecoveryControllers.current)
+      flight = {
+        identity: descriptor.identity,
+        ...request,
+      }
       recoveryFlightRef.current = flight
-      promise.finally(() => {
+      flight.promise.finally(() => {
         if (recoveryFlightRef.current === flight) {
           recoveryFlightRef.current = null
         }
@@ -250,8 +285,10 @@ export default function LearningPath() {
       }
     }).catch((err) => {
       if (!active || !mountedRef.current || epoch !== operationEpochRef.current) return
-      const terminal = err.status === 404 || err.status === 410
-        || (err.status === 409 && err.reason === 'payload_mismatch')
+      const terminal = descriptor.kind === 'create'
+        ? isTerminalCreateError(err)
+        : err.status === 404 || err.status === 410
+          || (err.status === 409 && err.reason === 'payload_mismatch')
       if (terminal && descriptor.recovery) {
         clearLearningPathRecovery(
           descriptor.recovery.start_idempotency_key,
@@ -291,22 +328,34 @@ export default function LearningPath() {
   }
 
   const handleGenerate = async () => {
+    const pendingCreation = readLearningPathRecovery()
+    const lockedRecovery = (
+      pendingCreation
+      && !pendingCreation.learning_path_id
+    ) ? pendingCreation : null
+    const requestedDocumentId = lockedRecovery?.intent.document_id || selectedDoc
+    const lockedIntentMatches = Boolean(
+      lockedRecovery
+      && lockedRecovery.intent.document_id === requestedDocumentId,
+    )
     if (
-      !selectedDoc
-      || docsStatus !== 'ready'
-      || !documents.includes(selectedDoc)
+      !requestedDocumentId
+      || (!lockedIntentMatches && (
+        docsStatus !== 'ready'
+        || !documents.includes(requestedDocumentId)
+      ))
       || actionInFlightRef.current
     ) return
 
-    let recovery = readLearningPathRecovery()
+    let recovery = lockedRecovery || pendingCreation
     if (
       !recovery
       || recovery.learning_path_id
-      || recovery.intent.document_id !== selectedDoc
+      || recovery.intent.document_id !== requestedDocumentId
     ) {
       try {
         recovery = createLearningPathRecovery(
-          selectedDoc,
+          requestedDocumentId,
           createIdempotencyKey(),
         )
       } catch (err) {
@@ -320,6 +369,8 @@ export default function LearningPath() {
     }
 
     const epoch = ++operationEpochRef.current
+    abortRecoveryRequests(activeRecoveryControllers.current)
+    recoveryFlightRef.current = null
     actionInFlightRef.current = true
     setGenerating(true)
     setError(null)
@@ -329,10 +380,14 @@ export default function LearningPath() {
     }
 
     try {
-      const value = await createLearningPathResource({
-        ...recovery.intent,
-        idempotency_key: recovery.start_idempotency_key,
-      })
+      const value = await runRecoveryRequest(
+        signal => createLearningPathResource({
+          ...recovery.intent,
+          idempotency_key: recovery.start_idempotency_key,
+          signal,
+        }),
+        activeRecoveryControllers.current,
+      )
       if (!mountedRef.current || epoch !== operationEpochRef.current) return
       const nextResource = normalizeExpectedResource(
         value,
@@ -357,18 +412,19 @@ export default function LearningPath() {
       navigate(`${location.pathname}?${search}`, { replace: true })
     } catch (err) {
       if (!mountedRef.current || epoch !== operationEpochRef.current) return
+      const terminal = isTerminalCreateError(err)
       const mismatch = err.status === 409 && err.reason === 'payload_mismatch'
-      if (mismatch) {
+      if (terminal) {
         clearLearningPathRecovery(recovery.start_idempotency_key)
       }
-      setCanRetryRecovery(!mismatch)
+      setCanRetryRecovery(!terminal)
       setError(mismatch
         ? '恢复请求与服务端记录不一致，请重新点击生成'
         : err.message)
     } finally {
-      actionInFlightRef.current = false
-      if (mountedRef.current && epoch === operationEpochRef.current) {
-        setGenerating(false)
+      if (epoch === operationEpochRef.current) {
+        actionInFlightRef.current = false
+        if (mountedRef.current) setGenerating(false)
       }
     }
   }
@@ -388,6 +444,13 @@ export default function LearningPath() {
       ? 'unknown'
       : documents.includes(path.document_id) ? 'available' : 'deleted'
   const busy = generating || recovering
+  const pendingCreation = readLearningPathRecovery()
+  const creationIntentLocked = Boolean(
+    pendingCreation && !pendingCreation.learning_path_id,
+  )
+  const selectedCreationDoc = creationIntentLocked
+    ? pendingCreation.intent.document_id
+    : selectedDoc
 
   const handlePracticeStage = (stage) => {
     if (
@@ -417,7 +480,7 @@ export default function LearningPath() {
         <p className="page-desc">选择文档，AI 将分析内容并生成分阶段学习计划。</p>
       </header>
 
-      {docsStatus === 'error' ? (
+      {docsStatus === 'error' && !creationIntentLocked ? (
         <div className="load-error-state" role="alert">
           <p className="state-title">无法加载文档列表</p>
           <p className="state-desc">{docsError}</p>
@@ -425,23 +488,35 @@ export default function LearningPath() {
             重新加载文档
           </button>
         </div>
-      ) : docsStatus === 'ready' && documents.length === 0 && !path ? (
+      ) : docsStatus === 'ready'
+        && documents.length === 0
+        && !path
+        && !creationIntentLocked ? (
         <DocumentPrerequisite description="生成学习路径前，需要先上传一份已经完成解析的学习材料。" />
       ) : (
         <div className="lp-controls">
           <select
             className="lp-select"
             aria-label="学习文档"
-            value={selectedDoc}
+            value={selectedCreationDoc}
             onChange={handleDocumentChange}
-            disabled={docsStatus === 'loading' || busy}
+            disabled={docsStatus === 'loading' || busy || creationIntentLocked}
           >
             <option value="">
               {docsStatus === 'loading' ? '加载文档列表...' : '-- 选择文档 --'}
             </option>
-            {path && !documents.includes(path.document_id) && (
+            {path
+              && !documents.includes(path.document_id)
+              && (!creationIntentLocked
+                || path.document_id !== pendingCreation.intent.document_id) && (
               <option value={path.document_id} disabled>
                 {path.document_id}（材料已删除）
+              </option>
+            )}
+            {creationIntentLocked
+              && !documents.includes(pendingCreation.intent.document_id) && (
+              <option value={pendingCreation.intent.document_id}>
+                {pendingCreation.intent.document_id}（待确认）
               </option>
             )}
             {documents.map(doc => (
@@ -454,15 +529,17 @@ export default function LearningPath() {
             className="lp-generate-btn"
             onClick={handleGenerate}
             disabled={
-              !selectedDoc
-              || docsStatus !== 'ready'
-              || !documents.includes(selectedDoc)
+              !selectedCreationDoc
               || busy
+              || (!creationIntentLocked && (
+                docsStatus !== 'ready'
+                || !documents.includes(selectedDoc)
+              ))
             }
           >
             {generating ? (
               <><span className="btn-spinner" />AI 分析中...</>
-            ) : '生成学习路径'}
+            ) : creationIntentLocked ? '重试恢复' : '生成学习路径'}
           </button>
         </div>
       )}
@@ -471,7 +548,7 @@ export default function LearningPath() {
         <div className="error-banner" role="alert">
           <span>&#9888;</span>
           <span>{error}</span>
-          {canRetryRecovery && (
+          {canRetryRecovery && !creationIntentLocked && (
             <button
               type="button"
               className="error-retry"
