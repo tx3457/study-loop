@@ -136,10 +136,18 @@ async def get_documents():
 @router.delete("/documents/{document_id}")
 async def delete_document_by_id(document_id: str):
     try:
-        await delete_document(document_id)
+        status = await delete_document(document_id)
     except NotFoundError as e:
+        # Includes attempts to address a Unicode document through its internal
+        # collection alias rather than the public filename.
         raise HTTPException(status_code=404, detail="文档不存在") from e
-    except ChromaError as e:
+    except (ChromaError, RuntimeError) as e:
         logger.exception("文档删除失败: %s", document_id)
         raise HTTPException(status_code=503, detail="文档存储暂时不可用") from e
-    return {"status": "deleted", "document_id": document_id}
+    return {
+        "status": status,
+        "document_id": document_id,
+        "scope": "material_only",
+        "learning_data_retained": True,
+        "document_id_reusable": False,
+    }

@@ -13,30 +13,74 @@ export default function Documents() {
   const [uploadProgress, setUploadProgress] = useState(null) // {filename, status}
   const [dragOver, setDragOver] = useState(false)
   const [deleting, setDeleting] = useState(null) // document_id being deleted
+  const [deleteCandidate, setDeleteCandidate] = useState(null)
+  const [deleteError, setDeleteError] = useState(null)
+  const [statusMessage, setStatusMessage] = useState('')
   const [error, setError] = useState(null)
   const [listError, setListError] = useState(null)
   const fileInputRef = useRef(null)
   const uploadingRef = useRef(false)
+  const mutationRef = useRef(null)
+  const documentsRef = useRef([])
+  const listRequestId = useRef(0)
+  const mountedRef = useRef(true)
+  const uploadTimerRef = useRef(null)
+  const deleteTriggerRef = useRef(null)
+  const deleteDialogRef = useRef(null)
+  const deleteCancelRef = useRef(null)
+  const documentsSectionRef = useRef(null)
 
   /* ── 加载文档列表 ──────────────────────────────────────────────── */
-  const fetchDocuments = useCallback(async () => {
-    setLoading(true)
-    setListError(null)
+  const fetchDocuments = useCallback(async ({ background = false, apply = true } = {}) => {
+    const requestId = ++listRequestId.current
+    if (!background) setLoading(true)
+    if (apply) setListError(null)
     try {
       const data = await getDocuments()
-      setDocuments(data.documents || [])
+      const nextDocuments = Array.isArray(data?.documents) ? data.documents : null
+      if (!nextDocuments) throw new Error('文档列表响应格式无效')
+      if (!mountedRef.current || requestId !== listRequestId.current) return null
+      if (apply) {
+        documentsRef.current = nextDocuments
+        setDocuments(nextDocuments)
+      }
+      return nextDocuments
     } catch (err) {
-      setListError(err.message)
+      if (mountedRef.current && requestId === listRequestId.current && apply) {
+        setListError(err.message)
+      }
+      return null
     } finally {
-      setLoading(false)
+      if (
+        mountedRef.current
+        && requestId === listRequestId.current
+        && (!background || apply)
+      ) {
+        setLoading(false)
+      }
     }
   }, [])
 
-  useEffect(() => { fetchDocuments() }, [fetchDocuments])
+  useEffect(() => {
+    mountedRef.current = true
+    fetchDocuments()
+    return () => {
+      mountedRef.current = false
+      listRequestId.current += 1
+      clearTimeout(uploadTimerRef.current)
+    }
+  }, [fetchDocuments])
 
   /* ── 上传处理 ──────────────────────────────────────────────────── */
   const handleUpload = async (file) => {
-    if (!file || uploadingRef.current) return
+    if (
+      !file
+      || loading
+      || listError
+      || uploadingRef.current
+      || mutationRef.current
+      || deleteCandidate
+    ) return
 
     const validTypes = [
       '.pdf', '.docx', '.txt', '.md',
@@ -48,37 +92,83 @@ export default function Documents() {
       return
     }
 
+    const existedBefore = documentsRef.current.includes(file.name)
+    const mutationId = `upload:${file.name}`
+    mutationRef.current = mutationId
     uploadingRef.current = true
+    listRequestId.current += 1
+    clearTimeout(uploadTimerRef.current)
     setUploading(true)
     setUploadProgress({ filename: file.name, status: 'uploading' })
     setError(null)
 
     try {
       const result = await uploadDocument(file)
+      if (!mountedRef.current || mutationRef.current !== mutationId) return
+      const authoritative = await fetchDocuments({ background: true })
+      if (!mountedRef.current || mutationRef.current !== mutationId) return
+      if (authoritative && !authoritative.includes(file.name)) {
+        setUploadProgress({ filename: file.name, status: 'error' })
+        setError('服务端已响应上传，但权威文档列表尚未包含该材料；请重新加载后再决定是否重试')
+        return
+      }
+      if (!authoritative) {
+        const nextDocuments = documentsRef.current.includes(file.name)
+          ? documentsRef.current
+          : [...documentsRef.current, file.name]
+        documentsRef.current = nextDocuments
+        setDocuments(nextDocuments)
+        setListError(null)
+      }
       setUploadProgress({
         filename: file.name,
         status: 'done',
         chunks: result.chunks,
       })
-      // 1.5s 后清除进度提示并刷新列表
-      setTimeout(() => {
-        setUploadProgress(null)
-        uploadingRef.current = false
-        setUploading(false)
-        fetchDocuments()
-      }, 1500)
+      setStatusMessage(
+        authoritative
+          ? `材料 ${file.name} 已上传并建立索引`
+          : `材料 ${file.name} 已上传；文档列表暂时无法重新核对，已按服务端确认结果更新`,
+      )
     } catch (err) {
-      setUploadProgress({ filename: file.name, status: 'error' })
-      setError(err.message)
+      if (!mountedRef.current || mutationRef.current !== mutationId) return
+      const authoritative = await fetchDocuments({ background: true })
+      if (!mountedRef.current || mutationRef.current !== mutationId) return
+      const requestCouldHaveCommitted = !err.status || err.status >= 500
+      if (
+        requestCouldHaveCommitted
+        && !existedBefore
+        && authoritative?.includes(file.name)
+      ) {
+        setUploadProgress({ filename: file.name, status: 'done', synced: true })
+        setStatusMessage(`材料 ${file.name} 的上传结果已从文档列表同步`)
+      } else {
+        setUploadProgress({ filename: file.name, status: 'error' })
+        setError(
+          err.status && err.status < 500
+            ? err.message
+            : authoritative === null
+            ? '上传状态暂时无法确认，请重新加载文档列表后再决定是否重试'
+            : err.message,
+        )
+      }
+    } finally {
+      if (mutationRef.current === mutationId) mutationRef.current = null
       uploadingRef.current = false
-      setUploading(false)
+      if (mountedRef.current) {
+        setUploading(false)
+        clearTimeout(uploadTimerRef.current)
+        uploadTimerRef.current = setTimeout(() => {
+          if (mountedRef.current) setUploadProgress(null)
+        }, 1500)
+      }
     }
   }
 
   /* ── 拖拽事件 ──────────────────────────────────────────────────── */
   const handleDragOver = (e) => {
     e.preventDefault()
-    if (uploadingRef.current) return
+    if (loading || listError || uploadingRef.current || mutationRef.current || deleteCandidate) return
     setDragOver(true)
   }
   const handleDragLeave = (e) => {
@@ -88,29 +178,174 @@ export default function Documents() {
   const handleDrop = (e) => {
     e.preventDefault()
     setDragOver(false)
-    if (uploadingRef.current) return
+    if (loading || listError || uploadingRef.current || mutationRef.current || deleteCandidate) return
     const file = e.dataTransfer.files[0]
     handleUpload(file)
   }
 
   /* ── 删除处理 ──────────────────────────────────────────────────── */
-  const handleDelete = async (docId) => {
-    if (deleting) return
+  const requestDelete = (docId, trigger) => {
+    if (mutationRef.current || deleteCandidate) return
+    deleteTriggerRef.current = trigger
+    setDeleteError(null)
+    setDeleteCandidate(docId)
+  }
+
+  const closeDeleteDialog = useCallback((restoreTrigger = true, force = false) => {
+    const deleteInFlight = mutationRef.current?.startsWith('delete:')
+    if ((deleting || deleteInFlight) && !force) return
+    setDeleteCandidate(null)
+    setDeleteError(null)
+    const requestedTarget = restoreTrigger
+      ? deleteTriggerRef.current
+      : documentsSectionRef.current
+    const focusTarget = requestedTarget?.isConnected
+      ? requestedTarget
+      : documentsSectionRef.current
+    deleteTriggerRef.current = null
+    window.requestAnimationFrame(() => focusTarget?.focus())
+  }, [deleting])
+
+  const confirmDelete = async () => {
+    const docId = deleteCandidate
+    if (!docId || mutationRef.current) return
+    const mutationId = `delete:${docId}`
+    mutationRef.current = mutationId
+    listRequestId.current += 1
     setDeleting(docId)
+    setDeleteError(null)
     setError(null)
 
+    let response = null
+    let requestError = null
+    const isValidDeleteResponse = value => (
+      value?.status === 'material_deleted'
+      && value.document_id === docId
+      && value.scope === 'material_only'
+      && value.learning_data_retained === true
+      && value.document_id_reusable === false
+    )
     try {
-      await deleteDocument(docId)
-      // 等动画播完再移除
-      setTimeout(() => {
-        setDocuments(prev => prev.filter(d => d !== docId))
-        setDeleting(null)
-      }, 350)
+      response = await deleteDocument(docId)
     } catch (err) {
-      setError(err.message)
-      setDeleting(null)
+      requestError = err
     }
+
+    if (response && !isValidDeleteResponse(response)) {
+      requestError = new Error('删除响应格式无效，尚未确认材料状态')
+      response = null
+    }
+
+    if (!response) {
+      const observed = await fetchDocuments({ background: true, apply: false })
+      if (observed && !observed.includes(docId)) {
+        try {
+          // The first response may have been lost, or the backend may have
+          // stopped at its durable deleting tombstone. The same DELETE safely
+          // acknowledges success or finishes that transition.
+          response = await deleteDocument(docId)
+        } catch (retryError) {
+          requestError = retryError
+        }
+      }
+    }
+
+    if (response && !isValidDeleteResponse(response)) {
+      requestError = new Error('删除响应格式无效，尚未确认材料状态')
+      response = null
+    }
+
+    if (!mountedRef.current || mutationRef.current !== mutationId) return
+    if (response) {
+      const authoritative = await fetchDocuments({ background: true })
+      if (!mountedRef.current || mutationRef.current !== mutationId) return
+      if (authoritative?.includes(docId)) {
+        setDeleteError('服务端已响应删除，但权威文档列表仍包含该材料；请再次确认以安全重试。')
+        setDeleting(null)
+        mutationRef.current = null
+        return
+      }
+      if (!authoritative) {
+        const nextDocuments = documentsRef.current.filter(item => item !== docId)
+        documentsRef.current = nextDocuments
+        setDocuments(nextDocuments)
+        setListError(null)
+      }
+      setStatusMessage(
+        authoritative
+          ? `材料 ${docId} 已从检索索引删除；学习记录仍保留`
+          : `材料 ${docId} 已删除；文档列表暂时无法重新核对，已按服务端确认结果更新`,
+      )
+      setDeleting(null)
+      mutationRef.current = null
+      closeDeleteDialog(false, true)
+      return
+    }
+
+    const observed = await fetchDocuments({ background: true, apply: false })
+    if (!mountedRef.current || mutationRef.current !== mutationId) return
+    const materialHidden = observed !== null && !observed.includes(docId)
+    if (observed !== null) {
+      documentsRef.current = observed
+      setDocuments(observed)
+      setListError(null)
+      setLoading(false)
+    }
+    if (materialHidden) {
+      setStatusMessage(
+        `材料 ${docId} 已从列表和新检索中隐藏，但删除收尾尚未确认；刷新列表时会继续安全重试`,
+      )
+    }
+    setDeleteError(
+      observed === null
+        ? '删除状态尚未确认，且文档列表暂不可用；请再次确认以安全重试。'
+        : materialHidden
+          ? '删除状态尚未确认。材料已停止显示，请再次确认以安全重试。'
+        : requestError?.message || '删除失败，请稍后重试',
+    )
+    setDeleting(null)
+    mutationRef.current = null
   }
+
+  useEffect(() => {
+    if (!deleteCandidate) return undefined
+    const focusFrame = window.requestAnimationFrame(() => {
+      const target = deleteCancelRef.current?.disabled
+        ? deleteDialogRef.current
+        : deleteCancelRef.current
+      target?.focus()
+    })
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape' && !deleting) {
+        event.preventDefault()
+        closeDeleteDialog()
+        return
+      }
+      if (event.key !== 'Tab') return
+      const focusable = [...(deleteDialogRef.current?.querySelectorAll(
+        'button:not(:disabled), [href], input:not(:disabled), [tabindex]:not([tabindex="-1"])',
+      ) || [])]
+      if (focusable.length === 0) {
+        event.preventDefault()
+        deleteDialogRef.current?.focus()
+        return
+      }
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault()
+        last.focus()
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault()
+        first.focus()
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      window.cancelAnimationFrame(focusFrame)
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [closeDeleteDialog, deleteCandidate, deleting])
 
   /* ── 文件名 → 图标映射 ────────────────────────────────────────── */
   const getFileIcon = (name) => {
@@ -121,8 +356,16 @@ export default function Documents() {
     return '📄'
   }
 
+  const mutationBlocked = uploading || deleting !== null || deleteCandidate !== null
+  const uploadBlocked = mutationBlocked || loading || Boolean(listError)
+
   return (
     <div className="documents-page">
+      <div
+        className="documents-content"
+        aria-hidden={deleteCandidate ? 'true' : undefined}
+        inert={deleteCandidate ? true : undefined}
+      >
       {/* ── 页面标题 ────────────────────────────────────────────────── */}
       <header className="page-header">
         <div>
@@ -141,16 +384,16 @@ export default function Documents() {
       <section
         className={`upload-zone ${dragOver ? 'drag-over' : ''} ${uploading ? 'uploading' : ''}`}
         role="button"
-        tabIndex={uploading ? -1 : 0}
+        tabIndex={uploadBlocked ? -1 : 0}
         aria-label="选择要上传的学习材料"
-        aria-disabled={uploading}
+        aria-disabled={uploadBlocked}
         aria-busy={uploading}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
-        onClick={() => !uploadingRef.current && fileInputRef.current?.click()}
+        onClick={() => !uploadBlocked && fileInputRef.current?.click()}
         onKeyDown={(event) => {
-          if (!uploadingRef.current && (event.key === 'Enter' || event.key === ' ')) {
+          if (!uploadBlocked && (event.key === 'Enter' || event.key === ' ')) {
             event.preventDefault()
             fileInputRef.current?.click()
           }
@@ -160,7 +403,7 @@ export default function Documents() {
           ref={fileInputRef}
           type="file"
           accept=".pdf,.docx,.txt,.md,.png,.jpg,.jpeg,.gif,.bmp,.tiff,.tif"
-          disabled={uploading}
+          disabled={uploadBlocked}
           onChange={(event) => {
             handleUpload(event.target.files?.[0])
             event.target.value = ''
@@ -182,7 +425,11 @@ export default function Documents() {
             <p className="progress-filename">{uploadProgress.filename}</p>
             <p className="progress-status">
               {uploadProgress.status === 'uploading' && '正在上传并向量化处理...'}
-              {uploadProgress.status === 'done' && `完成，共 ${uploadProgress.chunks} 个文本块`}
+              {uploadProgress.status === 'done' && (
+                uploadProgress.synced
+                  ? '完成，已从文档列表同步确认'
+                  : `完成，共 ${uploadProgress.chunks} 个文本块`
+              )}
               {uploadProgress.status === 'error' && '上传失败'}
             </p>
           </div>
@@ -214,7 +461,11 @@ export default function Documents() {
       )}
 
       {/* ── 文档列表 ────────────────────────────────────────────────── */}
-      <section className="documents-section">
+      <p className="documents-status" role="status" aria-live="polite">
+        {statusMessage}
+      </p>
+
+      <section ref={documentsSectionRef} className="documents-section" tabIndex="-1">
         <h2 className="section-title">已上传文档</h2>
 
         {loading ? (
@@ -267,10 +518,10 @@ export default function Documents() {
                     aria-label={`删除文档 ${docId}`}
                     onClick={(e) => {
                       e.stopPropagation()
-                      handleDelete(docId)
+                      requestDelete(docId, e.currentTarget)
                     }}
                     title="删除文档"
-                    disabled={deleting === docId}
+                    disabled={mutationBlocked}
                   >
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                       <polyline points="3 6 5 6 21 6"/>
@@ -283,6 +534,50 @@ export default function Documents() {
           </div>
         )}
       </section>
+      </div>
+
+      {deleteCandidate && (
+        <div className="document-delete-overlay">
+          <div
+            ref={deleteDialogRef}
+            className="document-delete-dialog"
+            role="alertdialog"
+            aria-modal="true"
+            aria-labelledby="document-delete-title"
+            aria-describedby="document-delete-description"
+            aria-busy={Boolean(deleting)}
+            tabIndex="-1"
+          >
+            <p className="document-delete-eyebrow">仅删除材料</p>
+            <h2 id="document-delete-title">确认删除“{deleteCandidate}”？</h2>
+            <div id="document-delete-description" className="document-delete-copy">
+              <p>StudyLoop 会删除该材料的检索索引，之后不能再发起新的原文检索；你电脑上的原文件不受影响。</p>
+              <p>学习历史、学习画像、错题以及已保存会话中的题目、引用片段等工件仍会保留，也可能继续显示或被原会话使用。这不是隐私数据彻底清除。</p>
+              <p>为避免旧学习记录与新内容混淆，该文件名会被保留，之后如需重新上传，请先重命名文件。</p>
+            </div>
+            {deleteError && <p className="document-delete-error" role="alert">{deleteError}</p>}
+            <div className="document-delete-actions">
+              <button
+                ref={deleteCancelRef}
+                type="button"
+                className="document-delete-cancel"
+                onClick={() => closeDeleteDialog()}
+                disabled={Boolean(deleting)}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="document-delete-confirm"
+                onClick={confirmDelete}
+                disabled={Boolean(deleting)}
+              >
+                {deleting ? '正在删除材料…' : '确认仅删除材料'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
