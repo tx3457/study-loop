@@ -55,6 +55,14 @@ class LearningPathPayloadTooLargeError(ValueError):
     """The canonical LearningPath JSON exceeds the configured byte limit."""
 
 
+class LearningPathStageConflictError(RuntimeError):
+    """A Quiz tried to complete a stage outside its durable path binding."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
 @dataclass(frozen=True, slots=True)
 class LearningPathRecord:
     path_id: str
@@ -63,6 +71,8 @@ class LearningPathRecord:
     path: LearningPath
     schema_version: int
     created_at: float
+    completed_through: int = 0
+    progress_revision: int = 1
 
 
 class LearningPathStore:
@@ -235,6 +245,41 @@ class LearningPathStore:
             document_id,
         )
 
+    async def complete_stage(
+        self,
+        path_id: str,
+        stage_id: int,
+        quiz_session_id: str,
+        *,
+        user_id: str,
+        document_id: str,
+        grading_report_hash: str,
+    ) -> LearningPathRecord:
+        """Append one canonical stage completion or replay existing progress."""
+        if not isinstance(path_id, str) or not _PATH_ID_PATTERN.fullmatch(path_id):
+            raise ValueError("invalid learning path id")
+        if isinstance(stage_id, bool) or not isinstance(stage_id, int):
+            raise TypeError("stage_id must be an integer")
+        if stage_id < 1 or stage_id > 12:
+            raise ValueError("invalid stage_id")
+        quiz_session_id = self._normalize_identifier(
+            quiz_session_id,
+            "quiz_session_id",
+            256,
+        )
+        user_id = self._normalize_identifier(user_id, "user_id", 128)
+        document_id = self._normalize_identifier(document_id, "document_id", 512)
+        grading_report_hash = self._validate_fingerprint(grading_report_hash)
+        return await self._run_thread(
+            self._complete_stage_sync,
+            path_id,
+            stage_id,
+            quiz_session_id,
+            user_id,
+            document_id,
+            grading_report_hash,
+        )
+
     async def _run_thread(self, function, *args):
         worker = asyncio.create_task(asyncio.to_thread(function, *args))
         try:
@@ -350,6 +395,34 @@ class LearningPathStore:
         )
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
+    @staticmethod
+    def _completion_hash(
+        path_id: str,
+        stage_id: int,
+        quiz_session_id: str,
+        user_id: str,
+        document_id: str,
+        grading_report_hash: str,
+        completed_at: float,
+    ) -> str:
+        canonical = LearningPathStore._canonical_json(
+            {
+                "completed_at": completed_at,
+                "path_id": path_id,
+                "quiz_session_id": quiz_session_id,
+                "user_id": user_id,
+                "document_id": document_id,
+                "grading_report_hash": grading_report_hash,
+                "schema_version": _SCHEMA_VERSION,
+                "stage_id": stage_id,
+            }
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _completion_table() -> str:
+        return f"{_TABLE}_stage_completions"
+
     def _now(self) -> float:
         try:
             now = float(self._clock())
@@ -379,6 +452,7 @@ class LearningPathStore:
             timeout=self._sqlite_busy_timeout_ms / 1000,
         )
         connection.execute(f"PRAGMA busy_timeout = {self._sqlite_busy_timeout_ms}")
+        connection.execute("PRAGMA foreign_keys = ON")
         return connection
 
     @contextmanager
@@ -452,6 +526,33 @@ class LearningPathStore:
                     )
                     """
                 )
+                completion_table = self._completion_table()
+                connection.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS {completion_table} (
+                        path_id TEXT NOT NULL,
+                        schema_version INTEGER NOT NULL
+                            CHECK (schema_version = 1),
+                        stage_id INTEGER NOT NULL
+                            CHECK (stage_id BETWEEN 1 AND 12),
+                        quiz_session_id TEXT NOT NULL UNIQUE
+                            CHECK (length(quiz_session_id) BETWEEN 1 AND 256),
+                        user_id TEXT NOT NULL
+                            CHECK (length(user_id) BETWEEN 1 AND 128),
+                        document_id TEXT NOT NULL
+                            CHECK (length(document_id) BETWEEN 1 AND 512),
+                        grading_report_hash TEXT NOT NULL
+                            CHECK (length(grading_report_hash) = 64),
+                        completed_at DOUBLE PRECISION NOT NULL
+                            CHECK (completed_at >= 0),
+                        immutable_hash TEXT NOT NULL
+                            CHECK (length(immutable_hash) = 64),
+                        PRIMARY KEY (path_id, stage_id),
+                        FOREIGN KEY (path_id) REFERENCES {_TABLE}(path_id)
+                            ON DELETE RESTRICT
+                    )
+                    """
+                )
             self._schema_ready = True
 
     def _create_sync(
@@ -468,7 +569,6 @@ class LearningPathStore:
         with self._transaction(write=True) as connection:
             existing = self._select_by_creation(connection, key_hash)
             if existing is not None:
-                record = self._row_to_record(existing)
                 self._validate_creation_binding(
                     existing,
                     key_hash,
@@ -476,7 +576,7 @@ class LearningPathStore:
                     document_id,
                     request_fingerprint,
                 )
-                return record
+                return self._record_with_progress(connection, existing)
 
             now = self._now()
             immutable_hash = self._immutable_hash(
@@ -518,7 +618,6 @@ class LearningPathStore:
                 row = self._select_by_creation(connection, key_hash)
             if row is None:
                 raise RuntimeError("learning path disappeared after create")
-            record = self._row_to_record(row)
             self._validate_creation_binding(
                 row,
                 key_hash,
@@ -526,7 +625,7 @@ class LearningPathStore:
                 document_id,
                 request_fingerprint,
             )
-            return record
+            return self._record_with_progress(connection, row)
 
     def _find_by_creation_sync(
         self,
@@ -538,23 +637,22 @@ class LearningPathStore:
         self._ensure_schema()
         with self._transaction() as connection:
             row = self._select_by_creation(connection, key_hash)
-        if row is None:
-            return None
-        record = self._row_to_record(row)
-        self._validate_creation_binding(
-            row,
-            key_hash,
-            user_id,
-            document_id,
-            request_fingerprint,
-        )
-        return record
+            if row is None:
+                return None
+            self._validate_creation_binding(
+                row,
+                key_hash,
+                user_id,
+                document_id,
+                request_fingerprint,
+            )
+            return self._record_with_progress(connection, row)
 
     def _get_sync(self, path_id: str) -> LearningPathRecord | None:
         self._ensure_schema()
         with self._transaction() as connection:
             row = self._select_by_id(connection, path_id)
-        return None if row is None else self._row_to_record(row)
+            return None if row is None else self._record_with_progress(connection, row)
 
     def _get_current_sync(
         self,
@@ -575,7 +673,128 @@ class LearningPathStore:
                 """,
                 parameters,
             ).fetchone()
-        return None if row is None else self._row_to_record(row)
+            return None if row is None else self._record_with_progress(connection, row)
+
+    def _complete_stage_sync(
+        self,
+        path_id: str,
+        stage_id: int,
+        quiz_session_id: str,
+        user_id: str,
+        document_id: str,
+        grading_report_hash: str,
+    ) -> LearningPathRecord:
+        self._ensure_schema()
+        p = self._placeholder
+        completion_table = self._completion_table()
+        with self._transaction(write=True) as connection:
+            row = self._select_by_id(connection, path_id, for_update=True)
+            if row is None:
+                raise LearningPathStageConflictError("path_missing")
+            record = self._record_with_progress(connection, row)
+            if record.user_id != user_id or record.document_id != document_id:
+                raise LearningPathStageConflictError("path_binding_mismatch")
+            if stage_id > record.path.total_stages:
+                raise LearningPathStageConflictError("stage_missing")
+
+            receipt = connection.execute(
+                f"""
+                SELECT path_id, schema_version, stage_id, quiz_session_id,
+                       user_id, document_id, grading_report_hash,
+                       completed_at, immutable_hash
+                FROM {completion_table}
+                WHERE quiz_session_id = {p}
+                """,
+                (quiz_session_id,),
+            ).fetchone()
+            if receipt is not None:
+                self._validate_completion_row(receipt)
+                if receipt[0] != path_id or receipt[2] != stage_id:
+                    raise LearningPathStageConflictError("quiz_session_reused")
+                if (
+                    receipt[4] != user_id
+                    or receipt[5] != document_id
+                    or not hmac.compare_digest(receipt[6], grading_report_hash)
+                ):
+                    raise LearningPathStageConflictError("completion_binding_mismatch")
+                return record
+
+            if stage_id <= record.completed_through:
+                return record
+            if stage_id != record.completed_through + 1:
+                raise LearningPathStageConflictError("stage_locked")
+
+            now = self._now()
+            immutable_hash = self._completion_hash(
+                path_id,
+                stage_id,
+                quiz_session_id,
+                user_id,
+                document_id,
+                grading_report_hash,
+                now,
+            )
+            cursor = connection.execute(
+                f"""
+                INSERT INTO {completion_table} (
+                    path_id, schema_version, stage_id, quiz_session_id,
+                    user_id, document_id, grading_report_hash,
+                    completed_at, immutable_hash
+                ) VALUES ({p}, 1, {p}, {p}, {p}, {p}, {p}, {p}, {p})
+                ON CONFLICT DO NOTHING
+                """,
+                (
+                    path_id,
+                    stage_id,
+                    quiz_session_id,
+                    user_id,
+                    document_id,
+                    grading_report_hash,
+                    now,
+                    immutable_hash,
+                ),
+            )
+            if cursor.rowcount != 1:
+                receipt = connection.execute(
+                    f"""
+                    SELECT path_id, schema_version, stage_id, quiz_session_id,
+                           user_id, document_id, grading_report_hash,
+                           completed_at, immutable_hash
+                    FROM {completion_table}
+                    WHERE quiz_session_id = {p}
+                    """,
+                    (quiz_session_id,),
+                ).fetchone()
+                if receipt is not None:
+                    self._validate_completion_row(receipt)
+                    if receipt[0] != path_id or receipt[2] != stage_id:
+                        raise LearningPathStageConflictError("quiz_session_reused")
+                    if (
+                        receipt[4] != user_id
+                        or receipt[5] != document_id
+                        or not hmac.compare_digest(receipt[6], grading_report_hash)
+                    ):
+                        raise LearningPathStageConflictError(
+                            "completion_binding_mismatch"
+                        )
+                stage_row = connection.execute(
+                    f"""
+                    SELECT path_id, schema_version, stage_id, quiz_session_id,
+                           user_id, document_id, grading_report_hash,
+                           completed_at, immutable_hash
+                    FROM {completion_table}
+                    WHERE path_id = {p} AND stage_id = {p}
+                    """,
+                    (path_id, stage_id),
+                ).fetchone()
+                if stage_row is None:
+                    raise RuntimeError("learning path completion insert was lost")
+                self._validate_completion_row(stage_row)
+
+            refreshed = self._select_by_id(connection, path_id)
+            if refreshed is None:
+                raise RuntimeError("learning path disappeared after completion")
+            return self._record_with_progress(connection, refreshed)
 
     @staticmethod
     def _select_columns() -> str:
@@ -587,10 +806,11 @@ class LearningPathStore:
             FROM {_TABLE}
         """
 
-    def _select_by_id(self, connection, path_id: str):
+    def _select_by_id(self, connection, path_id: str, *, for_update: bool = False):
         p = self._placeholder
+        lock_clause = " FOR UPDATE" if for_update and self._postgres else ""
         return connection.execute(
-            f"{self._select_columns()} WHERE path_id = {p}",
+            f"{self._select_columns()} WHERE path_id = {p}{lock_clause}",
             (path_id,),
         ).fetchone()
 
@@ -691,6 +911,95 @@ class LearningPathStore:
             created_at=created_at,
         )
 
+    def _record_with_progress(self, connection, row) -> LearningPathRecord:
+        base = self._row_to_record(row)
+        p = self._placeholder
+        rows = connection.execute(
+            f"""
+            SELECT path_id, schema_version, stage_id, quiz_session_id,
+                   user_id, document_id, grading_report_hash,
+                   completed_at, immutable_hash
+            FROM {self._completion_table()}
+            WHERE path_id = {p}
+            ORDER BY stage_id ASC
+            """,
+            (base.path_id,),
+        ).fetchall()
+        for expected_stage, completion in enumerate(rows, start=1):
+            self._validate_completion_row(completion)
+            if (
+                completion[0] != base.path_id
+                or completion[2] != expected_stage
+                or completion[4] != base.user_id
+                or completion[5] != base.document_id
+                or completion[2] > base.path.total_stages
+            ):
+                raise LearningPathCorruptError(
+                    "learning path completion history is inconsistent"
+                )
+        completed_through = len(rows)
+        return LearningPathRecord(
+            path_id=base.path_id,
+            user_id=base.user_id,
+            document_id=base.document_id,
+            path=base.path,
+            schema_version=base.schema_version,
+            created_at=base.created_at,
+            completed_through=completed_through,
+            progress_revision=completed_through + 1,
+        )
+
+    def _validate_completion_row(self, row) -> None:
+        try:
+            path_id = self._stored_identifier(row[0], "completion path_id", 128)
+            if not _PATH_ID_PATTERN.fullmatch(path_id):
+                raise ValueError("invalid completion path id")
+            if row[1] != _SCHEMA_VERSION:
+                raise ValueError("unsupported completion schema version")
+            stage_id = row[2]
+            if (
+                isinstance(stage_id, bool)
+                or not isinstance(stage_id, int)
+                or stage_id < 1
+                or stage_id > 12
+            ):
+                raise ValueError("invalid completion stage")
+            quiz_session_id = self._stored_identifier(
+                row[3],
+                "completion quiz_session_id",
+                256,
+            )
+            user_id = self._stored_identifier(row[4], "completion user_id", 128)
+            document_id = self._stored_identifier(
+                row[5],
+                "completion document_id",
+                512,
+            )
+            grading_report_hash = row[6]
+            if not self._is_sha256(grading_report_hash):
+                raise ValueError("invalid completion grading hash")
+            completed_at = float(row[7])
+            if not math.isfinite(completed_at) or completed_at < 0:
+                raise ValueError("invalid completion timestamp")
+            immutable_hash = row[8]
+            if not self._is_sha256(immutable_hash):
+                raise ValueError("invalid completion hash")
+            expected_hash = self._completion_hash(
+                path_id,
+                stage_id,
+                quiz_session_id,
+                user_id,
+                document_id,
+                grading_report_hash,
+                completed_at,
+            )
+            if not hmac.compare_digest(immutable_hash, expected_hash):
+                raise ValueError("completion event hash mismatch")
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise LearningPathCorruptError(
+                "invalid durable Learning Path completion"
+            ) from exc
+
     @staticmethod
     def _stored_identifier(value, field: str, max_length: int) -> str:
         if (
@@ -711,6 +1020,7 @@ __all__ = [
     "LearningPathCreationConflictError",
     "LearningPathPayloadTooLargeError",
     "LearningPathRecord",
+    "LearningPathStageConflictError",
     "LearningPathStore",
     "learning_path_store",
 ]

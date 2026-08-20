@@ -2,6 +2,7 @@ export const QUIZ_RECOVERY_STORAGE_KEY = 'study-loop.quiz.recovery.v1'
 
 const SCHEMA_VERSION = 1
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{8,128}$/u
+const LEARNING_PATH_ID_PATTERN = /^lp_[0-9a-f]{32}$/u
 
 function isObject(value) {
   return value != null && typeof value === 'object' && !Array.isArray(value)
@@ -24,6 +25,22 @@ function normalizeLaunchId(value) {
   return isIdempotencyKey(value) ? value.trim() : null
 }
 
+export function normalizeLearningPathSource(value) {
+  if (value == null) return null
+  if (
+    !isObject(value)
+    || typeof value.learning_path_id !== 'string'
+    || !LEARNING_PATH_ID_PATTERN.test(value.learning_path_id)
+    || !Number.isInteger(value.stage_id)
+    || value.stage_id < 1
+    || value.stage_id > 12
+  ) return null
+  return {
+    learning_path_id: value.learning_path_id,
+    stage_id: value.stage_id,
+  }
+}
+
 function normalizeLaunchPreset(value) {
   if (value == null) return null
   if (
@@ -34,13 +51,24 @@ function normalizeLaunchPreset(value) {
   ) {
     return null
   }
+  const hasPathBinding = value.path_id != null || value.stage_id != null
+  const source = normalizeLearningPathSource(hasPathBinding ? {
+    learning_path_id: value.path_id,
+    stage_id: value.stage_id,
+  } : null)
+  if (hasPathBinding && !source) return null
   return {
     document_id: value.document_id.trim(),
     topic: value.topic.trim(),
+    ...(source ? {
+      path_id: source.learning_path_id,
+      stage_id: source.stage_id,
+    } : {}),
   }
 }
 
 function normalizeStandardRequest(value) {
+  const source = normalizeLearningPathSource(value?.learning_path_source)
   if (
     !isObject(value)
     || !isBoundedText(value.document_id, 512)
@@ -52,6 +80,7 @@ function normalizeStandardRequest(value) {
     || !['easy', 'medium', 'hard'].includes(value.difficulty)
     || !['choice', 'true_false', 'short_answer'].includes(value.type)
     || !isBoundedText(value.user_id, 128)
+    || (value.learning_path_source != null && !source)
   ) {
     return null
   }
@@ -63,6 +92,7 @@ function normalizeStandardRequest(value) {
     difficulty: value.difficulty,
     type: value.type,
     user_id: value.user_id.trim(),
+    ...(source ? { learning_path_source: source } : {}),
   }
 }
 
@@ -145,6 +175,13 @@ export function normalizeQuizRecovery(value) {
   const launchId = normalizeLaunchId(value.launch_id)
   const launchPreset = normalizeLaunchPreset(value.launch_preset)
   const acknowledgedAnswerCount = value.acknowledged_answer_count
+  const source = intent?.kind === 'standard'
+    ? intent.request.learning_path_source || null
+    : null
+  const presetSource = launchPreset?.path_id ? {
+    learning_path_id: launchPreset.path_id,
+    stage_id: launchPreset.stage_id,
+  } : null
 
   if (
     !intent
@@ -152,6 +189,29 @@ export function normalizeQuizRecovery(value) {
     || (value.launch_id != null && !launchId)
     || (value.launch_preset != null && !launchPreset)
     || Boolean(launchId) !== Boolean(launchPreset)
+    || Boolean(source) !== Boolean(presetSource)
+    || (source && (!launchId || !launchPreset))
+    || (
+      launchPreset
+      && launchPreset.document_id !== intent.request.document_id
+    )
+    || (
+      launchPreset
+      && !(
+        launchPreset.topic === intent.request.description
+        || (
+          launchPreset.topic === ''
+          && intent.request.description === '全文'
+        )
+      )
+    )
+    || (
+      source
+      && (
+        source.learning_path_id !== presetSource.learning_path_id
+        || source.stage_id !== presetSource.stage_id
+      )
+    )
     || !Number.isInteger(acknowledgedAnswerCount)
     || acknowledgedAnswerCount < 0
     || (pendingAnswer && !session)

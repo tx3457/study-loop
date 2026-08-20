@@ -335,15 +335,22 @@ class QuizSessionStore:
     @staticmethod
     def _immutable_hash(aggregate: QuizSessionAggregate) -> str:
         session = aggregate.session
+        immutable = {
+            "session_id": session.session_id,
+            "document_id": session.document_id,
+            "user_id": session.user_id,
+            "questions": [
+                question.model_dump(mode="json") for question in session.questions
+            ],
+        }
+        # Preserve the exact legacy hash for every unbound Quiz.  A stage
+        # binding is immutable only for newly-created Learning Path quizzes.
+        if aggregate.learning_path_source is not None:
+            immutable["learning_path_source"] = (
+                aggregate.learning_path_source.model_dump(mode="json")
+            )
         canonical = json.dumps(
-            {
-                "session_id": session.session_id,
-                "document_id": session.document_id,
-                "user_id": session.user_id,
-                "questions": [
-                    question.model_dump(mode="json") for question in session.questions
-                ],
-            },
+            immutable,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),

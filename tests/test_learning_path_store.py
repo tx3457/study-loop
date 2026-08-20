@@ -21,6 +21,7 @@ from services.learning_path_store import (
     LearningPathCorruptError,
     LearningPathCreationConflictError,
     LearningPathPayloadTooLargeError,
+    LearningPathStageConflictError,
     LearningPathStore,
 )
 
@@ -239,6 +240,183 @@ class TestLearningPathStore(unittest.IsolatedAsyncioTestCase):
             ).fetchone()[0]
         self.assertEqual(count, 1)
 
+    async def test_stage_completion_is_sequential_durable_and_idempotent(self) -> None:
+        record = await self.store.create(
+            "u-1",
+            "notes.md",
+            _path("notes.md"),
+            idempotency_key="learning-path-progress-key",
+            request_fingerprint=_fingerprint({"intent": "progress"}),
+        )
+        self.assertEqual(record.completed_through, 0)
+        self.assertEqual(record.progress_revision, 1)
+
+        grade_one = _fingerprint({"session": "quiz-1", "score": 0.5})
+        first = await self.store.complete_stage(
+            record.path_id,
+            1,
+            "quiz-1",
+            user_id="u-1",
+            document_id="notes.md",
+            grading_report_hash=grade_one,
+        )
+        replay = await self.store.complete_stage(
+            record.path_id,
+            1,
+            "quiz-1",
+            user_id="u-1",
+            document_id="notes.md",
+            grading_report_hash=grade_one,
+        )
+        loser = await self.store.complete_stage(
+            record.path_id,
+            1,
+            "quiz-1-loser",
+            user_id="u-1",
+            document_id="notes.md",
+            grading_report_hash=_fingerprint({"session": "quiz-1-loser"}),
+        )
+        self.assertEqual(first.completed_through, 1)
+        self.assertEqual(first.progress_revision, 2)
+        self.assertEqual(replay, first)
+        self.assertEqual(loser, first)
+
+        self.now[0] = 1_001.0
+        second = await self.store.complete_stage(
+            record.path_id,
+            2,
+            "quiz-2",
+            user_id="u-1",
+            document_id="notes.md",
+            grading_report_hash=_fingerprint({"session": "quiz-2", "score": 1.0}),
+        )
+        self.assertEqual(second.completed_through, 2)
+        self.assertEqual(second.progress_revision, 3)
+        reopened = LearningPathStore(sqlite_path=self.db_path)
+        self.assertEqual(await reopened.get(record.path_id), second)
+
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            count = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM studyloop_learning_paths_stage_completions
+                """
+            ).fetchone()[0]
+        self.assertEqual(count, 2)
+
+    async def test_stage_completion_rejects_locked_or_mismatched_bindings(self) -> None:
+        record = await self.store.create(
+            "u-1",
+            "notes.md",
+            _path("notes.md"),
+            idempotency_key="learning-path-progress-conflict-key",
+            request_fingerprint=_fingerprint({"intent": "progress conflicts"}),
+        )
+        grade_hash = _fingerprint({"session": "quiz-conflict"})
+
+        cases = [
+            (2, "quiz-locked", "u-1", "notes.md", "stage_locked"),
+            (1, "quiz-user", "u-2", "notes.md", "path_binding_mismatch"),
+            (1, "quiz-doc", "u-1", "other.md", "path_binding_mismatch"),
+        ]
+        for stage, session_id, user_id, document_id, reason in cases:
+            with self.subTest(reason=reason, session_id=session_id):
+                with self.assertRaises(LearningPathStageConflictError) as raised:
+                    await self.store.complete_stage(
+                        record.path_id,
+                        stage,
+                        session_id,
+                        user_id=user_id,
+                        document_id=document_id,
+                        grading_report_hash=grade_hash,
+                    )
+                self.assertEqual(raised.exception.reason, reason)
+
+        await self.store.complete_stage(
+            record.path_id,
+            1,
+            "quiz-conflict",
+            user_id="u-1",
+            document_id="notes.md",
+            grading_report_hash=grade_hash,
+        )
+        with self.assertRaises(LearningPathStageConflictError) as altered:
+            await self.store.complete_stage(
+                record.path_id,
+                1,
+                "quiz-conflict",
+                user_id="u-1",
+                document_id="notes.md",
+                grading_report_hash=_fingerprint({"session": "quiz-conflict", "v": 2}),
+            )
+        self.assertEqual(altered.exception.reason, "completion_binding_mismatch")
+
+    async def test_two_store_instances_complete_one_ready_stage_once(self) -> None:
+        record = await self.store.create(
+            "u-1",
+            "notes.md",
+            _path("notes.md"),
+            idempotency_key="learning-path-progress-race-key",
+            request_fingerprint=_fingerprint({"intent": "progress race"}),
+        )
+        peer = LearningPathStore(sqlite_path=self.db_path, clock=lambda: self.now[0])
+        first, second = await asyncio.gather(
+            self.store.complete_stage(
+                record.path_id,
+                1,
+                "quiz-race-a",
+                user_id="u-1",
+                document_id="notes.md",
+                grading_report_hash=_fingerprint({"quiz": "a"}),
+            ),
+            peer.complete_stage(
+                record.path_id,
+                1,
+                "quiz-race-b",
+                user_id="u-1",
+                document_id="notes.md",
+                grading_report_hash=_fingerprint({"quiz": "b"}),
+            ),
+        )
+        self.assertEqual(first.completed_through, 1)
+        self.assertEqual(second.completed_through, 1)
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            count = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM studyloop_learning_paths_stage_completions
+                """
+            ).fetchone()[0]
+        self.assertEqual(count, 1)
+
+    async def test_completion_hash_and_contiguous_prefix_fail_closed(self) -> None:
+        record = await self.store.create(
+            "u-1",
+            "notes.md",
+            _path("notes.md"),
+            idempotency_key="learning-path-progress-corrupt-key",
+            request_fingerprint=_fingerprint({"intent": "progress corrupt"}),
+        )
+        await self.store.complete_stage(
+            record.path_id,
+            1,
+            "quiz-corrupt",
+            user_id="u-1",
+            document_id="notes.md",
+            grading_report_hash=_fingerprint({"quiz": "corrupt"}),
+        )
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute(
+                """
+                UPDATE studyloop_learning_paths_stage_completions
+                SET immutable_hash = ? WHERE path_id = ? AND stage_id = 1
+                """,
+                ("0" * 64, record.path_id),
+            )
+            connection.commit()
+        with self.assertRaises(LearningPathCorruptError):
+            await self.store.get(record.path_id)
+
     async def test_cancellation_drains_committed_create_for_safe_retry(self) -> None:
         committed = threading.Event()
         release = threading.Event()
@@ -283,6 +461,57 @@ class TestLearningPathStore(unittest.IsolatedAsyncioTestCase):
             request_fingerprint=request_hash,
         )
         self.assertEqual(replay, restored)
+
+    async def test_cancellation_drains_committed_stage_for_safe_retry(self) -> None:
+        record = await self.store.create(
+            "u-1",
+            "notes.md",
+            _path("notes.md"),
+            idempotency_key="learning-path-stage-cancel-key",
+            request_fingerprint=_fingerprint({"intent": "cancel stage"}),
+        )
+        committed = threading.Event()
+        release = threading.Event()
+        original_complete = self.store._complete_stage_sync
+        grade_hash = _fingerprint({"session": "quiz-stage-cancel"})
+
+        def pause_after_commit(*args):
+            result = original_complete(*args)
+            committed.set()
+            release.wait(timeout=5)
+            return result
+
+        with patch.object(
+            self.store,
+            "_complete_stage_sync",
+            side_effect=pause_after_commit,
+        ):
+            task = asyncio.create_task(
+                self.store.complete_stage(
+                    record.path_id,
+                    1,
+                    "quiz-stage-cancel",
+                    user_id="u-1",
+                    document_id="notes.md",
+                    grading_report_hash=grade_hash,
+                )
+            )
+            self.assertTrue(await asyncio.to_thread(committed.wait, 2))
+            task.cancel()
+            release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        replay = await self.store.complete_stage(
+            record.path_id,
+            1,
+            "quiz-stage-cancel",
+            user_id="u-1",
+            document_id="notes.md",
+            grading_report_hash=grade_hash,
+        )
+        self.assertEqual(replay.completed_through, 1)
+        self.assertEqual(replay.progress_revision, 2)
 
     async def test_json_version_hash_and_status_corruption_fail_closed(self) -> None:
         record = await self.store.create(
@@ -441,7 +670,9 @@ class TestLearningPathStore(unittest.IsolatedAsyncioTestCase):
 
         with closing(self.store._connect()) as sqlite_connection:
             busy_timeout = sqlite_connection.execute("PRAGMA busy_timeout").fetchone()[0]
+            foreign_keys = sqlite_connection.execute("PRAGMA foreign_keys").fetchone()[0]
         self.assertEqual(busy_timeout, 10_000)
+        self.assertEqual(foreign_keys, 1)
 
 
 if __name__ == "__main__":

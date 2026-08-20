@@ -152,6 +152,7 @@ function learningPathResource({
   title = '检索学习路径',
   stageTitle = '混合检索',
   topics = ['BM25', 'RRF'],
+  completedThrough = 0,
 } = {}) {
   return {
     schema_version: 1,
@@ -169,9 +170,31 @@ function learningPathResource({
         estimated_minutes: 20,
       }],
     },
+    progress: {
+      completed_through: completedThrough,
+      revision: completedThrough + 1,
+    },
     created_at: 1_787_200_000,
     expires_at: null,
   }
+}
+
+function sequentialLearningPathResource(completedThrough = 0) {
+  const resource = learningPathResource({
+    title: '顺序学习路径',
+    stageTitle: '基础概念',
+    topics: ['基础'],
+    completedThrough,
+  })
+  resource.path.total_stages = 2
+  resource.path.stages.push({
+    stage: 2,
+    title: '综合应用',
+    topics: ['应用'],
+    description: '把基础概念应用到综合问题',
+    estimated_minutes: 20,
+  })
+  return resource
 }
 
 test('mobile navigation traps focus and restores it on close', async ({ page }) => {
@@ -474,6 +497,7 @@ test('learning path browser navigation cancels an in-flight replacement and load
 
 test('learning path stage opens a refresh-safe quiz preset without auto-starting', async ({ page }) => {
   const problems = trackBrowserProblems(page)
+  const resource = learningPathResource()
   const startBodies = []
   const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
     if (request.method() === 'GET' && path === '/documents') {
@@ -481,7 +505,7 @@ test('learning path stage opens a refresh-safe quiz preset without auto-starting
     }
     if (request.method() === 'POST' && path === '/learning-paths') {
       return {
-        body: learningPathResource(),
+        body: resource,
       }
     }
     if (request.method() === 'POST' && path === '/session/start') {
@@ -496,6 +520,12 @@ test('learning path stage opens a refresh-safe quiz preset without auto-starting
             options: ['A. 按倒数排名累加', 'B. 只保留单路结果'],
             type: 'choice',
           }],
+          revision: 1,
+          expires_at: FUTURE_EXPIRES_AT,
+          learning_path_source: {
+            learning_path_id: resource.learning_path_id,
+            stage_id: 1,
+          },
         },
       }
     }
@@ -522,6 +552,11 @@ test('learning path stage opens a refresh-safe quiz preset without auto-starting
           result: null,
           grading_report: null,
           learning_report: null,
+          learning_path_source: {
+            learning_path_id: resource.learning_path_id,
+            stage_id: 1,
+          },
+          learning_path_completion: null,
           expires_at: FUTURE_EXPIRES_AT,
           busy: false,
         },
@@ -540,6 +575,8 @@ test('learning path stage opens a refresh-safe quiz preset without auto-starting
   expect(quizUrl.searchParams.get('document_id')).toBe('notes.md')
   expect(quizUrl.searchParams.get('topic')).toBe('BM25、RRF')
   expect(quizUrl.searchParams.get('launch_id')).toMatch(UUID_V4_PATTERN)
+  expect(quizUrl.searchParams.get('path_id')).toBe(resource.learning_path_id)
+  expect(quizUrl.searchParams.get('stage_id')).toBe('1')
   await expect(page.getByRole('combobox', { name: '学习文档' })).toHaveValue('notes.md')
   await expect(page.getByRole('textbox', { name: /出题主题/ })).toHaveValue('BM25、RRF')
   expect(startBodies).toEqual([])
@@ -549,6 +586,8 @@ test('learning path stage opens a refresh-safe quiz preset without auto-starting
   quizUrl = new URL(page.url())
   expect(quizUrl.searchParams.get('document_id')).toBe('notes.md')
   expect(quizUrl.searchParams.get('topic')).toBe('BM25、RRF')
+  expect(quizUrl.searchParams.get('path_id')).toBe(resource.learning_path_id)
+  expect(quizUrl.searchParams.get('stage_id')).toBe('1')
   const launchId = quizUrl.searchParams.get('launch_id')
   expect(launchId).toMatch(UUID_V4_PATTERN)
   await expect(page.getByRole('combobox', { name: '学习文档' })).toHaveValue('notes.md')
@@ -561,7 +600,20 @@ test('learning path stage opens a refresh-safe quiz preset without auto-starting
     await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), QUIZ_RECOVERY_KEY)
   ).toMatchObject({
     launch_id: launchId,
-    launch_preset: { document_id: 'notes.md', topic: 'BM25、RRF' },
+    launch_preset: {
+      document_id: 'notes.md',
+      topic: 'BM25、RRF',
+      path_id: resource.learning_path_id,
+      stage_id: 1,
+    },
+    intent: {
+      request: {
+        learning_path_source: {
+          learning_path_id: resource.learning_path_id,
+          stage_id: 1,
+        },
+      },
+    },
   })
   expect(startBodies).toEqual([{
     document_id: 'notes.md',
@@ -570,6 +622,10 @@ test('learning path stage opens a refresh-safe quiz preset without auto-starting
     difficulty: 'medium',
     type: 'choice',
     user_id: 'default_user',
+    learning_path_source: {
+      learning_path_id: resource.learning_path_id,
+      stage_id: 1,
+    },
   }])
 
   await page.reload()
@@ -578,6 +634,662 @@ test('learning path stage opens a refresh-safe quiz preset without auto-starting
   expect(startBodies).toHaveLength(1)
   expect(unexpectedRequests).toEqual([])
   expect(problems).toEqual([])
+})
+
+test('canonical quiz grade unlocks the next learning path stage', async ({ page }) => {
+  const problems = trackBrowserProblems(page)
+  const initialPath = sequentialLearningPathResource(0)
+  const progressedPath = sequentialLearningPathResource(1)
+  let gradeCommitted = false
+  let gradeAttempts = 0
+  let startBody = null
+  const source = {
+    learning_path_id: initialPath.learning_path_id,
+    stage_id: 1,
+  }
+  const completion = {
+    ...source,
+    completed_through: 1,
+    revision: 2,
+  }
+  const question = {
+    index: 0,
+    question: '基础概念的正确描述是哪一项？',
+    options: ['A. 正确描述', 'B. 错误描述'],
+    type: 'choice',
+  }
+  const grade = {
+    index: 0,
+    question: question.question,
+    user_answer: question.options[0],
+    correct_answer: 'B. 错误描述',
+    is_correct: false,
+    ai_feedback: '本阶段仍会在零分时记录为已完成。',
+    knowledge_gap: '基础概念',
+  }
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (
+      request.method() === 'GET'
+      && path === `/learning-paths/${initialPath.learning_path_id}`
+    ) {
+      return { body: gradeCommitted ? progressedPath : initialPath }
+    }
+    if (request.method() === 'POST' && path === '/session/start') {
+      startBody = request.postDataJSON()
+      return {
+        body: {
+          session_id: 'quiz-path-progress',
+          total: 1,
+          questions: [question],
+          revision: 1,
+          expires_at: FUTURE_EXPIRES_AT,
+          learning_path_source: source,
+        },
+      }
+    }
+    if (request.method() === 'POST' && path === '/session/quiz-path-progress/answer') {
+      return {
+        body: {
+          evaluation_status: 'final',
+          correct: false,
+          correct_answer: 'B. 错误描述',
+          explanation: '回答错误，但完成批改后仍推进阶段',
+          is_last: true,
+          next_index: null,
+          revision: 2,
+          expires_at: FUTURE_EXPIRES_AT,
+        },
+      }
+    }
+    if (request.method() === 'GET' && path === '/session/quiz-path-progress/result') {
+      return {
+        body: {
+          session_id: 'quiz-path-progress',
+          document_id: 'notes.md',
+          total: 1,
+          correct: 0,
+          incorrect: 1,
+          pending: 0,
+          score: 0,
+          details: [{
+            index: 0,
+            question: question.question,
+            user_answer: question.options[0],
+            correct_answer: 'B. 错误描述',
+            correct: false,
+            explanation: '回答错误，但完成批改后仍推进阶段',
+            evaluation_status: 'final',
+          }],
+          revision: 3,
+          expires_at: FUTURE_EXPIRES_AT,
+        },
+      }
+    }
+    if (request.method() === 'POST' && path === '/session/quiz-path-progress/grade') {
+      gradeAttempts += 1
+      if (gradeAttempts === 1) {
+        return {
+          body: {
+            session_id: 'quiz-other-session',
+            total: 1,
+            correct: 0,
+            score: 0,
+            grades: [grade],
+            revision: 4,
+            expires_at: FUTURE_EXPIRES_AT,
+            learning_path_source: source,
+            learning_path_completion: completion,
+          },
+        }
+      }
+      gradeCommitted = true
+      return {
+        body: {
+          session_id: 'quiz-path-progress',
+          total: 1,
+          correct: 0,
+          score: 0,
+          grades: [grade],
+          revision: 4,
+          expires_at: FUTURE_EXPIRES_AT,
+          learning_path_source: source,
+          learning_path_completion: completion,
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto(`/learning-path?path_id=${initialPath.learning_path_id}`)
+  await expect(page.getByText('已完成 0/2')).toBeVisible()
+  await expect(page.getByText('完成上一阶段后解锁')).toBeVisible()
+  await expect(page.locator('.tc-practice-btn')).toHaveCount(1)
+  await page.getByRole('button', { name: '练习阶段 1：基础概念' }).click()
+  await page.getByRole('button', { name: '开始答题' }).click()
+  await expect(page.getByText(question.question)).toBeVisible()
+
+  expect(startBody.learning_path_source).toEqual(source)
+  await page.locator('.option-item').first().click()
+  await page.getByRole('button', { name: '提交答案' }).click()
+  await page.getByRole('button', { name: '查看结果' }).click()
+  await expect(
+    page.getByRole('button', { name: '返回学习路径，继续下一阶段' }),
+  ).toHaveCount(0)
+
+  await page.getByRole('button', { name: 'AI 批改讲解' }).click()
+  await expect(page.getByRole('alert')).toContainText('答题会话不一致')
+  await expect(
+    page.getByRole('button', { name: '返回学习路径，继续下一阶段' }),
+  ).toHaveCount(0)
+  await page.getByRole('button', { name: 'AI 批改讲解' }).click()
+  await expect(page.getByRole('heading', { name: 'AI 批改报告' })).toBeVisible()
+  const returnButton = page.getByRole('button', {
+    name: '返回学习路径，继续下一阶段',
+  })
+  await expect(returnButton).toBeVisible()
+  await returnButton.click()
+
+  await expect(page).toHaveURL(
+    new RegExp(`/learning-path\\?path_id=${initialPath.learning_path_id}`),
+  )
+  await expect(page.getByText('已完成 1/2')).toBeVisible()
+  await expect(page.getByText('已完成', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: '练习阶段 2：综合应用' })).toBeVisible()
+  await expect(page.locator('.tc-practice-btn')).toHaveCount(1)
+  expect(
+    await page.evaluate(key => sessionStorage.getItem(key), QUIZ_RECOVERY_KEY),
+  ).toBeNull()
+  expect(unexpectedRequests).toEqual([])
+  expect(problems).toEqual([])
+  expect(gradeAttempts).toBe(2)
+})
+
+test('stale learning path stage start clears pending recovery and returns to the exact path', async ({ page }) => {
+  const resource = sequentialLearningPathResource(1)
+  const source = {
+    learning_path_id: resource.learning_path_id,
+    stage_id: 1,
+  }
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (request.method() === 'POST' && path === '/session/start') {
+      return {
+        status: 409,
+        body: {
+          code: 'learning_path_stage_unavailable',
+          reason: 'stage_completed',
+          detail: '该学习路径阶段已经完成，请返回路径继续下一阶段',
+        },
+      }
+    }
+    if (
+      request.method() === 'GET'
+      && path === `/learning-paths/${resource.learning_path_id}`
+    ) {
+      return { body: resource }
+    }
+    return null
+  })
+  const query = new URLSearchParams({
+    document_id: 'notes.md',
+    topic: '基础',
+    launch_id: 'stale-stage-launch-1234',
+    path_id: source.learning_path_id,
+    stage_id: String(source.stage_id),
+  })
+
+  await page.goto(`/quiz?${query}`)
+  await page.getByRole('button', { name: '开始答题' }).click()
+
+  await expect(page.getByText('该阶段已不可继续')).toBeVisible()
+  expect(await page.evaluate(key => sessionStorage.getItem(key), QUIZ_RECOVERY_KEY)).toBeNull()
+  await page.getByRole('button', { name: '返回学习路径刷新进度' }).click()
+  await expect(page).toHaveURL(
+    new RegExp(`/learning-path\\?path_id=${resource.learning_path_id}`),
+  )
+  await expect(page.getByRole('heading', { name: '顺序学习路径' })).toBeVisible()
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('a missing bound path exits its unretryable start instead of looping on 404', async ({ page }) => {
+  const source = {
+    learning_path_id: 'lp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    stage_id: 1,
+  }
+  let starts = 0
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (request.method() === 'POST' && path === '/session/start') {
+      starts += 1
+      return {
+        status: 404,
+        body: {
+          code: 'learning_path_not_found',
+          reason: 'missing',
+          detail: '学习路径不存在',
+        },
+      }
+    }
+    return null
+  })
+  const query = new URLSearchParams({
+    document_id: 'notes.md',
+    topic: '失效阶段',
+    launch_id: 'missing-path-launch-1234',
+    path_id: source.learning_path_id,
+    stage_id: String(source.stage_id),
+  })
+
+  await page.goto(`/quiz?${query}`)
+  await page.getByRole('button', { name: '开始答题' }).click()
+
+  await expect(page.getByText('这条学习路径已不存在，请返回学习路径重新选择。')).toBeVisible()
+  expect(starts).toBe(1)
+  expect(await page.evaluate(key => sessionStorage.getItem(key), QUIZ_RECOVERY_KEY)).toBeNull()
+  await page.getByRole('button', { name: '返回学习路径重新选择' }).click()
+  await expect(page).toHaveURL(/\/learning-path$/)
+  expect(starts).toBe(1)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('a path binding mismatch is terminal and returns to the exact resource once', async ({ page }) => {
+  const resource = learningPathResource()
+  let starts = 0
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (request.method() === 'POST' && path === '/session/start') {
+      starts += 1
+      return {
+        status: 409,
+        body: {
+          code: 'learning_path_binding_mismatch',
+          reason: 'binding_mismatch',
+          detail: '练习与学习路径不匹配',
+        },
+      }
+    }
+    if (
+      request.method() === 'GET'
+      && path === `/learning-paths/${resource.learning_path_id}`
+    ) {
+      return { body: resource }
+    }
+    return null
+  })
+  const query = new URLSearchParams({
+    document_id: 'notes.md',
+    topic: 'BM25、RRF',
+    launch_id: 'binding-mismatch-1234',
+    path_id: resource.learning_path_id,
+    stage_id: '1',
+  })
+
+  await page.goto(`/quiz?${query}`)
+  await page.getByRole('button', { name: '开始答题' }).click()
+
+  await expect(page.getByText('该阶段已不可继续')).toBeVisible()
+  expect(starts).toBe(1)
+  expect(await page.evaluate(key => sessionStorage.getItem(key), QUIZ_RECOVERY_KEY)).toBeNull()
+  await page.getByRole('button', { name: '返回学习路径刷新进度' }).click()
+  await expect(page.getByRole('heading', { name: '检索学习路径' })).toBeVisible()
+  expect(starts).toBe(1)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('quiz start rejects a mismatched path echo before persisting its session', async ({ page }) => {
+  const resource = learningPathResource()
+  const expectedSource = {
+    learning_path_id: resource.learning_path_id,
+    stage_id: 1,
+  }
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (request.method() === 'POST' && path === '/session/start') {
+      return {
+        body: {
+          session_id: 'quiz-wrong-path-echo',
+          total: 1,
+          questions: [{ index: 0, question: '不应被采用的题目', options: ['A', 'B'], type: 'choice' }],
+          revision: 1,
+          expires_at: FUTURE_EXPIRES_AT,
+          learning_path_source: {
+            learning_path_id: 'lp_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+            stage_id: 1,
+          },
+        },
+      }
+    }
+    return null
+  })
+  const query = new URLSearchParams({
+    document_id: 'notes.md',
+    topic: 'BM25、RRF',
+    launch_id: 'wrong-path-echo-1234',
+    path_id: expectedSource.learning_path_id,
+    stage_id: String(expectedSource.stage_id),
+  })
+
+  await page.goto(`/quiz?${query}`)
+  await page.getByRole('button', { name: '开始答题' }).click()
+
+  await expect(page.getByRole('alert')).toContainText('学习路径归属不一致')
+  expect(
+    await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), QUIZ_RECOVERY_KEY),
+  ).toMatchObject({ session: null, intent: { request: { learning_path_source: expectedSource } } })
+  await expect(page.getByText('不应被采用的题目')).toHaveCount(0)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('bound quiz snapshot restores a durable completion after the grade response is lost', async ({ page }) => {
+  const progressedPath = sequentialLearningPathResource(1)
+  const source = {
+    learning_path_id: progressedPath.learning_path_id,
+    stage_id: 1,
+  }
+  const completion = {
+    ...source,
+    completed_through: 1,
+    revision: 2,
+  }
+  const recovery = {
+    schema_version: 1,
+    intent: {
+      kind: 'standard',
+      request: {
+        document_id: 'notes.md',
+        description: '基础',
+        count: 1,
+        difficulty: 'medium',
+        type: 'choice',
+        user_id: 'default_user',
+        learning_path_source: source,
+      },
+    },
+    launch_id: 'snapshot-path-launch-1234',
+    launch_preset: {
+      document_id: 'notes.md',
+      topic: '基础',
+      path_id: source.learning_path_id,
+      stage_id: source.stage_id,
+    },
+    start_idempotency_key: 'snapshot-path-start-1234',
+    session: {
+      session_id: 'quiz-path-snapshot',
+      revision: 3,
+      expires_at: FUTURE_EXPIRES_AT,
+    },
+    acknowledged_answer_count: 1,
+    pending_answer: null,
+  }
+  await page.addInitScript(({ key, value }) => {
+    sessionStorage.setItem(key, JSON.stringify(value))
+  }, { key: QUIZ_RECOVERY_KEY, value: recovery })
+
+  const question = {
+    index: 0,
+    question: '已完成的路径题目',
+    options: ['A', 'B'],
+    type: 'choice',
+  }
+  const gradingReport = {
+    session_id: 'quiz-path-snapshot',
+    total: 1,
+    correct: 0,
+    score: 0,
+    grades: [{
+      index: 0,
+      question: question.question,
+      user_answer: 'A',
+      correct_answer: 'B',
+      is_correct: false,
+      ai_feedback: '批改已持久化',
+      knowledge_gap: '基础',
+    }],
+    revision: 4,
+    expires_at: FUTURE_EXPIRES_AT,
+    learning_path_source: source,
+    learning_path_completion: completion,
+  }
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (request.method() === 'GET' && path === '/session/quiz-path-snapshot') {
+      return {
+        body: {
+          schema_version: 1,
+          origin: 'standard',
+          session_id: 'quiz-path-snapshot',
+          document_id: 'notes.md',
+          revision: 4,
+          status: 'completed',
+          total: 1,
+          answered_count: 1,
+          questions: [question],
+          last_answer_index: 0,
+          last_user_answer: 'A',
+          last_answer_result: {
+            evaluation_status: 'final',
+            correct: false,
+            correct_answer: 'B',
+            explanation: '回答错误',
+            is_last: true,
+            next_index: null,
+            revision: 2,
+            expires_at: FUTURE_EXPIRES_AT,
+          },
+          result: {
+            session_id: 'quiz-path-snapshot',
+            document_id: 'notes.md',
+            total: 1,
+            correct: 0,
+            incorrect: 1,
+            pending: 0,
+            score: 0,
+            details: [],
+            revision: 3,
+            expires_at: FUTURE_EXPIRES_AT,
+          },
+          grading_report: gradingReport,
+          learning_report: null,
+          learning_path_source: source,
+          learning_path_completion: completion,
+          expires_at: FUTURE_EXPIRES_AT,
+          busy: false,
+        },
+      }
+    }
+    if (
+      request.method() === 'GET'
+      && path === `/learning-paths/${source.learning_path_id}`
+    ) {
+      return { body: progressedPath }
+    }
+    return null
+  })
+  const query = new URLSearchParams({
+    document_id: 'notes.md',
+    topic: '基础',
+    launch_id: recovery.launch_id,
+    path_id: source.learning_path_id,
+    stage_id: String(source.stage_id),
+  })
+
+  await page.goto(`/quiz?${query}`)
+  await expect(page.getByRole('heading', { name: 'AI 批改报告' })).toBeVisible()
+  const returnButton = page.getByRole('button', {
+    name: '返回学习路径，继续下一阶段',
+  })
+  await expect(returnButton).toBeVisible()
+  await returnButton.click()
+  await expect(page.getByText('已完成 1/2')).toBeVisible()
+  expect(await page.evaluate(key => sessionStorage.getItem(key), QUIZ_RECOVERY_KEY)).toBeNull()
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('a fully completed learning path has no ready practice action', async ({ page }) => {
+  const resource = sequentialLearningPathResource(2)
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (
+      request.method() === 'GET'
+      && path === `/learning-paths/${resource.learning_path_id}`
+    ) {
+      return { body: resource }
+    }
+    return null
+  })
+
+  await page.goto(`/learning-path?path_id=${resource.learning_path_id}`)
+  await expect(page.getByText('已完成 2/2')).toBeVisible()
+  await expect(page.locator('.tc-practice-btn')).toHaveCount(0)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('quiz rejects an empty partial learning path binding instead of downgrading it', async ({ page }) => {
+  let starts = 0
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (request.method() === 'POST' && path === '/session/start') {
+      starts += 1
+      return { status: 500, body: { detail: '不应发起练习' } }
+    }
+    return null
+  })
+
+  await page.goto(
+    '/quiz?document_id=notes.md&topic=基础&launch_id=partial-path-launch-1234&path_id=',
+  )
+
+  await expect(page.getByRole('alert')).toContainText('练习链接参数无效')
+  await expect(page.getByRole('button', { name: '开始答题' })).toBeDisabled()
+  expect(starts).toBe(0)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('a literal learning path topic named 全文 remains a valid bound quiz intent', async ({ page }) => {
+  const source = {
+    learning_path_id: 'lp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    stage_id: 1,
+  }
+  let startBody = null
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (request.method() === 'POST' && path === '/session/start') {
+      startBody = await request.postDataJSON()
+      return {
+        body: {
+          session_id: 'quiz-literal-full-text-topic',
+          total: 1,
+          questions: [{
+            index: 0,
+            question: '字面“全文”主题仍应生成题目',
+            options: ['A', 'B'],
+            type: 'choice',
+          }],
+          revision: 1,
+          expires_at: FUTURE_EXPIRES_AT,
+          learning_path_source: source,
+        },
+      }
+    }
+    return null
+  })
+  const query = new URLSearchParams({
+    document_id: 'notes.md',
+    topic: '全文',
+    launch_id: 'literal-full-text-1234',
+    path_id: source.learning_path_id,
+    stage_id: String(source.stage_id),
+  })
+
+  await page.goto(`/quiz?${query}`)
+  await page.getByRole('button', { name: '开始答题' }).click()
+  await expect(page.getByText('字面“全文”主题仍应生成题目')).toBeVisible()
+  expect(startBody).toMatchObject({
+    description: '全文',
+    learning_path_source: source,
+  })
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('a late stale-stage response cannot leave its return target on a newer quiz URL', async ({ page }) => {
+  const source = {
+    learning_path_id: 'lp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    stage_id: 1,
+  }
+  let releaseStart
+  let markStartReceived
+  const startGate = new Promise(resolve => { releaseStart = resolve })
+  const startReceived = new Promise(resolve => { markStartReceived = resolve })
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (request.method() === 'POST' && path === '/session/start') {
+      markStartReceived()
+      await startGate
+      return {
+        status: 409,
+        body: {
+          code: 'learning_path_stage_unavailable',
+          reason: 'stage_completed',
+          detail: '旧阶段已经完成',
+        },
+      }
+    }
+    return null
+  })
+  const oldQuery = new URLSearchParams({
+    document_id: 'notes.md',
+    topic: '旧阶段',
+    launch_id: 'late-stale-stage-1234',
+    path_id: source.learning_path_id,
+    stage_id: String(source.stage_id),
+  })
+
+  await page.goto(`/quiz?${oldQuery}`)
+  await page.getByRole('button', { name: '开始答题' }).click()
+  await startReceived
+  const nextUrl = '/quiz?document_id=notes.md&topic=新阶段&launch_id=new-stage-launch-1234'
+  await page.evaluate(url => {
+    history.pushState({}, '', url)
+    dispatchEvent(new PopStateEvent('popstate'))
+  }, nextUrl)
+  await expect(page.getByRole('region', { name: '检测到另一项练习' })).toBeVisible()
+
+  const staleResponsePromise = page.waitForResponse(response => (
+    response.url().includes('/api/session/start')
+  ))
+  releaseStart()
+  const staleResponse = await staleResponsePromise
+  await staleResponse.finished()
+  await page.evaluate(() => new Promise(resolve => {
+    requestAnimationFrame(() => requestAnimationFrame(resolve))
+  }))
+
+  await expect(page.getByText('该阶段已不可继续')).toHaveCount(0)
+  await expect(page.getByRole('textbox', { name: /出题主题/ })).toHaveValue('新阶段')
+  await expect(page.getByRole('button', { name: '开始答题' })).toBeEnabled()
+  expect(await page.evaluate(key => sessionStorage.getItem(key), QUIZ_RECOVERY_KEY)).toBeNull()
+  expect(unexpectedRequests).toEqual([])
 })
 
 test('learning path reuses one create key after response loss and then reloads by id', async ({ page }) => {
@@ -750,7 +1462,8 @@ test('learning path remains readable after material deletion but cannot start pr
   await expect(page.getByRole('heading', { name: '检索学习路径' })).toBeVisible()
   await expect(page.getByText(/原材料已删除.*仅供查看/)).toBeVisible()
   await expect(page.getByRole('button', { name: '练习阶段 1：混合检索' }))
-    .toBeDisabled()
+    .toHaveCount(0)
+  await expect(page.getByText('材料已删除，仅供查看')).toBeVisible()
   expect(unexpectedRequests).toEqual([])
 })
 
@@ -3605,7 +4318,15 @@ test('a late grading response cannot revive a restarted quiz', async ({ page }) 
   await page.getByRole('button', { name: '开始答题' }).click()
   await expect(page.getByText('新会话题目')).toBeVisible()
 
+  const lateGradeResponsePromise = page.waitForResponse(response => (
+    response.url().includes('/api/session/late-grade-1/grade')
+  ))
   releaseGrade()
+  const lateGradeResponse = await lateGradeResponsePromise
+  await lateGradeResponse.finished()
+  await page.evaluate(() => new Promise(resolve => {
+    requestAnimationFrame(() => requestAnimationFrame(resolve))
+  }))
   await expect(page.getByText('新会话题目')).toBeVisible()
   await expect(page.getByRole('heading', { name: 'AI 批改报告' })).toHaveCount(0)
   expect(starts).toBe(2)
@@ -3717,7 +4438,15 @@ test('a late learning-report response cannot replace a new quiz', async ({ page 
   await page.getByRole('button', { name: '开始答题' }).click()
   await expect(page.getByText('报告后的新题目')).toBeVisible()
 
+  const lateReportResponsePromise = page.waitForResponse(response => (
+    response.url().includes('/api/session/late-report-1/report')
+  ))
   releaseReport()
+  const lateReportResponse = await lateReportResponsePromise
+  await lateReportResponse.finished()
+  await page.evaluate(() => new Promise(resolve => {
+    requestAnimationFrame(() => requestAnimationFrame(resolve))
+  }))
   await expect(page.getByText('报告后的新题目')).toBeVisible()
   await expect(page.getByText('不应复活的旧报告。')).toHaveCount(0)
   expect(starts).toBe(2)

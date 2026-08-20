@@ -15,6 +15,7 @@ import {
 import {
   clearQuizRecovery,
   createStandardQuizRecovery,
+  normalizeLearningPathSource,
   readQuizRecovery,
   sameQuizIntent,
   writeQuizRecovery,
@@ -56,14 +57,92 @@ function readQuizPreset(search) {
   const documentId = (params.get('document_id') || '').trim()
   const topic = (params.get('topic') || '').trim()
   const rawLaunchId = (params.get('launch_id') || '').trim()
+  const rawPathId = (params.get('path_id') || '').trim()
+  const rawStageId = (params.get('stage_id') || '').trim()
+  // Empty path parameters are still an attempted binding. Treating
+  // `?path_id=&stage_id=` as an ordinary quiz would silently drop the path
+  // provenance carried by the launch URL.
+  const hasPathBinding = params.has('path_id') || params.has('stage_id')
+  const hasLaunchParam = params.has('launch_id')
+  const stageId = /^(?:[1-9]|1[0-2])$/u.test(rawStageId)
+    ? Number(rawStageId)
+    : null
+  const pathSource = normalizeLearningPathSource(hasPathBinding ? {
+    learning_path_id: rawPathId,
+    stage_id: stageId,
+  } : null)
+  const launchId = QUIZ_LAUNCH_ID_PATTERN.test(rawLaunchId) ? rawLaunchId : null
   return {
     documentId,
     topic,
-    launchId: QUIZ_LAUNCH_ID_PATTERN.test(rawLaunchId) ? rawLaunchId : null,
-    invalidLaunchId: Boolean(rawLaunchId) && !QUIZ_LAUNCH_ID_PATTERN.test(rawLaunchId),
+    launchId,
+    invalidLaunchId: hasLaunchParam && !QUIZ_LAUNCH_ID_PATTERN.test(rawLaunchId),
+    pathId: pathSource?.learning_path_id || null,
+    stageId: pathSource?.stage_id || null,
+    invalidPathBinding: hasPathBinding && (!pathSource || !launchId),
     invalidBounds: documentId.length > 512 || topic.length > 4000,
-    hasIntent: Boolean(documentId || topic),
+    hasIntent: Boolean(documentId || topic || hasLaunchParam || hasPathBinding),
   }
+}
+
+function learningPathSourceForRecovery(record) {
+  return record?.intent?.kind === 'standard'
+    ? record.intent.request.learning_path_source || null
+    : null
+}
+
+function normalizeLearningPathCompletion(value, source) {
+  if (value == null) return null
+  if (
+    !source
+    || typeof value !== 'object'
+    || Array.isArray(value)
+    || value.learning_path_id !== source.learning_path_id
+    || value.stage_id !== source.stage_id
+    || !Number.isInteger(value.completed_through)
+    || value.completed_through < source.stage_id
+    || value.completed_through > 12
+    || !Number.isInteger(value.revision)
+    || value.revision !== value.completed_through + 1
+  ) return undefined
+  return {
+    learning_path_id: value.learning_path_id,
+    stage_id: value.stage_id,
+    completed_through: value.completed_through,
+    revision: value.revision,
+  }
+}
+
+function assertLearningPathSourceEcho(response, expectedSource) {
+  const rawSource = response?.learning_path_source
+  const source = normalizeLearningPathSource(response?.learning_path_source)
+  if (rawSource != null && !source) {
+    throw new Error('服务端返回的学习路径归属无效，请重新加载后重试')
+  }
+  if (JSON.stringify(source) !== JSON.stringify(expectedSource)) {
+    throw new Error('服务端返回的学习路径归属不一致，请重新加载后重试')
+  }
+  return source
+}
+
+function assertLearningPathResponse(
+  response,
+  expectedSessionId,
+  expectedSource,
+  requireCompletion = false,
+) {
+  if (response?.session_id !== expectedSessionId) {
+    throw new Error('服务端返回的答题会话不一致，请重新加载后重试')
+  }
+  const source = assertLearningPathSourceEcho(response, expectedSource)
+  const completion = normalizeLearningPathCompletion(
+    response?.learning_path_completion,
+    source,
+  )
+  if (completion === undefined || (requireCompletion && source && !completion)) {
+    throw new Error('服务端尚未确认学习路径阶段进度，请稍后重试批改')
+  }
+  return completion
 }
 
 function presetConflictsWithRecovery(preset, recovery) {
@@ -71,6 +150,7 @@ function presetConflictsWithRecovery(preset, recovery) {
   if (
     recovery.intent.kind !== 'standard'
     || preset.invalidLaunchId
+    || preset.invalidPathBinding
     || preset.invalidBounds
   ) return true
 
@@ -80,12 +160,16 @@ function presetConflictsWithRecovery(preset, recovery) {
       || preset.launchId !== recovery.launch_id
       || preset.documentId !== recovery.launch_preset?.document_id
       || preset.topic !== recovery.launch_preset?.topic
+      || preset.pathId !== (recovery.launch_preset?.path_id || null)
+      || preset.stageId !== (recovery.launch_preset?.stage_id || null)
     )
   }
 
   const request = recovery.intent.request
-  const expectedTopic = request.description === '全文' ? '' : request.description
-  return preset.documentId !== request.document_id || preset.topic !== expectedTopic
+  if (request.learning_path_source) return true
+  const topicMatches = preset.topic === request.description
+    || (preset.topic === '' && request.description === '全文')
+  return preset.documentId !== request.document_id || !topicMatches
 }
 
 function normalizeText(value) {
@@ -128,7 +212,15 @@ function assertSessionSnapshot(
   expectedSessionId,
   expectedDocumentId,
   expectedOrigin,
+  expectedLearningPathSource = null,
 ) {
+  const snapshotSource = normalizeLearningPathSource(snapshot?.learning_path_source)
+  const sourceMatches = JSON.stringify(snapshotSource)
+    === JSON.stringify(expectedLearningPathSource)
+  const completion = normalizeLearningPathCompletion(
+    snapshot?.learning_path_completion,
+    snapshotSource,
+  )
   const valid = snapshot
     && snapshot.schema_version === 1
     && snapshot.session_id === expectedSessionId
@@ -146,6 +238,9 @@ function assertSessionSnapshot(
     && snapshot.questions.length === snapshot.total
     && typeof snapshot.expires_at === 'number'
     && Number.isFinite(snapshot.expires_at)
+    && sourceMatches
+    && !(snapshot.learning_path_source != null && !snapshotSource)
+    && completion !== undefined
 
   if (!valid) throw new Error('服务端返回的答题快照无效，请稍后重试')
   if (snapshot.status === 'active' && snapshot.answered_count >= snapshot.total) {
@@ -154,7 +249,11 @@ function assertSessionSnapshot(
   if (snapshot.status === 'completed' && snapshot.answered_count !== snapshot.total) {
     throw new Error('服务端返回的答题结果不完整，请稍后重试')
   }
-  return snapshot
+  return {
+    ...snapshot,
+    learning_path_source: snapshotSource,
+    learning_path_completion: completion,
+  }
 }
 
 function recoverySessionFromResponse(response) {
@@ -196,6 +295,26 @@ function isRecoveryBusyError(error) {
   )
 }
 
+function terminalLearningPathStartDestination(error, record) {
+  const source = learningPathSourceForRecovery(record)
+  const unavailableStage = error?.status === 409
+    && error?.code === 'learning_path_stage_unavailable'
+    && ['stage_completed', 'stage_locked', 'stage_missing'].includes(error?.reason)
+  const bindingMismatch = error?.status === 409
+    && error?.code === 'learning_path_binding_mismatch'
+  const missingPath = error?.status === 404
+    && error?.code === 'learning_path_not_found'
+  if (
+    record?.session
+    || !source
+    || (!unavailableStage && !bindingMismatch && !missingPath)
+  ) return null
+  return {
+    pathId: missingPath ? null : source.learning_path_id,
+    missing: missingPath,
+  }
+}
+
 export default function Quiz() {
   const location = useLocation()
   const navigate = useNavigate()
@@ -209,6 +328,8 @@ export default function Quiz() {
   const recoveryEpoch = useRef(0)
   const recoveryRetryTimer = useRef(null)
   const mountedRef = useRef(true)
+  const locationSearchRef = useRef(location.search)
+  locationSearchRef.current = location.search
   const incomingPreset = readQuizPreset(location.search)
   const presetConflict = presetConflictsWithRecovery(incomingPreset, recovery)
 
@@ -218,10 +339,12 @@ export default function Quiz() {
   const [docsLoading, setDocsLoading] = useState(true)
   const [docsError, setDocsError] = useState(null)
   const [error, setError] = useState(null)
+  const [recoveryPathTarget, setRecoveryPathTarget] = useState(null)
 
   // AI 批改 + 学习报告
   const [gradingReport, setGradingReport] = useState(null)
   const [learningReport, setLearningReport] = useState(null)
+  const [learningPathCompletion, setLearningPathCompletion] = useState(null)
   const [grading, setGrading] = useState(false)
   const [reporting, setReporting] = useState(false)
   const gradingRequestEpoch = useRef(0)
@@ -362,6 +485,7 @@ export default function Quiz() {
     setResult(snapshot.result)
     setGradingReport(snapshot.grading_report)
     setLearningReport(snapshot.learning_report)
+    setLearningPathCompletion(snapshot.learning_path_completion)
 
     if (snapshot.learning_report) {
       stopTimer()
@@ -412,6 +536,7 @@ export default function Quiz() {
     }
 
     if (!record.session) {
+      const expectedSource = learningPathSourceForRecovery(record)
       const response = record.intent.kind === 'standard'
         ? await startSession({
             ...record.intent.request,
@@ -423,9 +548,11 @@ export default function Quiz() {
             record.start_idempotency_key,
           )
       assertCurrent()
+      const responseSession = recoverySessionFromResponse(response)
+      assertLearningPathSourceEcho(response, expectedSource)
       record = persistRecovery({
         ...record,
-        session: recoverySessionFromResponse(response),
+        session: responseSession,
       })
       if (!record) {
         throw new Error('浏览器无法保存答题会话，请检查存储权限后重试')
@@ -447,12 +574,15 @@ export default function Quiz() {
         result: null,
         grading_report: null,
         learning_report: null,
+        learning_path_source: response.learning_path_source ?? null,
+        learning_path_completion: null,
         expires_at: record.session.expires_at,
         busy: false,
       },
       record.session.session_id,
       record.intent.request.document_id,
-      record.intent.kind === 'standard' ? 'standard' : 'wrong_question')
+      record.intent.kind === 'standard' ? 'standard' : 'wrong_question',
+      expectedSource)
       hydrateSnapshot(initialSnapshot, record)
       return
     }
@@ -462,6 +592,7 @@ export default function Quiz() {
       record.session.session_id,
       record.intent.request.document_id,
       record.intent.kind === 'standard' ? 'standard' : 'wrong_question',
+      learningPathSourceForRecovery(record),
     )
     assertCurrent()
     if (snapshot.busy) {
@@ -492,6 +623,7 @@ export default function Quiz() {
         record.session.session_id,
         record.intent.request.document_id,
         record.intent.kind === 'standard' ? 'standard' : 'wrong_question',
+        learningPathSourceForRecovery(record),
       )
       assertCurrent()
       if (snapshot.busy) {
@@ -525,7 +657,17 @@ export default function Quiz() {
       if (err instanceof RecoverySupersededError || epoch !== recoveryEpoch.current) return
       const current = recoveryRef.current
       let retryDelay = null
-      if (shouldClearQuizSession(err) || (isPayloadMismatch(err) && !current?.session)) {
+      const pathDestination = terminalLearningPathStartDestination(err, current)
+      if (pathDestination) {
+        discardRecovery()
+        if (locationSearchRef.current === location.search) {
+          setRecoveryPathTarget({ ...pathDestination, search: location.search })
+        }
+        setRecoveryReady(true)
+        setSessionId(null)
+        setQuestions([])
+        setPhase('setup')
+      } else if (shouldClearQuizSession(err) || (isPayloadMismatch(err) && !current?.session)) {
         discardRecovery()
         setRecoveryReady(true)
         setSessionId(null)
@@ -560,7 +702,12 @@ export default function Quiz() {
     recoverQuiz,
     recoveryAttempt,
     recoveryReady,
+    location.search,
   ])
+
+  useEffect(() => {
+    setRecoveryPathTarget(null)
+  }, [location.search])
 
   useEffect(() => {
     if (
@@ -577,21 +724,23 @@ export default function Quiz() {
     const { documentId, topic } = preset
     presetHydratedSearch.current = location.search
 
-    if (!documentId && !topic) {
+    if (!preset.hasIntent) {
       setConfig(current => ({
         ...current,
         document_id: '',
         description: '',
+        learning_path_source: undefined,
       }))
       setError(null)
       return
     }
 
-    if (preset.invalidLaunchId || preset.invalidBounds) {
+    if (preset.invalidLaunchId || preset.invalidPathBinding || preset.invalidBounds) {
       setConfig(current => ({
         ...current,
         document_id: '',
         description: '',
+        learning_path_source: undefined,
       }))
       setError('练习链接参数无效，请返回原页面重新选择练习')
       return
@@ -602,6 +751,7 @@ export default function Quiz() {
         ...current,
         document_id: '',
         description: topic,
+        learning_path_source: undefined,
       }))
       setError('链接中的学习文档不存在或已被删除，请重新选择文档。')
       return
@@ -611,6 +761,9 @@ export default function Quiz() {
       ...current,
       document_id: documentId,
       description: topic,
+      learning_path_source: preset.pathId
+        ? { learning_path_id: preset.pathId, stage_id: preset.stageId }
+        : undefined,
     }))
     setError(null)
   }, [docsError, docsLoading, documents, location.search, phase, recoveryReady])
@@ -626,6 +779,7 @@ export default function Quiz() {
     setError(null)
     setGradingReport(null)
     setLearningReport(null)
+    setLearningPathCompletion(null)
 
     let nextRecovery
     try {
@@ -647,7 +801,14 @@ export default function Quiz() {
             createIdempotencyKey(),
             preset.launchId,
             preset.launchId
-              ? { document_id: preset.documentId, topic: preset.topic }
+              ? {
+                  document_id: preset.documentId,
+                  topic: preset.topic,
+                  ...(preset.pathId ? {
+                    path_id: preset.pathId,
+                    stage_id: preset.stageId,
+                  } : {}),
+                }
               : null,
           )
     } catch (err) {
@@ -667,6 +828,7 @@ export default function Quiz() {
     setSelectedAnswer('')
     setFeedback(null)
     setResult(null)
+    setLearningPathCompletion(null)
     setRecoveryReady(false)
     setRecoveryAttempt(attempt => attempt + 1)
   }
@@ -838,6 +1000,8 @@ export default function Quiz() {
     setResult(null)
     setGradingReport(null)
     setLearningReport(null)
+    setLearningPathCompletion(null)
+    setRecoveryPathTarget(null)
     setGrading(false)
     setReporting(false)
     setElapsed(0)
@@ -866,6 +1030,20 @@ export default function Quiz() {
     setError(null)
   }
 
+  const navigateToLearningPath = (target) => {
+    clearSession()
+    setConfig({ ...DEFAULT_QUIZ_CONFIG })
+    setError(null)
+    navigate(target
+      ? `/learning-path?path_id=${encodeURIComponent(target)}`
+      : '/learning-path')
+  }
+
+  const returnToLearningPath = () => {
+    const target = learningPathCompletion?.learning_path_id
+    if (target) navigateToLearningPath(target)
+  }
+
   const handleAnswerChange = (answer) => {
     if (recoveryRef.current?.pending_answer) return
     setSelectedAnswer(answer)
@@ -882,6 +1060,12 @@ export default function Quiz() {
       const report = await gradeSession(targetSessionId)
       if (requestEpoch !== gradingRequestEpoch.current) return
       const record = recoveryRef.current
+      const completion = assertLearningPathResponse(
+        report,
+        targetSessionId,
+        learningPathSourceForRecovery(record),
+        true,
+      )
       if (record?.session?.session_id === targetSessionId) {
         persistRecovery({
           ...record,
@@ -893,6 +1077,7 @@ export default function Quiz() {
         })
       }
       setGradingReport(report)
+      setLearningPathCompletion(completion)
       setPhase('grading')
     } catch (err) {
       if (requestEpoch !== gradingRequestEpoch.current) return
@@ -920,6 +1105,12 @@ export default function Quiz() {
       const report = await generateReport(targetSessionId)
       if (requestEpoch !== reportRequestEpoch.current) return
       const record = recoveryRef.current
+      const completion = assertLearningPathResponse(
+        report,
+        targetSessionId,
+        learningPathSourceForRecovery(record),
+        true,
+      )
       if (record?.session?.session_id === targetSessionId) {
         persistRecovery({
           ...record,
@@ -931,6 +1122,7 @@ export default function Quiz() {
         })
       }
       setLearningReport(report)
+      setLearningPathCompletion(completion)
       setPhase('report')
     } catch (err) {
       if (requestEpoch !== reportRequestEpoch.current) return
@@ -971,6 +1163,7 @@ export default function Quiz() {
   const incomingPresetCanStart = Boolean(
     incomingPreset.hasIntent
     && !incomingPreset.invalidLaunchId
+    && !incomingPreset.invalidPathBinding
     && !incomingPreset.invalidBounds
     && incomingPreset.documentId
     && !docsLoading
@@ -983,9 +1176,14 @@ export default function Quiz() {
       ? '暂时无法验证新练习材料；当前进度尚未被删除。'
       : !incomingPreset.documentId || !documents.includes(incomingPreset.documentId)
         ? '新练习材料不存在或已被删除；当前进度尚未被删除。'
-        : incomingPreset.invalidLaunchId || incomingPreset.invalidBounds
+        : incomingPreset.invalidLaunchId
+            || incomingPreset.invalidPathBinding
+            || incomingPreset.invalidBounds
           ? '新练习链接无效；当前进度尚未被删除。'
           : null
+  const activeRecoveryPathTarget = recoveryPathTarget?.search === location.search
+    ? recoveryPathTarget
+    : null
 
   const retryRecovery = () => {
     setError(null)
@@ -1055,8 +1253,28 @@ export default function Quiz() {
         </section>
       )}
 
+      {!presetConflict && activeRecoveryPathTarget && (
+        <div className="load-error-state" role="alert">
+          <p className="state-title">该阶段已不可继续</p>
+          <p className="state-desc">
+            {activeRecoveryPathTarget.missing
+              ? '这条学习路径已不存在，请返回学习路径重新选择。'
+              : '服务端进度已经变化，请返回学习路径查看当前可学习阶段。'}
+          </p>
+          <button
+            type="button"
+            className="state-action"
+            onClick={() => navigateToLearningPath(activeRecoveryPathTarget.pathId)}
+          >
+            {activeRecoveryPathTarget.missing
+              ? '返回学习路径重新选择'
+              : '返回学习路径刷新进度'}
+          </button>
+        </div>
+      )}
+
       {/* ══════════════ Setup Phase ══════════════ */}
-      {!presetConflict && phase === 'setup' && docsError && (
+      {!presetConflict && !activeRecoveryPathTarget && phase === 'setup' && docsError && (
         <div className="load-error-state" role="alert">
           <p className="state-title">无法加载文档列表</p>
           <p className="state-desc">{docsError}</p>
@@ -1066,11 +1284,11 @@ export default function Quiz() {
         </div>
       )}
 
-      {!presetConflict && phase === 'setup' && !docsError && !docsLoading && documents.length === 0 && (
+      {!presetConflict && !activeRecoveryPathTarget && phase === 'setup' && !docsError && !docsLoading && documents.length === 0 && (
         <DocumentPrerequisite description="开始答题前，需要先上传一份学习材料供系统检索和出题。" />
       )}
 
-      {!presetConflict && phase === 'setup' && !docsError && (docsLoading || documents.length > 0) && (
+      {!presetConflict && !activeRecoveryPathTarget && phase === 'setup' && !docsError && (docsLoading || documents.length > 0) && (
         <div className="quiz-setup">
           {/* 文档选择 */}
           <div className="setup-field">
@@ -1083,7 +1301,7 @@ export default function Quiz() {
                 setConfig(c => ({ ...c, document_id: e.target.value }))
                 setError(null)
               }}
-              disabled={docsLoading}
+              disabled={docsLoading || Boolean(config.learning_path_source)}
             >
               <option value="">{docsLoading ? '加载中...' : '-- 选择文档 --'}</option>
               {documents.map(d => <option key={d} value={d}>{d}</option>)}
@@ -1100,6 +1318,7 @@ export default function Quiz() {
               placeholder="例如：第三章 向量检索"
               value={config.description}
               onChange={e => setConfig(c => ({ ...c, description: e.target.value }))}
+              disabled={Boolean(config.learning_path_source)}
               maxLength={4000}
             />
           </div>
@@ -1487,12 +1706,18 @@ export default function Quiz() {
                 </>
               )}
             </button>
-            <button className="restart-btn" onClick={handleRestart}>
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
-              </svg>
-              再来一轮
-            </button>
+            {learningPathCompletion ? (
+              <button className="restart-btn" onClick={returnToLearningPath}>
+                返回学习路径，继续下一阶段
+              </button>
+            ) : (
+              <button className="restart-btn" onClick={handleRestart}>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                </svg>
+                再来一轮
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -1568,12 +1793,18 @@ export default function Quiz() {
             </div>
           )}
 
-          <button className="restart-btn center" onClick={handleRestart}>
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
-            </svg>
-            再来一轮
-          </button>
+          {learningPathCompletion ? (
+            <button className="restart-btn center" onClick={returnToLearningPath}>
+              返回学习路径，继续下一阶段
+            </button>
+          ) : (
+            <button className="restart-btn center" onClick={handleRestart}>
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+              </svg>
+              再来一轮
+            </button>
+          )}
         </div>
       )}
     </div>

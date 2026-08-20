@@ -10,6 +10,7 @@ from pydantic import BaseModel, ValidationError
 from models.learning_path import (
     CreateLearningPathRequest,
     LearningPath,
+    LearningPathProgress,
     LearningPathResource,
 )
 from services.idempotency import IdempotencyConflictError, normalize_idempotency_key
@@ -51,6 +52,10 @@ def _resource(record: LearningPathRecord) -> LearningPathResource:
         learning_path_id=record.path_id,
         user_id=record.user_id,
         path=record.path,
+        progress=LearningPathProgress(
+            revision=record.progress_revision,
+            completed_through=record.completed_through,
+        ),
         created_at=record.created_at,
         expires_at=None,
     )

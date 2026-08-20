@@ -374,6 +374,10 @@ export default function LearningPath() {
   }
 
   const path = resource?.path || null
+  const completedThrough = resource?.progress.completed_through || 0
+  const readyStageId = path && completedThrough < path.total_stages
+    ? completedThrough + 1
+    : null
   const totalMinutes = path?.stages.reduce(
     (sum, stage) => sum + stage.estimated_minutes,
     0,
@@ -386,11 +390,17 @@ export default function LearningPath() {
   const busy = generating || recovering
 
   const handlePracticeStage = (stage) => {
-    if (materialStatus !== 'available') return
+    if (
+      materialStatus !== 'available'
+      || stage.stage !== readyStageId
+      || !resource
+    ) return
     const topic = (stage.topics.join('、') || stage.title).trim()
     const params = new URLSearchParams({
       document_id: path.document_id,
       topic,
+      path_id: resource.learning_path_id,
+      stage_id: String(stage.stage),
     })
     try {
       params.set('launch_id', createIdempotencyKey())
@@ -519,19 +529,34 @@ export default function LearningPath() {
               <span className="lp-meta-item">材料：{path.document_id}</span>
               <span className="lp-meta-item">{path.total_stages} 个阶段</span>
               <span className="lp-meta-item">预计 {totalMinutes} 分钟</span>
+              <span className="lp-meta-item">
+                已完成 {completedThrough}/{path.total_stages}
+              </span>
             </div>
           </div>
 
           <div className="lp-timeline">
-            {path.stages.map((stage, index) => (
-              <div key={stage.stage} className="timeline-item">
+            {path.stages.map((stage, index) => {
+              const stageStatus = stage.stage <= completedThrough
+                ? 'completed'
+                : stage.stage === readyStageId ? 'ready' : 'locked'
+              return (
+              <div
+                key={stage.stage}
+                className={`timeline-item is-${stageStatus}`}
+              >
                 <div className="timeline-track">
                   <div className="timeline-node">
-                    <span className="node-number">{stage.stage}</span>
+                    <span className="node-number">
+                      {stageStatus === 'completed' ? '✓' : stage.stage}
+                    </span>
                   </div>
                   {index < path.stages.length - 1 && <div className="timeline-line" />}
                 </div>
-                <div className="timeline-card">
+                <div
+                  className="timeline-card"
+                  aria-current={stageStatus === 'ready' ? 'step' : undefined}
+                >
                   <div className="tc-header">
                     <h3 className="tc-title">{stage.title}</h3>
                     <span className="tc-time">{stage.estimated_minutes} min</span>
@@ -543,19 +568,31 @@ export default function LearningPath() {
                     ))}
                   </div>
                   <div className="tc-actions">
-                    <button
-                      type="button"
-                      className="tc-practice-btn"
-                      aria-label={`练习阶段 ${stage.stage}：${stage.title}`}
-                      onClick={() => handlePracticeStage(stage)}
-                      disabled={materialStatus !== 'available'}
-                    >
-                      {materialStatus === 'available' ? '练习本阶段 →' : '仅供查看'}
-                    </button>
+                    {stageStatus === 'completed' ? (
+                      <span className="tc-stage-status completed">已完成</span>
+                    ) : stageStatus === 'locked' ? (
+                      <span className="tc-stage-status locked">
+                        完成上一阶段后解锁
+                      </span>
+                    ) : materialStatus === 'available' ? (
+                      <button
+                        type="button"
+                        className="tc-practice-btn"
+                        aria-label={`练习阶段 ${stage.stage}：${stage.title}`}
+                        onClick={() => handlePracticeStage(stage)}
+                      >
+                        练习本阶段 →
+                      </button>
+                    ) : (
+                      <span className="tc-stage-status unavailable">
+                        {materialStatus === 'deleted' ? '材料已删除，仅供查看' : '暂不可练习'}
+                      </span>
+                    )}
                   </div>
                 </div>
               </div>
-            ))}
+              )
+            })}
           </div>
         </div>
       )}

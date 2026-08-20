@@ -7,6 +7,30 @@ from models.quiz import Question
 from models.report import LearningReport
 
 
+class LearningPathQuizSource(BaseModel):
+    """Immutable binding between a Web Quiz and one Learning Path stage."""
+
+    learning_path_id: str = Field(pattern=r"^lp_[0-9a-f]{32}$")
+    stage_id: int = Field(ge=1, le=12, strict=True)
+
+
+class LearningPathCompletion(BaseModel):
+    """Durable acknowledgment that a bound Quiz advanced path progress."""
+
+    learning_path_id: str = Field(pattern=r"^lp_[0-9a-f]{32}$")
+    stage_id: int = Field(ge=1, le=12, strict=True)
+    completed_through: int = Field(ge=1, le=12, strict=True)
+    revision: int = Field(ge=2, le=13, strict=True)
+
+    @model_validator(mode="after")
+    def validate_completion(self):
+        if self.completed_through < self.stage_id:
+            raise ValueError("completion cannot precede its bound stage")
+        if self.revision != self.completed_through + 1:
+            raise ValueError("completion revision is inconsistent")
+        return self
+
+
 class SessionStartRequest(BaseModel):
     document_id: str = Field(min_length=1, max_length=512)
     description: str = Field(max_length=4000)
@@ -14,6 +38,7 @@ class SessionStartRequest(BaseModel):
     difficulty: Literal["easy", "medium", "hard"] = "medium"
     type: Literal["choice", "true_false", "short_answer"] = "choice"
     user_id: str = Field(default="default_user", min_length=1, max_length=128)
+    learning_path_source: LearningPathQuizSource | None = None
 
     @field_validator("document_id", "user_id")
     @classmethod
@@ -115,6 +140,8 @@ class QuizSessionAggregate(BaseModel):
     last_answer_index: int | None = Field(default=None, ge=0)
     last_answer_result: AnswerResult | None = None
     answer_request_hashes: dict[str, str] = Field(default_factory=dict)
+    learning_path_source: LearningPathQuizSource | None = None
+    learning_path_completion: LearningPathCompletion | None = None
 
     @model_validator(mode="after")
     def validate_state_machine(self):
@@ -158,6 +185,25 @@ class QuizSessionAggregate(BaseModel):
                 or any(char not in "0123456789abcdef" for char in request_hash)
             ):
                 raise ValueError("invalid answer request binding")
+
+        if self.learning_path_source is None:
+            if self.learning_path_completion is not None:
+                raise ValueError("unbound quiz cannot publish learning path progress")
+        else:
+            if self.origin != "standard":
+                raise ValueError("wrong-question quiz cannot bind a learning path stage")
+            completion = self.learning_path_completion
+            if completion is not None:
+                if (
+                    completion.learning_path_id
+                    != self.learning_path_source.learning_path_id
+                    or completion.stage_id != self.learning_path_source.stage_id
+                ):
+                    raise ValueError("learning path completion differs from its source")
+                if session.grading_report is None or not session.profile_written:
+                    raise ValueError(
+                        "learning path progress requires canonical grading and memory"
+                    )
 
         for index, grade in session.question_grades.items():
             if index < 0 or index >= total:
@@ -228,5 +274,7 @@ class SessionSnapshot(BaseModel):
     result: SessionResult | None = None
     grading_report: GradingReport | None = None
     learning_report: LearningReport | None = None
+    learning_path_source: LearningPathQuizSource | None = None
+    learning_path_completion: LearningPathCompletion | None = None
     expires_at: float
     busy: bool = False
