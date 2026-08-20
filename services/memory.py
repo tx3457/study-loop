@@ -188,6 +188,12 @@ def _bank_ns(user_id: str, bank: str) -> tuple:
     return ("users", user_id, bank)
 
 
+def probe_learner_memory_readiness() -> None:
+    """Read through the learner-memory Store instance used by requests."""
+    with _store_access_lock():
+        store.search(("system", "readiness", "probe"), limit=1)
+
+
 def _now_iso() -> str:
     return datetime.now().isoformat()
 

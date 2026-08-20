@@ -146,12 +146,39 @@ jobs:
       - name: Verify HTTP routing and backend user
         run: |
           curl --fail --silent --show-error --retry 10 --retry-delay 2 --retry-connrefused --connect-timeout 2 --max-time 5 http://127.0.0.1:8001/health/live
+          curl --fail --silent --show-error --retry 10 --retry-delay 2 --retry-connrefused --connect-timeout 2 --max-time 6 http://127.0.0.1:8001/health/ready
           curl --fail --silent --show-error --retry 10 --retry-delay 2 --retry-connrefused --connect-timeout 2 --max-time 5 http://127.0.0.1:4001/
-          curl --fail --silent --show-error --retry 10 --retry-delay 2 --retry-connrefused --connect-timeout 2 --max-time 5 http://127.0.0.1:4001/api/health/live
+          curl --fail --silent --show-error --retry 10 --retry-delay 2 --retry-connrefused --connect-timeout 2 --max-time 6 http://127.0.0.1:4001/api/health/ready
           test "$(docker compose exec -T backend id -u)" = "10001"
           test "$(docker compose exec -T backend id -g)" = "10001"
           docker compose exec -T backend python -c "import os; from pathlib import Path; assert os.environ['WEB_CONCURRENCY'] == '1'; pid1 = [a for a in Path('/proc/1/cmdline').read_bytes().split(b'\0') if a]; assert b'main:app' in pid1 and b'--workers' in pid1 and pid1[pid1.index(b'--workers') + 1] == b'1', pid1; children = {int(pid) for pid in Path('/proc/1/task/1/children').read_text().split()}; children.discard(os.getpid()); assert not children, children"
           docker compose exec -T backend python -c "from pathlib import Path; p = Path('/app/chroma_db/nonroot-smoke'); p.write_text('ok'); p.unlink()"
+      - name: Verify storage failure changes readiness but not liveness
+        run: |
+          docker compose stop postgres
+          curl --fail --silent --show-error --connect-timeout 2 --max-time 5 http://127.0.0.1:8001/health/live
+          ready_status=""
+          for attempt in $(seq 1 10); do
+            ready_status="$(curl --silent --show-error --output /tmp/storage-readiness.json --write-out '%{http_code}' --connect-timeout 2 --max-time 6 http://127.0.0.1:8001/health/ready || true)"
+            if [ "$ready_status" = "503" ]; then break; fi
+            sleep 1
+          done
+          test "$ready_status" = "503"
+          grep -q '"code":"storage_unavailable"' /tmp/storage-readiness.json
+          docker compose start postgres
+          for attempt in $(seq 1 30); do
+            if docker compose exec -T postgres sh -c 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'; then break; fi
+            sleep 1
+          done
+          docker compose exec -T postgres sh -c 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
+          docker compose exec -T backend python -c "import os, psycopg; connection = psycopg.connect(os.environ['DATABASE_URL'], connect_timeout=2, options='-c statement_timeout=1500ms'); assert connection.execute('SELECT 1').fetchone() == (1,); connection.close()"
+          sleep 2
+          stale_store_status="$(curl --silent --show-error --output /tmp/stale-store-readiness.json --write-out '%{http_code}' --connect-timeout 2 --max-time 6 http://127.0.0.1:8001/health/ready || true)"
+          test "$stale_store_status" = "503"
+          grep -q '"code":"postgres_unavailable"' /tmp/stale-store-readiness.json
+          docker compose restart backend
+          curl --fail --silent --show-error --retry 20 --retry-delay 2 --retry-connrefused --connect-timeout 2 --max-time 6 http://127.0.0.1:8001/health/ready
+          curl --fail --silent --show-error --retry 20 --retry-delay 2 --retry-connrefused --connect-timeout 2 --max-time 6 http://127.0.0.1:4001/api/health/ready
       - name: Show container diagnostics
         if: ${{ failure() }}
         run: |

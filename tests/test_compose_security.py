@@ -27,7 +27,7 @@ def _safe_config() -> dict:
                     "WEB_CONCURRENCY": "1",
                 },
                 "healthcheck": {
-                    "test": ["CMD", "python", "-c", "GET /health/live"]
+                    "test": ["CMD", "python", "-c", "GET /health/ready"]
                 },
                 "depends_on": {
                     "backend-volume-init": {
@@ -68,6 +68,16 @@ def test_backend_healthcheck_is_required() -> None:
         _assert_safe_config(config)
 
 
+def test_backend_healthcheck_cannot_use_liveness_as_readiness() -> None:
+    config = deepcopy(_safe_config())
+    config["services"]["backend"]["healthcheck"]["test"][-1] = (
+        "GET /health/live"
+    )
+
+    with pytest.raises(ComposeSecurityError, match="storage readiness"):
+        _assert_safe_config(config)
+
+
 def test_frontend_must_wait_for_backend_health() -> None:
     config = deepcopy(_safe_config())
     config["services"]["frontend"]["depends_on"]["backend"][
@@ -102,6 +112,16 @@ def test_backend_image_command_pins_one_worker() -> None:
     )
 
     assert '"--workers", "1"' in cmd_line
+
+
+def test_backend_image_healthcheck_uses_storage_readiness() -> None:
+    dockerfile = Path(__file__).resolve().parents[1] / "Dockerfile"
+    healthcheck = next(
+        line for line in dockerfile.read_text(encoding="utf-8").splitlines()
+        if line.strip().startswith("CMD python -c")
+    )
+
+    assert "/health/ready" in healthcheck
 
 
 def test_frontend_docker_context_excludes_local_environment_files() -> None:
