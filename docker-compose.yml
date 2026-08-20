@@ -22,6 +22,8 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-studyloop}@postgres:5432/${POSTGRES_DB:-studyloop}
       PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      # Embedded Chroma PersistentClient is a single-process data plane.
+      WEB_CONCURRENCY: "1"
     volumes:
       - chromadata:/app/chroma_db
     depends_on:

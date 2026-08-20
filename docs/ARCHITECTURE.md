@@ -71,7 +71,9 @@ authorization or Pydantic-validation boundary; see `SECURITY.md`.
   and session events across conversations.
 - `services/memory_persist.py` is a local JSON snapshot fallback when PostgreSQL
   is not configured. This fallback is intentionally single-worker; multi-worker
-  deployments must configure PostgreSQL rather than share one snapshot file.
+  memory storage must configure PostgreSQL rather than share one snapshot file.
+  That removes only the learner-memory fallback constraint, not the application
+  topology limits described below.
 - `services/quiz_sessions.py` persists stable Web Quiz and wrong-question
   practice sessions. SQLite supports local restart recovery; PostgreSQL adds
   cross-worker claims and fencing.
@@ -85,6 +87,23 @@ authorization or Pydantic-validation boundary; see `SECURITY.md`.
 
 Checkpoint state and learner memory solve different problems and should not be
 described as one generic “memory” feature.
+
+## Deployment topology
+
+The bundled Docker/Compose topology intentionally runs one backend worker and
+one backend replica. Document retrieval uses an embedded Chroma
+`PersistentClient` over a local volume; that data plane must not be shared by
+multiple backend processes. The image pins `--workers 1`, and Compose overrides
+`WEB_CONCURRENCY` to `1` even if a local `.env` contains another value.
+
+PostgreSQL makes receipts, durable sessions, Learning Paths, and learner memory
+capable of cross-process coordination. It does **not** make the embedded Chroma
+client multi-process safe. A future multi-worker/replica deployment must first
+move Chroma behind a separate server and use `HttpClient`, then keep PostgreSQL
+for the application state stores. Those changes are necessary but not
+sufficient: the in-process BM25 cache invalidation and document-ingest staging
+coordination would also need cross-process protocols. That externalized
+topology is not shipped by this repository today.
 
 ## Optional integrations
 

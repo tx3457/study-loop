@@ -103,5 +103,8 @@ def test_documented_servers_disable_raw_url_access_logs() -> None:
     )[0]
 
     assert '"--no-access-log"' in dockerfile
-    assert "uvicorn main:app --reload --port 8001 --no-access-log" in readme
+    assert (
+        "uvicorn main:app --reload --port 8001 --workers 1 --no-access-log"
+        in readme
+    )
     assert "access_log off;" in api_location

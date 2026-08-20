@@ -150,6 +150,7 @@ jobs:
           curl --fail --silent --show-error --retry 10 --retry-delay 2 --retry-connrefused --connect-timeout 2 --max-time 5 http://127.0.0.1:4001/api/health/live
           test "$(docker compose exec -T backend id -u)" = "10001"
           test "$(docker compose exec -T backend id -g)" = "10001"
+          docker compose exec -T backend python -c "import os; from pathlib import Path; assert os.environ['WEB_CONCURRENCY'] == '1'; pid1 = [a for a in Path('/proc/1/cmdline').read_bytes().split(b'\0') if a]; assert b'main:app' in pid1 and b'--workers' in pid1 and pid1[pid1.index(b'--workers') + 1] == b'1', pid1; children = {int(pid) for pid in Path('/proc/1/task/1/children').read_text().split()}; children.discard(os.getpid()); assert not children, children"
           docker compose exec -T backend python -c "from pathlib import Path; p = Path('/app/chroma_db/nonroot-smoke'); p.write_text('ok'); p.unlink()"
       - name: Show container diagnostics
         if: ${{ failure() }}
