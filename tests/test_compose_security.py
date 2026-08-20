@@ -24,6 +24,7 @@ def _safe_config() -> dict:
                 "environment": {
                     "DATABASE_URL": "postgresql://studyloop@postgres:5432/studyloop",
                     "PGPASSWORD": SYNTHETIC_PASSWORD,
+                    "WEB_CONCURRENCY": "1",
                 },
                 "healthcheck": {
                     "test": ["CMD", "python", "-c", "GET /health/live"]
@@ -83,6 +84,24 @@ def test_backend_must_wait_for_volume_ownership_repair() -> None:
 
     with pytest.raises(ComposeSecurityError, match="ownership repair"):
         _assert_safe_config(config)
+
+
+def test_backend_must_force_single_worker_for_embedded_chroma() -> None:
+    config = deepcopy(_safe_config())
+    config["services"]["backend"]["environment"]["WEB_CONCURRENCY"] = "4"
+
+    with pytest.raises(ComposeSecurityError, match="one worker"):
+        _assert_safe_config(config)
+
+
+def test_backend_image_command_pins_one_worker() -> None:
+    dockerfile = Path(__file__).resolve().parents[1] / "Dockerfile"
+    cmd_line = next(
+        line for line in dockerfile.read_text(encoding="utf-8").splitlines()
+        if line.startswith("CMD [")
+    )
+
+    assert '"--workers", "1"' in cmd_line
 
 
 def test_frontend_docker_context_excludes_local_environment_files() -> None:

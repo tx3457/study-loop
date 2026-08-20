@@ -83,6 +83,8 @@ def _assert_safe_config(config: dict) -> None:
         raise ComposeSecurityError("DATABASE_URL contains the raw PostgreSQL password")
     if backend_env.get("PGPASSWORD") != SYNTHETIC_PASSWORD:
         raise ComposeSecurityError("backend PGPASSWORD does not preserve special characters")
+    if str(backend_env.get("WEB_CONCURRENCY")) != "1":
+        raise ComposeSecurityError("embedded Chroma backend must force one worker")
 
     health_test = services["backend"].get("healthcheck", {}).get("test", [])
     if "/health/live" not in " ".join(str(part) for part in health_test):

@@ -33,6 +33,11 @@ metadata and must remain access-controlled.
 The bundled Uvicorn process and Nginx `/api/` proxy disable their raw-URL access
 logs; the application instead records a route-template, status, and request ID.
 
+Although individual PostgreSQL-backed stores implement cross-worker fencing,
+the supported bundled deployment remains one backend worker and one replica.
+Embedded Chroma plus in-process BM25/ingest coordination are not a supported
+multi-process data plane; `DATABASE_URL` alone does not remove that boundary.
+
 ## Known boundaries
 
 - Tool schemas constrain what the model is asked to emit. Required arguments,

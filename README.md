@@ -79,7 +79,7 @@ source .venv/bin/activate
 pip install -r requirements.txt -r requirements-dev.txt
 cp .env.example .env
 # 编辑 .env，配置模型服务
-python -m uvicorn main:app --reload --port 8001 --no-access-log
+python -m uvicorn main:app --reload --port 8001 --workers 1 --no-access-log
 ```
 
 如需启用本地 Cross-Encoder 精排，改用
@@ -125,11 +125,15 @@ Autonomous 在请求发出前保存完整待对账请求与 key：刷新、断�
 或已发生副作用的操作不会被假装取消。清洁的崩溃租约可安全接管；跨过业务工具执行边界后，
 只有能由同一请求绑定的持久会话终态证明结果时才会自动对账，否则保持 fail-closed，需要
 重新开始或人工调查。相关容量和 TTL 配置见
-[`.env.example`](.env.example)。多 worker 首次初始化 PostgreSQL learner memory
-时，其他 worker 最多等待 `MEMORY_STORE_SETUP_LOCK_TIMEOUT_SECONDS`（默认 300
-秒）；初始化连接需直连 PostgreSQL 或使用 session pooling。未配置
-`DATABASE_URL` 时，学习者记忆由单进程内存和本地 JSON 快照兜底，只支持一个
-后端 worker；需要多 worker 时必须配置 PostgreSQL，不能让多个进程共写同一快照。
+[`.env.example`](.env.example)。当前受支持且默认的 Docker/Compose 拓扑是一个 backend
+worker 和一个 replica，请勿扩容：向量库使用内嵌的 Chroma `PersistentClient`，不能由多个
+进程共同写同一目录。`DATABASE_URL` 让 receipt、会话和学习者记忆等状态存储具备跨进程协调能力，
+但它本身并不会把内嵌 Chroma 变成多进程安全；设置 `WEB_CONCURRENCY>1` 也不会绕过该边界。
+若未来要做多 worker/replica，必须先改成独立 Chroma 服务与 `HttpClient`，并同时配置
+PostgreSQL；这只是必要条件，还要把进程内 BM25 缓存失效和文档写入协调改造成跨进程协议。
+`MEMORY_STORE_SETUP_LOCK_TIMEOUT_SECONDS` 等参数控制 PostgreSQL 状态组件内部的初始化与
+并发锁；它们并不表示完整应用已经支持多 worker/replica。未配置 `DATABASE_URL` 时，学习者
+记忆还会额外使用单进程内存和本地 JSON 快照兜底。
 
 Structured Output 和 Embeddings 的专用 key 与地址必须成对配置；两者同时留空时才会整组回退到 `LLM_*`。完整配置见 [`.env.example`](.env.example)。
 
