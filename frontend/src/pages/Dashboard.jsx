@@ -9,6 +9,7 @@ import {
 } from '../api/client'
 import {
   createWrongQuestionQuizRecovery,
+  readQuizRecovery,
   writeQuizRecovery,
 } from '../state/quizRecovery'
 import './Dashboard.css'
@@ -34,6 +35,7 @@ export default function Dashboard() {
   const [wrongLoading, setWrongLoading] = useState(false)
   const [wrongError, setWrongError] = useState(null)
   const [practiceError, setPracticeError] = useState(null)
+  const [practiceConflict, setPracticeConflict] = useState(null)
   const [error, setError] = useState(null)
   const [partialError, setPartialError] = useState(null)
   const dashboardRequestId = useRef(0)
@@ -133,11 +135,19 @@ export default function Dashboard() {
     if (!wrongDoc) return
     setPracticeError(null)
     try {
-      const recovery = createWrongQuestionQuizRecovery(
+      const nextRecovery = createWrongQuestionQuizRecovery(
         wrongDoc,
         createIdempotencyKey(),
       )
-      if (!recovery || !writeQuizRecovery(recovery)) {
+      if (!nextRecovery) {
+        throw new Error('无法创建错题重练恢复记录，请刷新页面后重试')
+      }
+      const currentRecovery = readQuizRecovery()
+      if (currentRecovery) {
+        setPracticeConflict({ currentRecovery, nextRecovery })
+        return
+      }
+      if (!writeQuizRecovery(nextRecovery)) {
         throw new Error('浏览器无法保存重练进度，请检查存储权限后重试')
       }
       navigate('/quiz')
@@ -147,8 +157,40 @@ export default function Dashboard() {
   }
 
   const handleWrongDocumentChange = (event) => {
+    const nextDocument = event.target.value
+    wrongRequestId.current += 1
     setPracticeError(null)
-    setWrongDoc(event.target.value)
+    setPracticeConflict(null)
+    setWrongQuestions(null)
+    setWrongError(null)
+    setWrongLoading(Boolean(nextDocument))
+    setWrongDoc(nextDocument)
+  }
+
+  const continueCurrentPractice = () => {
+    setPracticeConflict(null)
+    setPracticeError(null)
+    navigate('/quiz')
+  }
+
+  const replaceCurrentPractice = () => {
+    const nextRecovery = practiceConflict?.nextRecovery
+    if (!nextRecovery) return
+    setPracticeError(null)
+    if (!writeQuizRecovery(nextRecovery)) {
+      setPracticeError('浏览器无法保存重练进度；当前练习仍已保留，请检查存储权限后重试')
+      return
+    }
+    setPracticeConflict(null)
+    navigate('/quiz')
+  }
+
+  const recoveryLabel = (recovery) => {
+    if (!recovery) return ''
+    const request = recovery.intent.request
+    return `${request.document_id} / ${
+      recovery.intent.kind === 'standard' ? request.description : '错题重练'
+    }`
   }
 
   /* ── 衍生数据 ──────────────────────────────────────────────────── */
@@ -289,7 +331,10 @@ export default function Dashboard() {
             <div className="wrong-header">
               <h2 className="card-title">错题本</h2>
               <div className="wrong-actions">
-                {wrongQuestions?.total > 0 && !wrongLoading && !wrongError && (
+                {wrongQuestions?.total > 0
+                  && !wrongLoading
+                  && !wrongError
+                  && !practiceConflict && (
                   <button
                     type="button"
                     className="state-action wrong-practice"
@@ -311,6 +356,39 @@ export default function Dashboard() {
             </div>
 
             {wrongLoading && <div className="loading-spinner small" />}
+
+            {practiceConflict && !wrongLoading && !wrongError && (
+              <section
+                className="practice-intent-conflict"
+                role="region"
+                aria-live="polite"
+                aria-labelledby="practice-intent-conflict-title"
+                aria-describedby="practice-intent-conflict-desc"
+              >
+                <h3 id="practice-intent-conflict-title">检测到尚未结束的练习</h3>
+                <p id="practice-intent-conflict-desc">
+                  开始错题重练会替换浏览器中保存的当前进度。请选择继续当前练习，或明确放弃后开始新的错题重练。
+                </p>
+                <dl>
+                  <div>
+                    <dt>当前进度</dt>
+                    <dd>{recoveryLabel(practiceConflict.currentRecovery)}</dd>
+                  </div>
+                  <div>
+                    <dt>新的重练</dt>
+                    <dd>{recoveryLabel(practiceConflict.nextRecovery)}</dd>
+                  </div>
+                </dl>
+                <div className="practice-intent-actions">
+                  <button type="button" className="state-action" onClick={continueCurrentPractice}>
+                    继续当前练习
+                  </button>
+                  <button type="button" className="state-action danger" onClick={replaceCurrentPractice}>
+                    放弃并开始错题重练
+                  </button>
+                </div>
+              </section>
+            )}
 
             {wrongError && !wrongLoading && (
               <div className="load-error-state" role="alert">
