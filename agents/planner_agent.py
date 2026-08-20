@@ -29,6 +29,7 @@ from models.learning_path import (
     CompressedReport,
     ExplorationReport,
     LearningPath,
+    LearningPathWire,
     PathBrief,
     PathCritique,
 )
@@ -178,13 +179,16 @@ async def _node_path_reviser(state: PlannerState) -> dict:
                 {"role": "system", "content": _PATH_REVISER_SYSTEM},
                 {"role": "user", "content": user_msg},
             ],
-            response_format=LearningPath,
+            response_format=LearningPathWire,
             client=_client,
             model=_model,
         )
-        revised = resp.choices[0].message.parsed
-        # 保护:document_id 不允许被改
-        revised.document_id = path_dict.get("document_id", revised.document_id)
+        revised_payload = resp.choices[0].message.parsed.model_dump()
+        # 保护:document_id 不允许被改，并在本地执行完整领域约束。
+        revised_payload["document_id"] = path_dict.get(
+            "document_id", revised_payload.get("document_id")
+        )
+        revised = LearningPath.model_validate(revised_payload)
         logger.info(
             f"[planner.path_reviser] revised {revised.total_stages} stages "
             f"(round {state.get('revision_count', 0)})"

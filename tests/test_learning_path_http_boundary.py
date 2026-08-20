@@ -66,6 +66,54 @@ class TestLearningPathHttpBoundary(unittest.TestCase):
         self.assertEqual(response.json()["detail"], "模型返回的学习路径格式无效")
         self.assertNotIn("validation error", response.text.lower())
 
+    def test_invalid_generated_path_is_validated_before_response_serialization(self) -> None:
+        invalid_path = {
+            "document_id": "notes.md",
+            "title": "",
+            "total_stages": -1,
+            "stages": [],
+        }
+        with patch.object(
+            learning_path_router,
+            "generate_learning_path",
+            AsyncMock(return_value=invalid_path),
+        ):
+            response = self.client.post("/learning-path/notes.md")
+
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.json()["detail"], "模型返回的学习路径格式无效")
+        self.assertNotIn("validation error", response.text.lower())
+
+    def test_mutated_model_instance_is_rebuilt_before_response_serialization(self) -> None:
+        generated = LearningPath.model_validate(
+            {
+                "document_id": "notes.md",
+                "title": "RAG 学习路径",
+                "total_stages": 1,
+                "stages": [
+                    {
+                        "stage": 1,
+                        "title": "检索基础",
+                        "topics": ["BM25"],
+                        "description": "理解关键词检索。",
+                        "estimated_minutes": 20,
+                    }
+                ],
+            }
+        )
+        generated.stages[0].estimated_minutes = -1
+
+        with patch.object(
+            learning_path_router,
+            "generate_learning_path",
+            AsyncMock(return_value=generated),
+        ):
+            response = self.client.post("/learning-path/notes.md")
+
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.json()["detail"], "模型返回的学习路径格式无效")
+        self.assertNotIn("validation error", response.text.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

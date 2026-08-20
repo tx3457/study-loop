@@ -27,7 +27,7 @@ import routers.user as user_router
 import services.learning_path as learning_path_service
 import services.tools as tool_module
 from main import app
-from models.learning_path import CompressedReport, PathBrief
+from models.learning_path import CompressedReport, LearningPathWire, PathBrief
 from services.autonomous_sessions import AutonomousSessionStore
 from services.provider_config import ProviderDeadlineExceeded
 from services.retry import RetryExhausted
@@ -829,6 +829,48 @@ class TestApiErrorBoundaries(unittest.TestCase):
 
 
 class TestLearningPathProviderBoundary(unittest.IsolatedAsyncioTestCase):
+    async def test_synthesize_overrides_model_controlled_document_id(self):
+        brief = PathBrief(
+            title="RAG 学习路径",
+            scope="RAG 基础",
+            level="beginner",
+            target_count=1,
+            keywords=["retrieval"],
+        )
+        compressed = CompressedReport(
+            summary="RAG combines retrieval and generation.",
+            key_concepts=["retrieval"],
+            suggested_stage_count=1,
+        )
+        parsed = {
+            "document_id": "model-chosen.md",
+            "title": "RAG 基础",
+            "total_stages": 1,
+            "stages": [
+                {
+                    "stage": 1,
+                    "title": "检索基础",
+                    "topics": ["retrieval"],
+                    "description": "理解检索增强生成中的召回步骤。",
+                    "estimated_minutes": 20,
+                }
+            ],
+        }
+        parse = AsyncMock(
+            return_value=SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(parsed=parsed))]
+            )
+        )
+
+        with patch.object(learning_path_service, "llm_parse", parse):
+            path = await learning_path_service.synthesize(
+                "notes.md", brief, compressed
+            )
+
+        self.assertEqual(path.document_id, "notes.md")
+        self.assertEqual(path.total_stages, 1)
+        self.assertIs(parse.await_args.args[1], LearningPathWire)
+
     async def test_synthesize_uses_retrying_llm_entrypoint(self):
         brief = PathBrief(
             title="RAG 学习路径",
