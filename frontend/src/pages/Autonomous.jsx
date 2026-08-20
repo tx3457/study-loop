@@ -19,11 +19,13 @@ import {
 } from '../api/client'
 import './Autonomous.css'
 
+const DEFAULT_USER_ID = 'default_user'
+
 const initialState = {
   phase: 'idle',     // idle | running | awaiting | continuing | done | error
   request: {
     query: '',
-    user_id: 'default_user',
+    user_id: DEFAULT_USER_ID,
     document_id: '',
     grounding_required: false,
   },
@@ -62,8 +64,7 @@ function readAwaitingRecovery() {
       && typeof request.query === 'string'
       && request.query.trim().length > 0
       && request.query.length <= 8000
-      && typeof request.user_id === 'string'
-      && request.user_id.length <= 256
+      && request.user_id === DEFAULT_USER_ID
       && typeof request.document_id === 'string'
       && request.document_id.length <= 1024
       && (
@@ -86,7 +87,7 @@ function readAwaitingRecovery() {
       draft: value.draft,
       request: {
         query: request.query,
-        user_id: request.user_id,
+        user_id: DEFAULT_USER_ID,
         document_id: request.document_id,
         // Older v1 recovery records did not include this additive field.
         grounding_required: request.grounding_required === true,
@@ -327,7 +328,7 @@ export default function Autonomous() {
       }))
       const resp = await runAutonomous({
         query: state.request.query,
-        user_id: state.request.user_id || 'default_user',
+        user_id: DEFAULT_USER_ID,
         document_id: state.request.document_id || null,
         grounding_required: state.request.grounding_required,
         idempotency_key: idempotencyKey,
@@ -455,19 +456,7 @@ export default function Autonomous() {
           />
         </div>
 
-        <div className="form-row form-row-inline">
-          <div>
-            <label htmlFor="autonomous-user">用户 ID</label>
-            <input
-              id="autonomous-user"
-              value={state.request.user_id}
-              onChange={e => {
-                startIdempotencyKey.current = null
-                setState(s => ({ ...s, request: { ...s.request, user_id: e.target.value } }))
-              }}
-              disabled={formLocked}
-            />
-          </div>
+        <div className="form-row">
           <div className="doc-input">
             <div className="field-label-row">
               <label htmlFor="autonomous-document">文档 ID（可选）</label>
