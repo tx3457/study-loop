@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sqlite3
 import sys
 import tempfile
@@ -514,18 +515,28 @@ class TestAdaptiveSessionStore(unittest.IsolatedAsyncioTestCase):
             captured.update(kwargs)
             return Connection()
 
-        fake_psycopg = types.SimpleNamespace(connect=connect)
+        fake_psycopg = types.ModuleType("psycopg")
+        fake_psycopg.connect = connect
+        fake_conninfo = types.ModuleType("psycopg.conninfo")
+        fake_conninfo.conninfo_to_dict = lambda _database_url: {}
         store = AdaptiveSessionStore(
             database_url="postgresql://example.invalid/studyloop",
             postgres_connect_timeout_seconds=7,
             postgres_lock_timeout_ms=1_234,
             postgres_statement_timeout_ms=5_678,
         )
-        with patch.dict(sys.modules, {"psycopg": fake_psycopg}):
+        with (
+            patch.dict(
+                sys.modules,
+                {"psycopg": fake_psycopg, "psycopg.conninfo": fake_conninfo},
+            ),
+            patch.dict(os.environ, {}, clear=True),
+        ):
             connection = store._connect()
             connection.close()
 
         self.assertEqual(captured["connect_timeout"], 7)
+        self.assertEqual(captured["tcp_user_timeout"], 30_000)
         self.assertEqual(
             captured["options"],
             "-c lock_timeout=1234ms -c statement_timeout=5678ms",

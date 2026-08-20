@@ -26,6 +26,13 @@ from services.adaptive_sessions import (
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
 
+_ADMIN_CONNECT_TIMEOUT_SECONDS = 5
+_ADMIN_LOCK_TIMEOUT_MS = 2_000
+_ADMIN_STATEMENT_TIMEOUT_MS = 5_000
+_FAST_LOCK_TIMEOUT_MS = 100
+_FAST_STATEMENT_TIMEOUT_MS = 100
+_TIMEOUT_ASSERTION_SECONDS = 6.0
+
 
 def _aggregate(
     session_id: str,
@@ -71,42 +78,97 @@ class TestPostgresAdaptiveSessionStore(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.now = [1_000.0]
         self.table_name = f"studyloop_adaptive_test_{uuid.uuid4().hex}"
+        self.schema_lock_id = uuid.uuid4().int & ((1 << 63) - 1)
         self.table_patch = patch.object(
             adaptive_sessions_module,
             "_TABLE",
             self.table_name,
         )
+        self.schema_lock_patch = patch.object(
+            adaptive_sessions_module,
+            "_POSTGRES_SCHEMA_LOCK_ID",
+            self.schema_lock_id,
+        )
         self.table_patch.start()
+        self.schema_lock_patch.start()
         self.store = self._new_store()
 
     def tearDown(self) -> None:
-        import psycopg
         from psycopg import sql
 
         try:
-            with psycopg.connect(
-                TEST_DATABASE_URL,
-                connect_timeout=5,
-            ) as connection:
+            with self._admin_connect() as connection:
                 connection.execute(
-                    sql.SQL("DROP TABLE IF EXISTS {}").format(
+                    sql.SQL("DROP TABLE IF EXISTS {} CASCADE").format(
                         sql.Identifier(self.table_name)
                     )
                 )
         finally:
-            self.table_patch.stop()
+            try:
+                self.schema_lock_patch.stop()
+            finally:
+                self.table_patch.stop()
 
-    def _new_store(self, *, max_count: int = 100) -> AdaptiveSessionStore:
+    @staticmethod
+    def _admin_connect():
+        import psycopg
+        from psycopg.conninfo import conninfo_to_dict
+
+        connection_parameters = conninfo_to_dict(TEST_DATABASE_URL)
+        if "options" in connection_parameters:
+            existing_options = (connection_parameters.get("options") or "").strip()
+        else:
+            existing_options = os.getenv("PGOPTIONS", "").strip()
+        bounded_options = (
+            f"-c lock_timeout={_ADMIN_LOCK_TIMEOUT_MS}ms "
+            f"-c statement_timeout={_ADMIN_STATEMENT_TIMEOUT_MS}ms"
+        )
+        return psycopg.connect(
+            TEST_DATABASE_URL,
+            connect_timeout=_ADMIN_CONNECT_TIMEOUT_SECONDS,
+            options=f"{existing_options} {bounded_options}".strip(),
+        )
+
+    def _new_store(
+        self,
+        *,
+        max_count: int = 100,
+        postgres_lock_timeout_ms: int = 5_000,
+        postgres_statement_timeout_ms: int = 15_000,
+    ) -> AdaptiveSessionStore:
         return AdaptiveSessionStore(
             database_url=TEST_DATABASE_URL,
             ttl_seconds=60,
             operation_lease_seconds=10,
             max_count=max_count,
             postgres_connect_timeout_seconds=5,
-            postgres_lock_timeout_ms=5_000,
-            postgres_statement_timeout_ms=15_000,
+            postgres_lock_timeout_ms=postgres_lock_timeout_ms,
+            postgres_statement_timeout_ms=postgres_statement_timeout_ms,
             clock=lambda: self.now[0],
         )
+
+    async def _assert_finishes_with_database_error_while_blocked(
+        self,
+        operation,
+        expected_exception: type[BaseException],
+        release_blocker,
+    ) -> None:
+        task = asyncio.create_task(operation)
+        done, _ = await asyncio.wait(
+            {task},
+            timeout=_TIMEOUT_ASSERTION_SECONDS,
+        )
+        completed_while_blocked = task in done
+        exception = task.exception() if completed_while_blocked else None
+
+        release_blocker()
+        await asyncio.gather(task, return_exceptions=True)
+
+        self.assertTrue(
+            completed_while_blocked,
+            "database operation ignored its configured timeout",
+        )
+        self.assertIsInstance(exception, expected_exception)
 
     async def test_two_connections_reopen_take_over_and_fence(self) -> None:
         session_id = f"adaptive-{uuid.uuid4().hex}"
@@ -175,10 +237,7 @@ class TestPostgresAdaptiveSessionStore(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(sum(decision.created for decision in decisions), 1)
-        logical_ids = {
-            decision.record.aggregate.adaptive_session_id
-            for decision in decisions
-        }
+        logical_ids = {decision.record.aggregate.adaptive_session_id for decision in decisions}
         self.assertEqual(len(logical_ids), 1)
         logical_id = logical_ids.pop()
         self.assertIn(logical_id, {first_id, second_id})
@@ -195,19 +254,110 @@ class TestPostgresAdaptiveSessionStore(unittest.IsolatedAsyncioTestCase):
             return_exceptions=True,
         )
 
-        successes = [
-            outcome
-            for outcome in outcomes
-            if not isinstance(outcome, BaseException)
-        ]
-        failures = [
-            outcome
-            for outcome in outcomes
-            if isinstance(outcome, BaseException)
-        ]
+        successes = [outcome for outcome in outcomes if not isinstance(outcome, BaseException)]
+        failures = [outcome for outcome in outcomes if isinstance(outcome, BaseException)]
         self.assertEqual(len(successes), 1)
         self.assertEqual(len(failures), 1)
         self.assertIsInstance(failures[0], AdaptiveSessionCapacityError)
+
+    async def test_schema_advisory_lock_times_out_then_initialization_retries(
+        self,
+    ) -> None:
+        import psycopg
+
+        store = self._new_store(
+            postgres_lock_timeout_ms=_FAST_LOCK_TIMEOUT_MS,
+            postgres_statement_timeout_ms=2_000,
+        )
+        with self._admin_connect() as blocker:
+            blocker.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (self.schema_lock_id,),
+            )
+            await self._assert_finishes_with_database_error_while_blocked(
+                store.inspect(f"missing-{uuid.uuid4().hex}"),
+                psycopg.errors.LockNotAvailable,
+                blocker.rollback,
+            )
+
+        self.assertIsNone(await store.inspect("missing-after-retry"))
+
+    async def test_session_row_lock_times_out_then_claim_retries(self) -> None:
+        import psycopg
+        from psycopg import sql
+
+        store = self._new_store(
+            postgres_lock_timeout_ms=_FAST_LOCK_TIMEOUT_MS,
+            postgres_statement_timeout_ms=2_000,
+        )
+        session_id = f"adaptive-{uuid.uuid4().hex}"
+        await store.create(_aggregate(session_id))
+        with self._admin_connect() as blocker:
+            row = blocker.execute(
+                sql.SQL("SELECT session_id FROM {} WHERE session_id = %s FOR UPDATE").format(
+                    sql.Identifier(self.table_name)
+                ),
+                (session_id,),
+            ).fetchone()
+            self.assertEqual(row, (session_id,))
+            await self._assert_finishes_with_database_error_while_blocked(
+                store.claim(session_id, "submit"),
+                psycopg.errors.LockNotAvailable,
+                blocker.rollback,
+            )
+
+        retry = await store.claim(session_id, "submit")
+        self.assertTrue(retry.claimed)
+
+    async def test_capacity_table_lock_times_out_then_create_retries(self) -> None:
+        import psycopg
+        from psycopg import sql
+
+        store = self._new_store(
+            postgres_lock_timeout_ms=_FAST_LOCK_TIMEOUT_MS,
+            postgres_statement_timeout_ms=2_000,
+        )
+        self.assertIsNone(await store.inspect("initialize-schema"))
+        with self._admin_connect() as blocker:
+            blocker.execute(
+                sql.SQL("LOCK TABLE {} IN SHARE ROW EXCLUSIVE MODE").format(
+                    sql.Identifier(self.table_name)
+                )
+            )
+            session_id = f"adaptive-{uuid.uuid4().hex}"
+            await self._assert_finishes_with_database_error_while_blocked(
+                store.create(_aggregate(session_id)),
+                psycopg.errors.LockNotAvailable,
+                blocker.rollback,
+            )
+
+        created = await store.create(_aggregate(session_id))
+        self.assertTrue(created.created)
+
+    async def test_statement_timeout_cancels_pg_sleep_then_store_retries(self) -> None:
+        import psycopg
+
+        store = self._new_store(
+            postgres_lock_timeout_ms=2_000,
+            postgres_statement_timeout_ms=_FAST_STATEMENT_TIMEOUT_MS,
+        )
+
+        def execute_slow_query() -> None:
+            with store._transaction() as connection:
+                connection.execute("SELECT pg_sleep(1)").fetchone()
+
+        task = asyncio.create_task(asyncio.to_thread(execute_slow_query))
+        done, _ = await asyncio.wait(
+            {task},
+            timeout=_TIMEOUT_ASSERTION_SECONDS,
+        )
+        completed = task in done
+        exception = task.exception() if completed else None
+        await asyncio.gather(task, return_exceptions=True)
+
+        self.assertTrue(completed, "pg_sleep ignored the configured statement timeout")
+        self.assertIsInstance(exception, psycopg.errors.QueryCanceled)
+        self.assertIsNone(await store.inspect("missing-after-statement-timeout"))
 
 
 if __name__ == "__main__":
