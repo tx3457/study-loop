@@ -36,3 +36,20 @@ os.environ["LANGSMITH_API_KEY"] = ""
 os.environ["LANGFUSE_TRACING_ENABLED"] = "false"
 os.environ["LANGFUSE_PUBLIC_KEY"] = ""
 os.environ["LANGFUSE_SECRET_KEY"] = ""
+
+
+def pytest_sessionfinish(session, exitstatus) -> None:  # noqa: ARG001
+    """Release cached Chroma systems before Windows removes temp directories."""
+    try:
+        from chromadb.api.client import SharedSystemClient
+
+        systems = list(
+            getattr(SharedSystemClient, "_identifier_to_system", {}).values()
+        )
+        for system in systems:
+            stop = getattr(system, "stop", None)
+            if callable(stop):
+                stop()
+        SharedSystemClient.clear_system_cache()
+    except (ImportError, AttributeError):
+        return
