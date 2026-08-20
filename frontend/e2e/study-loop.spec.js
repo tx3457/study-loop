@@ -5,6 +5,7 @@ const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}
 const AUTONOMOUS_SESSION_KEY = 'study-loop.autonomous.awaiting.v1'
 const QUIZ_RECOVERY_KEY = 'study-loop.quiz.recovery.v1'
 const ADAPTIVE_RECOVERY_KEY = 'study-loop.adaptive.recovery.v1'
+const LEARNING_PATH_RECOVERY_KEY = 'study-loop.learning-path.recovery.v1'
 const FUTURE_EXPIRES_AT = 4_102_444_800
 
 test.beforeEach(async ({ page }) => {
@@ -48,6 +49,13 @@ async function mockApi(page, handler) {
       // baseline; document-loading tests override it in their own handler.
       if (!response && request.method() === 'GET' && path === '/documents') {
         response = { body: { documents: [] } }
+      }
+      if (
+        !response
+        && request.method() === 'GET'
+        && path === '/learning-paths/current'
+      ) {
+        response = { body: null }
       }
 
       if (!response) {
@@ -135,6 +143,34 @@ function adaptiveRecovery(snapshot, pendingSubmit = null) {
     session: { adaptive_session_id: snapshot.adaptive_session_id },
     snapshot,
     pending_submit: pendingSubmit,
+  }
+}
+
+function learningPathResource({
+  id = 'lp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+  documentId = 'notes.md',
+  title = '检索学习路径',
+  stageTitle = '混合检索',
+  topics = ['BM25', 'RRF'],
+} = {}) {
+  return {
+    schema_version: 1,
+    learning_path_id: id,
+    user_id: 'default_user',
+    path: {
+      document_id: documentId,
+      title,
+      total_stages: 1,
+      stages: [{
+        stage: 1,
+        title: stageTitle,
+        topics,
+        description: '理解材料中的核心概念',
+        estimated_minutes: 20,
+      }],
+    },
+    created_at: 1_787_200_000,
+    expires_at: null,
   }
 }
 
@@ -274,29 +310,27 @@ test('learning flow document failures stay recoverable and distinct from empty d
   expect(unexpectedRequests).toEqual([])
 })
 
-test('learning path selection clears results and errors from the previous document', async ({ page }) => {
+test('learning path keeps the last durable result until a replacement succeeds', async ({ page }) => {
   const unexpectedRequests = await mockApi(page, ({ path, request }) => {
     if (request.method() === 'GET' && path === '/documents') {
       return { body: { documents: ['a.md', 'b.md'] } }
     }
-    if (request.method() === 'POST' && path === '/learning-path/a.md') {
-      return {
-        body: {
-          document_id: 'a.md',
-          title: 'A 文档专属路径',
-          total_stages: 1,
-          stages: [{
-            stage: 1,
-            title: '理解 A',
+    if (request.method() === 'POST' && path === '/learning-paths') {
+      const body = request.postDataJSON()
+      if (body.document_id === 'a.md') {
+        return {
+          body: learningPathResource({
+            id: 'lp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+            documentId: 'a.md',
+            title: 'A 文档专属路径',
+            stageTitle: '理解 A',
             topics: ['A'],
-            description: '只属于 A 文档的内容',
-            estimated_minutes: 10,
-          }],
-        },
+          }),
+        }
       }
-    }
-    if (request.method() === 'POST' && path === '/learning-path/b.md') {
-      return { status: 503, body: { detail: 'B 文档路径生成失败' } }
+      if (body.document_id === 'b.md') {
+        return { status: 503, body: { detail: 'B 文档路径生成失败' } }
+      }
     }
     return null
   })
@@ -309,13 +343,132 @@ test('learning path selection clears results and errors from the previous docume
   await expect(page.getByRole('heading', { name: 'A 文档专属路径' })).toBeVisible()
 
   await documentSelect.selectOption('b.md')
-  await expect(page.getByRole('heading', { name: 'A 文档专属路径' })).toHaveCount(0)
+  await expect(page.getByRole('heading', { name: 'A 文档专属路径' })).toBeVisible()
 
   await page.getByRole('button', { name: '生成学习路径' }).click()
   await expect(page.getByRole('alert')).toContainText('B 文档路径生成失败')
+  await expect(page.getByRole('heading', { name: 'A 文档专属路径' })).toBeVisible()
 
   await documentSelect.selectOption('a.md')
   await expect(page.getByRole('alert')).toHaveCount(0)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('learning path replacement response loss recovers the new intent instead of the stale URL', async ({ page }) => {
+  const first = learningPathResource({
+    id: 'lp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    documentId: 'a.md',
+    title: 'A 路径',
+    stageTitle: '学习 A',
+    topics: ['A'],
+  })
+  const replacement = learningPathResource({
+    id: 'lp_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    documentId: 'b.md',
+    title: 'B 路径',
+    stageTitle: '学习 B',
+    topics: ['B'],
+  })
+  const replacementAttempts = []
+  let allowReplacementSuccess = false
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['a.md', 'b.md'] } }
+    }
+    if (request.method() === 'POST' && path === '/learning-paths') {
+      const body = request.postDataJSON()
+      if (body.document_id === 'a.md') return { body: first }
+      replacementAttempts.push({
+        key: request.headers()['idempotency-key'],
+        body,
+      })
+      if (!allowReplacementSuccess) return { abort: 'failed' }
+      return { body: replacement }
+    }
+    return null
+  })
+
+  await page.goto('/learning-path')
+  const select = page.getByRole('combobox', { name: '学习文档' })
+  await select.selectOption('a.md')
+  await page.getByRole('button', { name: '生成学习路径' }).click()
+  await expect(page.getByRole('heading', { name: 'A 路径' })).toBeVisible()
+
+  await select.selectOption('b.md')
+  await page.getByRole('button', { name: '生成学习路径' }).click()
+  await expect(page.getByRole('alert')).toBeVisible()
+  expect(new URL(page.url()).searchParams.get('path_id')).toBeNull()
+  await expect(page.getByRole('heading', { name: 'A 路径' })).toBeVisible()
+
+  const attemptsBeforeReload = replacementAttempts.length
+  expect(attemptsBeforeReload).toBeGreaterThanOrEqual(1)
+  allowReplacementSuccess = true
+  await page.reload()
+  await expect(page.getByRole('heading', { name: 'B 路径' })).toBeVisible()
+  await expect(page).toHaveURL(new RegExp(`path_id=${replacement.learning_path_id}`))
+  expect(replacementAttempts).toHaveLength(attemptsBeforeReload + 1)
+  for (const attempt of replacementAttempts) {
+    expect(attempt).toEqual(replacementAttempts[0])
+  }
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('learning path browser navigation cancels an in-flight replacement and loads the URL target', async ({ page }) => {
+  const first = learningPathResource({
+    id: 'lp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    documentId: 'a.md',
+    title: 'A 路径',
+  })
+  const target = learningPathResource({
+    id: 'lp_cccccccccccccccccccccccccccccccc',
+    documentId: 'c.md',
+    title: 'C 路径',
+  })
+  const lateReplacement = learningPathResource({
+    id: 'lp_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    documentId: 'b.md',
+    title: 'B 路径',
+  })
+  let releaseReplacement
+  const replacementGate = new Promise(resolve => { releaseReplacement = resolve })
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['a.md', 'b.md', 'c.md'] } }
+    }
+    if (
+      request.method() === 'GET'
+      && path === `/learning-paths/${first.learning_path_id}`
+    ) {
+      return { body: first }
+    }
+    if (
+      request.method() === 'GET'
+      && path === `/learning-paths/${target.learning_path_id}`
+    ) {
+      return { body: target }
+    }
+    if (request.method() === 'POST' && path === '/learning-paths') {
+      await replacementGate
+      return { body: lateReplacement }
+    }
+    return null
+  })
+
+  await page.goto(`/learning-path?path_id=${first.learning_path_id}`)
+  await expect(page.getByRole('heading', { name: 'A 路径' })).toBeVisible()
+  await page.getByRole('combobox', { name: '学习文档' }).selectOption('b.md')
+  await page.getByRole('button', { name: '生成学习路径' }).click()
+
+  await page.evaluate(pathId => {
+    history.pushState({}, '', `/learning-path?path_id=${pathId}`)
+    dispatchEvent(new PopStateEvent('popstate'))
+  }, target.learning_path_id)
+  await expect(page.getByRole('heading', { name: 'C 路径' })).toBeVisible()
+
+  releaseReplacement()
+  await page.waitForTimeout(100)
+  await expect(page.getByRole('heading', { name: 'C 路径' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'B 路径' })).toHaveCount(0)
   expect(unexpectedRequests).toEqual([])
 })
 
@@ -326,20 +479,9 @@ test('learning path stage opens a refresh-safe quiz preset without auto-starting
     if (request.method() === 'GET' && path === '/documents') {
       return { body: { documents: ['notes.md'] } }
     }
-    if (request.method() === 'POST' && path === '/learning-path/notes.md') {
+    if (request.method() === 'POST' && path === '/learning-paths') {
       return {
-        body: {
-          document_id: 'notes.md',
-          title: '检索学习路径',
-          total_stages: 1,
-          stages: [{
-            stage: 1,
-            title: '混合检索',
-            topics: ['BM25', 'RRF'],
-            description: '理解稀疏检索与融合排序',
-            estimated_minutes: 20,
-          }],
-        },
+        body: learningPathResource(),
       }
     }
     if (request.method() === 'POST' && path === '/session/start') {
@@ -436,6 +578,180 @@ test('learning path stage opens a refresh-safe quiz preset without auto-starting
   expect(startBodies).toHaveLength(1)
   expect(unexpectedRequests).toEqual([])
   expect(problems).toEqual([])
+})
+
+test('learning path reuses one create key after response loss and then reloads by id', async ({ page }) => {
+  const resource = learningPathResource()
+  const createAttempts = []
+  let reads = 0
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (request.method() === 'POST' && path === '/learning-paths') {
+      createAttempts.push({
+        key: request.headers()['idempotency-key'],
+        body: request.postDataJSON(),
+      })
+      if (createAttempts.length === 1) return { abort: 'failed' }
+      return { body: resource }
+    }
+    if (
+      request.method() === 'GET'
+      && path === `/learning-paths/${resource.learning_path_id}`
+    ) {
+      reads += 1
+      return { body: resource }
+    }
+    return null
+  })
+
+  await page.goto('/learning-path')
+  await page.getByRole('combobox', { name: '学习文档' }).selectOption('notes.md')
+  await page.getByRole('button', { name: '生成学习路径' }).click()
+  await expect(page.getByRole('alert')).toBeVisible()
+
+  const pending = await page.evaluate(
+    key => JSON.parse(sessionStorage.getItem(key)),
+    LEARNING_PATH_RECOVERY_KEY,
+  )
+  expect(pending).toMatchObject({
+    intent: { user_id: 'default_user', document_id: 'notes.md' },
+    learning_path_id: null,
+  })
+  expect(pending.start_idempotency_key).toMatch(UUID_V4_PATTERN)
+
+  await page.reload()
+  await expect(page.getByRole('heading', { name: '检索学习路径' })).toBeVisible()
+  await expect(page).toHaveURL(new RegExp(`path_id=${resource.learning_path_id}`))
+  expect(createAttempts).toHaveLength(2)
+  expect(createAttempts[0]).toEqual(createAttempts[1])
+  expect(createAttempts[0].body).toEqual({
+    document_id: 'notes.md',
+    user_id: 'default_user',
+  })
+
+  const bound = await page.evaluate(
+    key => JSON.parse(sessionStorage.getItem(key)),
+    LEARNING_PATH_RECOVERY_KEY,
+  )
+  expect(bound.learning_path_id).toBe(resource.learning_path_id)
+
+  await page.reload()
+  await expect(page.getByRole('heading', { name: '检索学习路径' })).toBeVisible()
+  expect(createAttempts).toHaveLength(2)
+  expect(reads).toBe(1)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('learning path discovers the latest server record without browser recovery state', async ({ page }) => {
+  const resource = learningPathResource()
+  let createCount = 0
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (request.method() === 'GET' && path === '/learning-paths/current') {
+      return { body: resource }
+    }
+    if (request.method() === 'POST' && path === '/learning-paths') {
+      createCount += 1
+    }
+    return null
+  })
+
+  await page.goto('/learning-path')
+  await expect(page.getByRole('heading', { name: '检索学习路径' })).toBeVisible()
+  await expect(page).toHaveURL(new RegExp(`path_id=${resource.learning_path_id}`))
+  expect(createCount).toBe(0)
+  expect(
+    await page.evaluate(key => sessionStorage.getItem(key), LEARNING_PATH_RECOVERY_KEY)
+  ).toBeNull()
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('learning path ignores a late GET after browser history returns to the visible record', async ({ page }) => {
+  const first = learningPathResource({
+    id: 'lp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    title: 'A 路径',
+  })
+  const late = learningPathResource({
+    id: 'lp_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    title: 'B 路径',
+  })
+  let releaseLate
+  const lateGate = new Promise(resolve => { releaseLate = resolve })
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (
+      request.method() === 'GET'
+      && path === `/learning-paths/${first.learning_path_id}`
+    ) {
+      return { body: first }
+    }
+    if (
+      request.method() === 'GET'
+      && path === `/learning-paths/${late.learning_path_id}`
+    ) {
+      await lateGate
+      return { body: late }
+    }
+    return null
+  })
+
+  await page.goto(`/learning-path?path_id=${first.learning_path_id}`)
+  await expect(page.getByRole('heading', { name: 'A 路径' })).toBeVisible()
+  await page.evaluate(pathId => {
+    history.pushState({}, '', `/learning-path?path_id=${pathId}`)
+    dispatchEvent(new PopStateEvent('popstate'))
+  }, late.learning_path_id)
+  await expect(page.getByText('正在恢复学习路径')).toBeVisible()
+
+  await page.goBack()
+  await expect(page).toHaveURL(new RegExp(`path_id=${first.learning_path_id}`))
+  await expect(page.getByRole('heading', { name: 'A 路径' })).toBeVisible()
+  await expect(page.getByText('正在恢复学习路径')).toHaveCount(0)
+
+  releaseLate()
+  await page.waitForTimeout(100)
+  await expect(page.getByRole('heading', { name: 'A 路径' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'B 路径' })).toHaveCount(0)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('learning path remains readable after material deletion but cannot start practice', async ({ page }) => {
+  const resource = learningPathResource()
+  const recovery = {
+    schema_version: 1,
+    intent: { user_id: 'default_user', document_id: 'notes.md' },
+    start_idempotency_key: 'learning-path-start-key-1',
+    learning_path_id: resource.learning_path_id,
+  }
+  await page.addInitScript(({ key, value }) => {
+    sessionStorage.setItem(key, JSON.stringify(value))
+  }, { key: LEARNING_PATH_RECOVERY_KEY, value: recovery })
+
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: [] } }
+    }
+    if (
+      request.method() === 'GET'
+      && path === `/learning-paths/${resource.learning_path_id}`
+    ) {
+      return { body: resource }
+    }
+    return null
+  })
+
+  await page.goto(`/learning-path?path_id=${resource.learning_path_id}`)
+  await expect(page.getByRole('heading', { name: '检索学习路径' })).toBeVisible()
+  await expect(page.getByText(/原材料已删除.*仅供查看/)).toBeVisible()
+  await expect(page.getByRole('button', { name: '练习阶段 1：混合检索' }))
+    .toBeDisabled()
+  expect(unexpectedRequests).toEqual([])
 })
 
 test('quiz requires an explicit choice when a new launch conflicts with recovery', async ({ page }) => {

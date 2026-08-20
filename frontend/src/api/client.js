@@ -90,6 +90,35 @@ export async function generateLearningPath(documentId) {
   })
 }
 
+/** 创建可跨刷新恢复的学习路径资源。 */
+export async function createLearningPathResource({
+  document_id,
+  user_id = 'default_user',
+  idempotency_key,
+}) {
+  return request('/learning-paths', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(idempotency_key ? { 'Idempotency-Key': idempotency_key } : {}),
+    },
+    body: JSON.stringify({ document_id, user_id }),
+  })
+}
+
+/** 读取服务端持久化的学习路径资源。 */
+export async function getLearningPathResource(learningPathId) {
+  return request(`/learning-paths/${encodeURIComponent(learningPathId)}`)
+}
+
+/** 读取默认用户最近创建的学习路径；没有记录时返回 null。 */
+export async function getCurrentLearningPathResource(documentId = null) {
+  const query = documentId
+    ? `?${new URLSearchParams({ document_id: documentId })}`
+    : ''
+  return request(`/learning-paths/current${query}`)
+}
+
 /* ═══════════════════════════════════════════════════════════════════
    Quiz Session
    ═══════════════════════════════════════════════════════════════════ */

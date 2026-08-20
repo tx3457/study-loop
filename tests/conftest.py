@@ -14,6 +14,7 @@ os.environ["CHROMA_DIR"] = _chroma_tmp.name
 os.environ["MEMORY_SNAPSHOT_PATH"] = str(Path(_state_tmp.name) / "memory.json")
 os.environ["IDEMPOTENCY_DB_PATH"] = str(Path(_state_tmp.name) / "idempotency.sqlite3")
 os.environ["QUIZ_SESSION_DB_PATH"] = str(Path(_state_tmp.name) / "quiz-sessions.sqlite3")
+os.environ["LEARNING_PATH_DB_PATH"] = str(Path(_state_tmp.name) / "learning-paths.sqlite3")
 os.environ["DATABASE_URL"] = ""
 os.environ["LLM_API_KEY"] = "test"
 os.environ["LLM_BASE_URL"] = "http://127.0.0.1:9/v1"

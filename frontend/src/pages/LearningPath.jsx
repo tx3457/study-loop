@@ -1,72 +1,393 @@
-import { useState, useEffect, useCallback } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 import DocumentPrerequisite from '../components/DocumentPrerequisite'
-import { createIdempotencyKey, getDocuments, generateLearningPath } from '../api/client'
+import {
+  createIdempotencyKey,
+  createLearningPathResource,
+  getCurrentLearningPathResource,
+  getDocuments,
+  getLearningPathResource,
+} from '../api/client'
+import {
+  bindLearningPathRecovery,
+  clearLearningPathRecovery,
+  createLearningPathRecovery,
+  isLearningPathId,
+  normalizeLearningPathResource,
+  readLearningPathRecovery,
+  writeLearningPathRecovery,
+} from '../state/learningPathRecovery'
 import './LearningPath.css'
 
-/* ═══════════════════════════════════════════════════════════════════
-   Learning Path Page — AI 学习路径生成 + 展示
-   ═══════════════════════════════════════════════════════════════════ */
+function recoveryDescriptor(queryPathId) {
+  const recovery = readLearningPathRecovery()
+  if (queryPathId) {
+    return {
+      kind: 'get',
+      identity: `get:${queryPathId}`,
+      pathId: queryPathId,
+      recovery: recovery?.learning_path_id === queryPathId ? recovery : null,
+    }
+  }
+  if (!recovery) {
+    return {
+      kind: 'current',
+      identity: 'current:default_user',
+      recovery: null,
+    }
+  }
+  if (recovery.learning_path_id) {
+    return {
+      kind: 'get',
+      identity: `get:${recovery.learning_path_id}`,
+      pathId: recovery.learning_path_id,
+      recovery,
+    }
+  }
+  return {
+    kind: 'create',
+    identity: `create:${recovery.start_idempotency_key}`,
+    recovery,
+  }
+}
+
+function normalizeExpectedResource(
+  value,
+  expectedDocumentId = null,
+  expectedLearningPathId = null,
+) {
+  const resource = normalizeLearningPathResource(value)
+  if (!resource || (
+    expectedDocumentId
+    && resource.path.document_id !== expectedDocumentId
+  ) || (
+    expectedLearningPathId
+    && resource.learning_path_id !== expectedLearningPathId
+  )) {
+    throw new Error('服务端返回的学习路径格式无效，请稍后重试')
+  }
+  return resource
+}
 
 export default function LearningPath() {
   const navigate = useNavigate()
+  const location = useLocation()
+  const queryPathId = new URLSearchParams(location.search).get('path_id')
+  const queryPathIdValid = queryPathId == null || isLearningPathId(queryPathId)
+
   const [documents, setDocuments] = useState([])
   const [selectedDoc, setSelectedDoc] = useState('')
-  const [path, setPath] = useState(null)
-  const [loading, setLoading] = useState(false)
-  const [docsLoading, setDocsLoading] = useState(true)
+  const [resource, setResource] = useState(null)
+  const [generating, setGenerating] = useState(false)
+  const [recovering, setRecovering] = useState(false)
+  const [docsStatus, setDocsStatus] = useState('loading')
   const [docsError, setDocsError] = useState(null)
   const [error, setError] = useState(null)
+  const [canRetryRecovery, setCanRetryRecovery] = useState(false)
+  const [recoveryNonce, setRecoveryNonce] = useState(0)
 
-  const loadDocuments = useCallback(async () => {
-    setDocsLoading(true)
-    setDocsError(null)
-    try {
-      const data = await getDocuments()
-      const nextDocuments = data.documents || []
-      setDocuments(nextDocuments)
-      setSelectedDoc(current => nextDocuments.includes(current) ? current : '')
-    } catch (err) {
-      setDocsError(err.message)
-    } finally {
-      setDocsLoading(false)
+  const mountedRef = useRef(false)
+  const operationEpochRef = useRef(0)
+  const documentsEpochRef = useRef(0)
+  const documentsFlightRef = useRef(null)
+  const recoveryFlightRef = useRef(null)
+  const actionInFlightRef = useRef(false)
+  const resourceRef = useRef(null)
+
+  const publishResource = useCallback((nextResource) => {
+    resourceRef.current = nextResource
+    setResource(nextResource)
+    setSelectedDoc(nextResource.path.document_id)
+  }, [])
+
+  useEffect(() => {
+    resourceRef.current = resource
+  }, [resource])
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      queueMicrotask(() => {
+        if (!mountedRef.current) {
+          operationEpochRef.current += 1
+          documentsEpochRef.current += 1
+        }
+      })
     }
   }, [])
 
-  useEffect(() => { loadDocuments() }, [loadDocuments])
+  const loadDocuments = useCallback(async () => {
+    const epoch = ++documentsEpochRef.current
+    setDocsStatus('loading')
+    setDocsError(null)
+
+    let flight = documentsFlightRef.current
+    if (!flight) {
+      const promise = getDocuments()
+      flight = { promise }
+      documentsFlightRef.current = flight
+      promise.finally(() => {
+        if (documentsFlightRef.current === flight) {
+          documentsFlightRef.current = null
+        }
+      }).catch(() => {})
+    }
+
+    try {
+      const data = await flight.promise
+      if (!mountedRef.current || epoch !== documentsEpochRef.current) return
+      if (!data || !Array.isArray(data.documents)) {
+        throw new Error('文档列表响应格式无效')
+      }
+      const nextDocuments = data.documents.filter(doc => typeof doc === 'string')
+      setDocuments(nextDocuments)
+      setSelectedDoc(current => (
+        current || resourceRef.current?.path.document_id || ''
+      ))
+      setDocsStatus('ready')
+    } catch (err) {
+      if (!mountedRef.current || epoch !== documentsEpochRef.current) return
+      setDocuments([])
+      setDocsStatus('error')
+      setDocsError(err.message)
+    }
+  }, [])
+
+  useEffect(() => {
+    loadDocuments()
+  }, [loadDocuments])
+
+  useEffect(() => {
+    if (!queryPathIdValid) {
+      operationEpochRef.current += 1
+      actionInFlightRef.current = false
+      setGenerating(false)
+      setError('学习路径链接无效')
+      setCanRetryRecovery(false)
+      setRecovering(false)
+      return
+    }
+    if (actionInFlightRef.current) {
+      if (!queryPathId) {
+        setRecovering(false)
+        return
+      }
+      operationEpochRef.current += 1
+      actionInFlightRef.current = false
+      setGenerating(false)
+    }
+    if (queryPathId && resourceRef.current?.learning_path_id === queryPathId) {
+      setRecovering(false)
+      return
+    }
+
+    const descriptor = recoveryDescriptor(queryPathId)
+    let active = true
+    const epoch = ++operationEpochRef.current
+    setRecovering(true)
+    setError(null)
+    setCanRetryRecovery(false)
+
+    let flight = recoveryFlightRef.current
+    if (!flight || flight.identity !== descriptor.identity) {
+      const promise = descriptor.kind === 'get'
+        ? getLearningPathResource(descriptor.pathId)
+        : descriptor.kind === 'current'
+          ? getCurrentLearningPathResource()
+          : createLearningPathResource({
+          ...descriptor.recovery.intent,
+          idempotency_key: descriptor.recovery.start_idempotency_key,
+        })
+      flight = { identity: descriptor.identity, promise }
+      recoveryFlightRef.current = flight
+      promise.finally(() => {
+        if (recoveryFlightRef.current === flight) {
+          recoveryFlightRef.current = null
+        }
+      }).catch(() => {})
+    }
+
+    flight.promise.then((value) => {
+      if (!active || !mountedRef.current || epoch !== operationEpochRef.current) return
+      if (descriptor.kind === 'current' && value == null) {
+        setCanRetryRecovery(false)
+        setError(null)
+        return
+      }
+      const expectedDocumentId = descriptor.recovery?.intent.document_id || null
+      const expectedLearningPathId = descriptor.kind === 'get'
+        ? descriptor.pathId
+        : null
+      const nextResource = normalizeExpectedResource(
+        value,
+        expectedDocumentId,
+        expectedLearningPathId,
+      )
+      const current = readLearningPathRecovery()
+      if (
+        current
+        && descriptor.recovery
+        && current.start_idempotency_key
+          === descriptor.recovery.start_idempotency_key
+      ) {
+        const bound = bindLearningPathRecovery(
+          current,
+          nextResource.learning_path_id,
+        )
+        if (!bound || !writeLearningPathRecovery(bound)) {
+          throw new Error('学习路径已恢复，但浏览器无法保存恢复指针')
+        }
+      }
+      publishResource(nextResource)
+      setCanRetryRecovery(false)
+      setError(null)
+      if (queryPathId !== nextResource.learning_path_id) {
+        const search = new URLSearchParams({
+          path_id: nextResource.learning_path_id,
+        })
+        navigate(`${location.pathname}?${search}`, { replace: true })
+      }
+    }).catch((err) => {
+      if (!active || !mountedRef.current || epoch !== operationEpochRef.current) return
+      const terminal = err.status === 404 || err.status === 410
+        || (err.status === 409 && err.reason === 'payload_mismatch')
+      if (terminal && descriptor.recovery) {
+        clearLearningPathRecovery(
+          descriptor.recovery.start_idempotency_key,
+        )
+      }
+      if (terminal && queryPathId) {
+        navigate(location.pathname, { replace: true })
+      }
+      if (terminal) {
+        resourceRef.current = null
+        setResource(null)
+      }
+      setCanRetryRecovery(!terminal)
+      setError(terminal
+        ? '这条学习路径无法继续恢复，请重新生成'
+        : err.message)
+    }).finally(() => {
+      if (active && mountedRef.current && epoch === operationEpochRef.current) {
+        setRecovering(false)
+      }
+    })
+    return () => {
+      active = false
+    }
+  }, [
+    location.pathname,
+    navigate,
+    publishResource,
+    queryPathId,
+    queryPathIdValid,
+    recoveryNonce,
+  ])
 
   const handleDocumentChange = (event) => {
     setSelectedDoc(event.target.value)
-    setPath(null)
     setError(null)
   }
 
   const handleGenerate = async () => {
-    if (!selectedDoc) return
-    setLoading(true)
+    if (
+      !selectedDoc
+      || docsStatus !== 'ready'
+      || !documents.includes(selectedDoc)
+      || actionInFlightRef.current
+    ) return
+
+    let recovery = readLearningPathRecovery()
+    if (
+      !recovery
+      || recovery.learning_path_id
+      || recovery.intent.document_id !== selectedDoc
+    ) {
+      try {
+        recovery = createLearningPathRecovery(
+          selectedDoc,
+          createIdempotencyKey(),
+        )
+      } catch (err) {
+        setError(err.message)
+        return
+      }
+    }
+    if (!recovery || !writeLearningPathRecovery(recovery)) {
+      setError('浏览器无法保存恢复信息，尚未开始生成')
+      return
+    }
+
+    const epoch = ++operationEpochRef.current
+    actionInFlightRef.current = true
+    setGenerating(true)
     setError(null)
-    setPath(null)
+    setCanRetryRecovery(false)
+    if (queryPathId) {
+      navigate(location.pathname, { replace: true })
+    }
 
     try {
-      const result = await generateLearningPath(selectedDoc)
-      setPath(result)
+      const value = await createLearningPathResource({
+        ...recovery.intent,
+        idempotency_key: recovery.start_idempotency_key,
+      })
+      if (!mountedRef.current || epoch !== operationEpochRef.current) return
+      const nextResource = normalizeExpectedResource(
+        value,
+        recovery.intent.document_id,
+      )
+      const current = readLearningPathRecovery()
+      if (current?.start_idempotency_key !== recovery.start_idempotency_key) {
+        return
+      }
+      const bound = bindLearningPathRecovery(
+        current,
+        nextResource.learning_path_id,
+      )
+      if (!bound || !writeLearningPathRecovery(bound)) {
+        throw new Error('学习路径已生成，但浏览器无法保存恢复指针')
+      }
+      actionInFlightRef.current = false
+      publishResource(nextResource)
+      const search = new URLSearchParams({
+        path_id: nextResource.learning_path_id,
+      })
+      navigate(`${location.pathname}?${search}`, { replace: true })
     } catch (err) {
-      setError(err.message)
+      if (!mountedRef.current || epoch !== operationEpochRef.current) return
+      const mismatch = err.status === 409 && err.reason === 'payload_mismatch'
+      if (mismatch) {
+        clearLearningPathRecovery(recovery.start_idempotency_key)
+      }
+      setCanRetryRecovery(!mismatch)
+      setError(mismatch
+        ? '恢复请求与服务端记录不一致，请重新点击生成'
+        : err.message)
     } finally {
-      setLoading(false)
+      actionInFlightRef.current = false
+      if (mountedRef.current && epoch === operationEpochRef.current) {
+        setGenerating(false)
+      }
     }
   }
 
-  const totalMinutes = path?.stages.reduce((sum, s) => sum + s.estimated_minutes, 0) || 0
+  const path = resource?.path || null
+  const totalMinutes = path?.stages.reduce(
+    (sum, stage) => sum + stage.estimated_minutes,
+    0,
+  ) || 0
+  const materialStatus = !path || docsStatus === 'loading'
+    ? 'unknown'
+    : docsStatus === 'error'
+      ? 'unknown'
+      : documents.includes(path.document_id) ? 'available' : 'deleted'
+  const busy = generating || recovering
 
   const handlePracticeStage = (stage) => {
-    const topics = Array.isArray(stage.topics)
-      ? stage.topics
-        .filter(topic => typeof topic === 'string')
-        .map(topic => topic.trim())
-        .filter(Boolean)
-      : []
-    const topic = (topics.join('、') || stage.title || '').trim()
+    if (materialStatus !== 'available') return
+    const topic = (stage.topics.join('、') || stage.title).trim()
     const params = new URLSearchParams({
       document_id: path.document_id,
       topic,
@@ -81,14 +402,12 @@ export default function LearningPath() {
 
   return (
     <div className="lp-page">
-      {/* ── 页面标题 ──────────────────────────────────────────────────── */}
       <header className="page-header">
         <h1 className="page-title">学习路径</h1>
         <p className="page-desc">选择文档，AI 将分析内容并生成分阶段学习计划。</p>
       </header>
 
-      {/* ── 文档选择 + 生成按钮 ────────────────────────────────────────── */}
-      {docsError ? (
+      {docsStatus === 'error' ? (
         <div className="load-error-state" role="alert">
           <p className="state-title">无法加载文档列表</p>
           <p className="state-desc">{docsError}</p>
@@ -96,7 +415,7 @@ export default function LearningPath() {
             重新加载文档
           </button>
         </div>
-      ) : !docsLoading && documents.length === 0 ? (
+      ) : docsStatus === 'ready' && documents.length === 0 && !path ? (
         <DocumentPrerequisite description="生成学习路径前，需要先上传一份已经完成解析的学习材料。" />
       ) : (
         <div className="lp-controls">
@@ -105,11 +424,16 @@ export default function LearningPath() {
             aria-label="学习文档"
             value={selectedDoc}
             onChange={handleDocumentChange}
-            disabled={docsLoading || loading}
+            disabled={docsStatus === 'loading' || busy}
           >
             <option value="">
-              {docsLoading ? '加载文档列表...' : '-- 选择文档 --'}
+              {docsStatus === 'loading' ? '加载文档列表...' : '-- 选择文档 --'}
             </option>
+            {path && !documents.includes(path.document_id) && (
+              <option value={path.document_id} disabled>
+                {path.document_id}（材料已删除）
+              </option>
+            )}
             {documents.map(doc => (
               <option key={doc} value={doc}>{doc}</option>
             ))}
@@ -119,43 +443,56 @@ export default function LearningPath() {
             type="button"
             className="lp-generate-btn"
             onClick={handleGenerate}
-            disabled={!selectedDoc || loading}
+            disabled={
+              !selectedDoc
+              || docsStatus !== 'ready'
+              || !documents.includes(selectedDoc)
+              || busy
+            }
           >
-            {loading ? (
-              <>
-                <span className="btn-spinner" />
-                AI 分析中...
-              </>
-            ) : (
-              <>
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
-                </svg>
-                生成学习路径
-              </>
-            )}
+            {generating ? (
+              <><span className="btn-spinner" />AI 分析中...</>
+            ) : '生成学习路径'}
           </button>
         </div>
       )}
 
-      {/* ── 错误 ──────────────────────────────────────────────────────── */}
       {error && (
         <div className="error-banner" role="alert">
           <span>&#9888;</span>
           <span>{error}</span>
-          <button className="error-close" aria-label="关闭错误提示" onClick={() => setError(null)}>&times;</button>
+          {canRetryRecovery && (
+            <button
+              type="button"
+              className="error-retry"
+              onClick={() => setRecoveryNonce(value => value + 1)}
+            >
+              重试恢复
+            </button>
+          )}
+          <button
+            type="button"
+            className="error-close"
+            aria-label="关闭错误提示"
+            onClick={() => setError(null)}
+          >
+            &times;
+          </button>
         </div>
       )}
 
-      {/* ── 加载骨架 ──────────────────────────────────────────────────── */}
-      {loading && (
+      {busy && (
         <div className="lp-skeleton" aria-busy="true">
           <div className="lp-loading-copy" role="status" aria-live="polite">
-            <strong>正在整理学习路径</strong>
-            <span>正在分析材料、检索重点并组织阶段，通常需要约 1 分钟。</span>
+            <strong>{recovering ? '正在恢复学习路径' : '正在整理学习路径'}</strong>
+            <span>
+              {recovering
+                ? '正在读取服务端保存的路径。'
+                : '正在分析材料、检索重点并组织阶段，通常需要约 1 分钟。'}
+            </span>
           </div>
-          {[1, 2, 3].map(i => (
-            <div key={i} className="skeleton-stage" style={{ animationDelay: `${i * 0.15}s` }}>
+          {[1, 2, 3].map(index => (
+            <div key={index} className="skeleton-stage">
               <div className="skeleton-circle" />
               <div className="skeleton-lines">
                 <div className="skeleton-line w60" />
@@ -167,53 +504,42 @@ export default function LearningPath() {
         </div>
       )}
 
-      {/* ── 学习路径展示 ──────────────────────────────────────────────── */}
-      {path && !loading && (
+      {path && !busy && (
         <div className="lp-result">
-          {/* 路径标题 */}
+          {materialStatus !== 'available' && (
+            <div className="lp-retained-note" role="status">
+              {materialStatus === 'deleted'
+                ? '原材料已删除；这条学习路径作为学习记录保留，仅供查看。'
+                : '暂时无法确认原材料状态；恢复文档列表前不能开始阶段练习。'}
+            </div>
+          )}
           <div className="lp-header-card">
             <h2 className="lp-path-title">{path.title}</h2>
             <div className="lp-meta-row">
-              <span className="lp-meta-item">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
-                {path.total_stages} 个阶段
-              </span>
-              <span className="lp-meta-item">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                预计 {totalMinutes} 分钟
-              </span>
+              <span className="lp-meta-item">材料：{path.document_id}</span>
+              <span className="lp-meta-item">{path.total_stages} 个阶段</span>
+              <span className="lp-meta-item">预计 {totalMinutes} 分钟</span>
             </div>
           </div>
 
-          {/* 时间线 */}
           <div className="lp-timeline">
-            {path.stages.map((stage, idx) => (
-              <div
-                key={stage.stage}
-                className="timeline-item"
-                style={{ animationDelay: `${idx * 0.1}s` }}
-              >
-                {/* 左侧节点 + 连线 */}
+            {path.stages.map((stage, index) => (
+              <div key={stage.stage} className="timeline-item">
                 <div className="timeline-track">
                   <div className="timeline-node">
                     <span className="node-number">{stage.stage}</span>
                   </div>
-                  {idx < path.stages.length - 1 && <div className="timeline-line" />}
+                  {index < path.stages.length - 1 && <div className="timeline-line" />}
                 </div>
-
-                {/* 右侧卡片 */}
                 <div className="timeline-card">
                   <div className="tc-header">
                     <h3 className="tc-title">{stage.title}</h3>
-                    <span className="tc-time">
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-                      {stage.estimated_minutes} min
-                    </span>
+                    <span className="tc-time">{stage.estimated_minutes} min</span>
                   </div>
                   <p className="tc-desc">{stage.description}</p>
                   <div className="tc-topics">
-                    {stage.topics.map((topic, i) => (
-                      <span key={i} className="topic-tag">{topic}</span>
+                    {stage.topics.map(topic => (
+                      <span key={topic} className="topic-tag">{topic}</span>
                     ))}
                   </div>
                   <div className="tc-actions">
@@ -222,9 +548,9 @@ export default function LearningPath() {
                       className="tc-practice-btn"
                       aria-label={`练习阶段 ${stage.stage}：${stage.title}`}
                       onClick={() => handlePracticeStage(stage)}
+                      disabled={materialStatus !== 'available'}
                     >
-                      练习本阶段
-                      <span aria-hidden="true">→</span>
+                      {materialStatus === 'available' ? '练习本阶段 →' : '仅供查看'}
                     </button>
                   </div>
                 </div>

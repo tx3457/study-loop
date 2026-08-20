@@ -1,0 +1,135 @@
+"""Optional live PostgreSQL contracts for immutable Learning Path records."""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import os
+import unittest
+import uuid
+from unittest.mock import patch
+
+from models.learning_path import LearningPath
+import services.learning_path_store as store_module
+from services.learning_path_store import LearningPathStore
+
+
+TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
+
+
+def _path(title: str) -> LearningPath:
+    return LearningPath.model_validate(
+        {
+            "document_id": "notes.md",
+            "title": title,
+            "total_stages": 1,
+            "stages": [
+                {
+                    "stage": 1,
+                    "title": "PostgreSQL 阶段",
+                    "topics": ["持久化"],
+                    "description": "验证跨连接恢复与唯一键并发。",
+                    "estimated_minutes": 15,
+                }
+            ],
+        }
+    )
+
+
+def _fingerprint() -> str:
+    canonical = json.dumps(
+        {"operation": "postgres-contract", "document_id": "notes.md"},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+@unittest.skipUnless(TEST_DATABASE_URL, "TEST_DATABASE_URL is not configured")
+class TestPostgresLearningPathStore(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        # Keep both derived index names below PostgreSQL's 63-byte identifier
+        # limit so this contract really creates and exercises both indexes.
+        self.table_name = f"sl_lp_{uuid.uuid4().hex[:20]}"
+        self.table_patch = patch.object(store_module, "_TABLE", self.table_name)
+        self.table_patch.start()
+        self.store = self._new_store()
+
+    def tearDown(self) -> None:
+        import psycopg
+        from psycopg import sql
+
+        try:
+            with psycopg.connect(
+                TEST_DATABASE_URL,
+                connect_timeout=5,
+            ) as connection:
+                connection.execute(
+                    sql.SQL("DROP TABLE IF EXISTS {}").format(
+                        sql.Identifier(self.table_name)
+                    )
+                )
+        finally:
+            self.table_patch.stop()
+
+    @staticmethod
+    def _new_store() -> LearningPathStore:
+        return LearningPathStore(
+            database_url=TEST_DATABASE_URL,
+            postgres_connect_timeout_seconds=5,
+            postgres_lock_timeout_ms=5_000,
+            postgres_statement_timeout_ms=15_000,
+        )
+
+    async def test_reopen_and_current_work_across_connections(self) -> None:
+        key = f"learning-path-{uuid.uuid4().hex}"
+        created = await self.store.create(
+            "default_user",
+            "notes.md",
+            _path("PostgreSQL 路径"),
+            idempotency_key=key,
+            request_fingerprint=_fingerprint(),
+        )
+
+        reopened = self._new_store()
+        self.assertEqual(await reopened.get(created.path_id), created)
+        self.assertEqual(
+            await reopened.get_current("default_user", "notes.md"),
+            created,
+        )
+        self.assertEqual(
+            await reopened.find_by_creation(
+                key,
+                "default_user",
+                "notes.md",
+                _fingerprint(),
+            ),
+            created,
+        )
+
+    async def test_concurrent_same_key_selects_one_canonical_record(self) -> None:
+        key = f"learning-path-{uuid.uuid4().hex}"
+        first, second = await asyncio.gather(
+            self.store.create(
+                "default_user",
+                "notes.md",
+                _path("候选一"),
+                idempotency_key=key,
+                request_fingerprint=_fingerprint(),
+            ),
+            self._new_store().create(
+                "default_user",
+                "notes.md",
+                _path("候选二"),
+                idempotency_key=key,
+                request_fingerprint=_fingerprint(),
+            ),
+        )
+        self.assertEqual(first, second)
+        self.assertIn(first.path.title, {"候选一", "候选二"})
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

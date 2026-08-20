@@ -8,6 +8,8 @@ Learning Path 数据模型
   - LearningPath      : synthesize 阶段产出（保留原结构兼容下游）
   - PathCritique      : critique 阶段产出（决定是否 revise）
 """
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
@@ -57,6 +59,32 @@ class LearningPath(BaseModel):
         if actual != expected:
             raise ValueError("stages must be ordered and numbered from 1")
         return self
+
+
+class CreateLearningPathRequest(BaseModel):
+    """创建持久学习路径资源时使用的受限 Web 请求。"""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    user_id: Literal["default_user"] = "default_user"
+    document_id: str = Field(min_length=1, max_length=512)
+
+
+class LearningPathResource(BaseModel):
+    """生成后不可变、可跨刷新恢复的学习路径资源。"""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        revalidate_instances="always",
+        str_strip_whitespace=True,
+    )
+
+    schema_version: Literal[1] = 1
+    learning_path_id: str = Field(pattern=r"^lp_[0-9a-f]{32}$")
+    user_id: Literal["default_user"]
+    path: LearningPath
+    created_at: float = Field(ge=0, allow_inf_nan=False)
+    expires_at: None = None
 
 
 # Provider wire schema intentionally contains only JSON types, required fields,
