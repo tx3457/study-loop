@@ -357,6 +357,34 @@ test('learning path stage opens a refresh-safe quiz preset without auto-starting
         },
       }
     }
+    if (request.method() === 'GET' && path === '/session/quiz-from-path') {
+      return {
+        body: {
+          schema_version: 1,
+          origin: 'standard',
+          session_id: 'quiz-from-path',
+          document_id: 'notes.md',
+          revision: 1,
+          status: 'active',
+          total: 1,
+          answered_count: 0,
+          questions: [{
+            index: 0,
+            question: 'RRF 如何融合多路排序？',
+            options: ['A. 按倒数排名累加', 'B. 只保留单路结果'],
+            type: 'choice',
+          }],
+          last_answer_index: null,
+          last_user_answer: null,
+          last_answer_result: null,
+          result: null,
+          grading_report: null,
+          learning_report: null,
+          expires_at: FUTURE_EXPIRES_AT,
+          busy: false,
+        },
+      }
+    }
     return null
   })
 
@@ -369,6 +397,7 @@ test('learning path stage opens a refresh-safe quiz preset without auto-starting
   let quizUrl = new URL(page.url())
   expect(quizUrl.searchParams.get('document_id')).toBe('notes.md')
   expect(quizUrl.searchParams.get('topic')).toBe('BM25、RRF')
+  expect(quizUrl.searchParams.get('launch_id')).toMatch(UUID_V4_PATTERN)
   await expect(page.getByRole('combobox', { name: '学习文档' })).toHaveValue('notes.md')
   await expect(page.getByRole('textbox', { name: /出题主题/ })).toHaveValue('BM25、RRF')
   expect(startBodies).toEqual([])
@@ -378,12 +407,20 @@ test('learning path stage opens a refresh-safe quiz preset without auto-starting
   quizUrl = new URL(page.url())
   expect(quizUrl.searchParams.get('document_id')).toBe('notes.md')
   expect(quizUrl.searchParams.get('topic')).toBe('BM25、RRF')
+  const launchId = quizUrl.searchParams.get('launch_id')
+  expect(launchId).toMatch(UUID_V4_PATTERN)
   await expect(page.getByRole('combobox', { name: '学习文档' })).toHaveValue('notes.md')
   await expect(page.getByRole('textbox', { name: /出题主题/ })).toHaveValue('BM25、RRF')
   expect(startBodies).toEqual([])
 
   await page.getByRole('button', { name: '开始答题' }).click()
   await expect(page.getByText('RRF 如何融合多路排序？')).toBeVisible()
+  expect(
+    await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), QUIZ_RECOVERY_KEY)
+  ).toMatchObject({
+    launch_id: launchId,
+    launch_preset: { document_id: 'notes.md', topic: 'BM25、RRF' },
+  })
   expect(startBodies).toEqual([{
     document_id: 'notes.md',
     description: 'BM25、RRF',
@@ -392,6 +429,232 @@ test('learning path stage opens a refresh-safe quiz preset without auto-starting
     type: 'choice',
     user_id: 'default_user',
   }])
+
+  await page.reload()
+  await expect(page.getByRole('region', { name: '检测到另一项练习' })).toHaveCount(0)
+  await expect(page.getByText('RRF 如何融合多路排序？')).toBeVisible()
+  expect(startBodies).toHaveLength(1)
+  expect(unexpectedRequests).toEqual([])
+  expect(problems).toEqual([])
+})
+
+test('quiz requires an explicit choice when a new launch conflicts with recovery', async ({ page }) => {
+  const problems = trackBrowserProblems(page)
+  let oldSnapshotReads = 0
+  const startBodies = []
+  const recovery = {
+    schema_version: 1,
+    intent: {
+      kind: 'standard',
+      request: {
+        document_id: 'old.md',
+        description: '旧主题',
+        count: 3,
+        difficulty: 'medium',
+        type: 'choice',
+        user_id: 'default_user',
+      },
+    },
+    launch_id: 'old-launch-1234',
+    launch_preset: { document_id: 'old.md', topic: '旧主题' },
+    start_idempotency_key: 'old-start-key-1234',
+    session: {
+      session_id: 'quiz-old',
+      revision: 1,
+      expires_at: FUTURE_EXPIRES_AT,
+    },
+    acknowledged_answer_count: 0,
+    pending_answer: null,
+  }
+  await page.addInitScript(({ key, value }) => {
+    sessionStorage.setItem(key, JSON.stringify(value))
+  }, { key: QUIZ_RECOVERY_KEY, value: recovery })
+
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['old.md', 'new.md'] } }
+    }
+    if (request.method() === 'GET' && path === '/session/quiz-old') {
+      oldSnapshotReads += 1
+      return {
+        body: {
+          schema_version: 1,
+          origin: 'standard',
+          session_id: 'quiz-old',
+          document_id: 'old.md',
+          revision: 1,
+          status: 'active',
+          total: 3,
+          answered_count: 0,
+          questions: [
+            { index: 0, question: '旧练习题目 1', options: ['A', 'B'], type: 'choice' },
+            { index: 1, question: '旧练习题目 2', options: ['A', 'B'], type: 'choice' },
+            { index: 2, question: '旧练习题目 3', options: ['A', 'B'], type: 'choice' },
+          ],
+          last_answer_index: null,
+          last_user_answer: null,
+          last_answer_result: null,
+          result: null,
+          grading_report: null,
+          learning_report: null,
+          expires_at: FUTURE_EXPIRES_AT,
+          busy: false,
+        },
+      }
+    }
+    if (request.method() === 'POST' && path === '/session/start') {
+      startBodies.push(await request.postDataJSON())
+      return {
+        body: {
+          session_id: 'quiz-new',
+          total: 1,
+          questions: [{
+            index: 0,
+            question: '新练习题目',
+            options: ['A', 'B'],
+            type: 'choice',
+          }],
+          revision: 1,
+          expires_at: FUTURE_EXPIRES_AT,
+        },
+      }
+    }
+    return null
+  })
+
+  const sameIntentNewLaunchUrl = '/quiz?document_id=old.md&topic=旧主题&launch_id=new-launch-1234'
+  await page.goto(sameIntentNewLaunchUrl)
+
+  const conflict = page.getByRole('region', { name: '检测到另一项练习' })
+  await expect(conflict).toContainText('old.md / 旧主题')
+  await expect(page.getByRole('button', { name: '放弃并开始新练习' })).toBeEnabled()
+  expect(oldSnapshotReads).toBe(0)
+  expect(startBodies).toEqual([])
+
+  await page.getByRole('button', { name: '继续当前练习' }).click()
+  await expect(page).toHaveURL(/\/quiz$/)
+  await expect(page.getByText('旧练习题目 1')).toBeVisible()
+  expect(oldSnapshotReads).toBe(1)
+
+  const oversizedTopicUrl = '/quiz?document_id=new.md&topic='
+    + encodeURIComponent('x'.repeat(4001))
+    + '&launch_id=oversized-launch-1234'
+  await page.goto(oversizedTopicUrl)
+  await expect(conflict).toBeVisible()
+  await expect(conflict).toContainText('新练习链接无效')
+  await expect(page.getByRole('button', { name: '放弃并开始新练习' })).toBeDisabled()
+  expect(
+    await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), QUIZ_RECOVERY_KEY)
+  ).toMatchObject({ session: { session_id: 'quiz-old' } })
+
+  const newIntentUrl = '/quiz?document_id=new.md&topic=新主题&launch_id=new-launch-5678'
+  await page.goto(newIntentUrl)
+  await expect(conflict).toBeVisible()
+  await page.getByRole('button', { name: '放弃并开始新练习' }).click()
+  await expect(page.getByRole('combobox', { name: '学习文档' })).toHaveValue('new.md')
+  await expect(page.getByRole('textbox', { name: /出题主题/ })).toHaveValue('新主题')
+  expect(oldSnapshotReads).toBe(1)
+  expect(await page.evaluate(key => sessionStorage.getItem(key), QUIZ_RECOVERY_KEY)).toBeNull()
+
+  await page.getByRole('button', { name: '开始答题' }).click()
+  await expect(page.getByText('新练习题目')).toBeVisible()
+  expect(startBodies).toEqual([{
+    document_id: 'new.md',
+    description: '新主题',
+    count: 5,
+    difficulty: 'medium',
+    type: 'choice',
+    user_id: 'default_user',
+  }])
+  expect(
+    await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), QUIZ_RECOVERY_KEY)
+  ).toMatchObject({
+    launch_id: 'new-launch-5678',
+    launch_preset: { document_id: 'new.md', topic: '新主题' },
+  })
+  expect(unexpectedRequests).toEqual([])
+  expect(problems).toEqual([])
+})
+
+test('a late answer cannot restore a quiz after accepting a new launch', async ({ page }) => {
+  const problems = trackBrowserProblems(page)
+  let releaseAnswer
+  let markAnswerStarted
+  const answerGate = new Promise(resolve => { releaseAnswer = resolve })
+  const answerStarted = new Promise(resolve => { markAnswerStarted = resolve })
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['old.md', 'new.md'] } }
+    }
+    if (request.method() === 'POST' && path === '/session/start') {
+      const body = await request.postDataJSON()
+      const isNew = body.document_id === 'new.md'
+      return {
+        body: {
+          session_id: isNew ? 'quiz-new-after-late-answer' : 'quiz-old-in-flight',
+          total: 1,
+          questions: [{
+            index: 0,
+            question: isNew ? '新目标题目' : '旧目标题目',
+            options: ['A', 'B'],
+            type: 'choice',
+          }],
+          revision: 1,
+          expires_at: FUTURE_EXPIRES_AT,
+        },
+      }
+    }
+    if (request.method() === 'POST' && path === '/session/quiz-old-in-flight/answer') {
+      markAnswerStarted()
+      await answerGate
+      return {
+        body: {
+          evaluation_status: 'final',
+          correct: true,
+          correct_answer: 'A',
+          explanation: '这条旧反馈不得复活',
+          is_last: true,
+          next_index: null,
+          revision: 2,
+          expires_at: FUTURE_EXPIRES_AT,
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/quiz')
+  await page.getByRole('combobox', { name: '学习文档' }).selectOption('old.md')
+  await page.getByRole('button', { name: '开始答题' }).click()
+  await page.getByRole('button', { name: 'A' }).click()
+  await page.getByRole('button', { name: '提交答案' }).click()
+  await answerStarted
+
+  const nextLaunch = '/quiz?document_id=new.md&topic=新目标&launch_id=late-answer-launch-1234'
+  await page.evaluate(url => {
+    history.pushState({}, '', url)
+    dispatchEvent(new PopStateEvent('popstate'))
+  }, nextLaunch)
+  await expect(page.getByRole('region', { name: '检测到另一项练习' })).toBeVisible()
+  await page.getByRole('button', { name: '放弃并开始新练习' }).click()
+  await expect(page.getByRole('combobox', { name: '学习文档' })).toHaveValue('new.md')
+
+  const oldResponse = page.waitForResponse(response => (
+    response.url().includes('/api/session/quiz-old-in-flight/answer')
+  ))
+  releaseAnswer()
+  await oldResponse
+  await expect(page.getByText('这条旧反馈不得复活')).toHaveCount(0)
+  expect(await page.evaluate(key => sessionStorage.getItem(key), QUIZ_RECOVERY_KEY)).toBeNull()
+
+  await page.getByRole('button', { name: '开始答题' }).click()
+  await expect(page.getByText('新目标题目')).toBeVisible()
+  expect(
+    await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), QUIZ_RECOVERY_KEY)
+  ).toMatchObject({
+    launch_id: 'late-answer-launch-1234',
+    session: { session_id: 'quiz-new-after-late-answer' },
+  })
   expect(unexpectedRequests).toEqual([])
   expect(problems).toEqual([])
 })
@@ -633,10 +896,12 @@ test('adaptive GET restores quiz, lesson, and readable completed learning path s
       await expect(page.getByText('排序算法强化路径')).toBeVisible()
       await expect(page.getByText('先掌握分区和递归边界。')).toBeVisible()
       await expect(page.locator('.learning-path pre')).toHaveCount(0)
-      await expect(page.getByRole('link', { name: '从第一阶段开始练习' })).toHaveAttribute(
-        'href',
-        '/quiz?document_id=notes.md&topic=%E5%BF%AB%E9%80%9F%E6%8E%92%E5%BA%8F',
-      )
+      await page.getByRole('link', { name: '从第一阶段开始练习' }).click()
+      const quizUrl = new URL(page.url())
+      expect(quizUrl.pathname).toBe('/quiz')
+      expect(quizUrl.searchParams.get('document_id')).toBe('notes.md')
+      expect(quizUrl.searchParams.get('topic')).toBe('快速排序')
+      expect(quizUrl.searchParams.get('launch_id')).toMatch(UUID_V4_PATTERN)
     }
   }
 

@@ -7,6 +7,76 @@
   animation: fadeIn 0.5s var(--ease-out);
 }
 
+.quiz-intent-conflict {
+  padding: 24px;
+  border: 1px solid color-mix(in srgb, var(--accent-gold) 55%, var(--border));
+  border-radius: var(--radius-lg);
+  background: color-mix(in srgb, var(--accent-gold) 8%, var(--bg-card));
+  box-shadow: var(--shadow-sm);
+}
+
+.quiz-intent-conflict h2 {
+  margin: 0 0 8px;
+  font-size: 20px;
+}
+
+.quiz-intent-conflict > p {
+  margin: 0;
+  color: var(--text-secondary);
+  line-height: 1.65;
+}
+
+.quiz-intent-conflict dl {
+  display: grid;
+  gap: 10px;
+  margin: 20px 0;
+}
+
+.quiz-intent-conflict dl > div {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: 12px;
+}
+
+.quiz-intent-conflict dt {
+  color: var(--text-tertiary);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.quiz-intent-conflict dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+}
+
+.quiz-intent-validation {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: -4px 0 18px;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.quiz-intent-validation .state-action {
+  min-height: 40px;
+}
+
+.quiz-intent-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.quiz-intent-actions .start-btn,
+.quiz-intent-actions .restart-btn {
+  width: auto;
+  min-height: 44px;
+  margin: 0;
+}
+
 /* ── Setup ─────────────────────────────────────────────────────────── */
 
 .quiz-setup {

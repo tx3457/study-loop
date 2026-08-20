@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import DocumentPrerequisite from '../components/DocumentPrerequisite'
-import { getDocuments, generateLearningPath } from '../api/client'
+import { createIdempotencyKey, getDocuments, generateLearningPath } from '../api/client'
 import './LearningPath.css'
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -71,7 +71,12 @@ export default function LearningPath() {
       document_id: path.document_id,
       topic,
     })
-    navigate(`/quiz?${params.toString()}`)
+    try {
+      params.set('launch_id', createIdempotencyKey())
+      navigate(`/quiz?${params.toString()}`)
+    } catch (err) {
+      setError(err.message)
+    }
   }
 
   return (

@@ -77,6 +77,13 @@ function safeStages(path) {
 }
 
 function LearningPathSummary({ path, fallbackDocumentId }) {
+  const [launch] = useState(() => {
+    try {
+      return { id: createIdempotencyKey(), error: null }
+    } catch (err) {
+      return { id: null, error: err.message }
+    }
+  })
   const stages = safeStages(path)
   const documentId = typeof path?.document_id === 'string' && path.document_id.trim()
     ? path.document_id.trim()
@@ -88,7 +95,10 @@ function LearningPathSummary({ path, fallbackDocumentId }) {
   const query = new URLSearchParams()
   if (documentId) query.set('document_id', documentId)
   if (firstTopic || firstStage?.title) query.set('topic', firstTopic || firstStage.title)
-  const quizHref = query.size > 0 ? '/quiz?' + query.toString() : '/learning-path'
+  if (firstStage && documentId && launch.id) query.set('launch_id', launch.id)
+  const quizHref = firstStage && documentId && launch.id
+    ? '/quiz?' + query.toString()
+    : '/learning-path'
   const totalMinutes = stages.reduce((sum, stage) => (
     Number.isFinite(stage.estimated_minutes)
       ? sum + Math.max(0, stage.estimated_minutes)
@@ -119,9 +129,13 @@ function LearningPathSummary({ path, fallbackDocumentId }) {
           ))}
         </ol>
       )}
-      <Link className="btn-primary" to={quizHref}>
-        {firstStage ? '从第一阶段开始练习' : '前往学习路径'}
-      </Link>
+      {launch.error && firstStage ? (
+        <p className="load-error-state" role="alert">{launch.error}</p>
+      ) : (
+        <Link className="btn-primary" to={quizHref}>
+          {firstStage ? '从第一阶段开始练习' : '前往学习路径'}
+        </Link>
+      )}
     </div>
   )
 }
