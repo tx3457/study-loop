@@ -97,6 +97,8 @@ class AutonomousSessionStore:
         postgres_connect_timeout_seconds: int = 5,
         postgres_lock_timeout_ms: int = 5_000,
         postgres_statement_timeout_ms: int = 15_000,
+        postgres_tcp_user_timeout_ms: int = 30_000,
+        schema_init_wait_timeout_seconds: float = 30,
         cancel_drain_timeout_seconds: float = 20,
         clock: Callable[[], float] = time.time,
     ) -> None:
@@ -110,16 +112,23 @@ class AutonomousSessionStore:
             raise ValueError("max_count must be positive")
         if max_payload_bytes <= 0:
             raise ValueError("max_payload_bytes must be positive")
-        if postgres_connect_timeout_seconds <= 0:
-            raise ValueError("postgres_connect_timeout_seconds must be positive")
-        if postgres_lock_timeout_ms <= 0:
-            raise ValueError("postgres_lock_timeout_ms must be positive")
-        if postgres_statement_timeout_ms <= 0:
-            raise ValueError("postgres_statement_timeout_ms must be positive")
         if (
-            not math.isfinite(cancel_drain_timeout_seconds)
-            or cancel_drain_timeout_seconds <= 0
+            not math.isfinite(postgres_connect_timeout_seconds)
+            or postgres_connect_timeout_seconds <= 0
         ):
+            raise ValueError("postgres_connect_timeout_seconds must be positive")
+        if not math.isfinite(postgres_lock_timeout_ms) or postgres_lock_timeout_ms <= 0:
+            raise ValueError("postgres_lock_timeout_ms must be positive")
+        if not math.isfinite(postgres_statement_timeout_ms) or postgres_statement_timeout_ms <= 0:
+            raise ValueError("postgres_statement_timeout_ms must be positive")
+        if not math.isfinite(postgres_tcp_user_timeout_ms) or postgres_tcp_user_timeout_ms <= 0:
+            raise ValueError("postgres_tcp_user_timeout_ms must be positive")
+        if (
+            not math.isfinite(schema_init_wait_timeout_seconds)
+            or schema_init_wait_timeout_seconds <= 0
+        ):
+            raise ValueError("schema_init_wait_timeout_seconds must be positive")
+        if not math.isfinite(cancel_drain_timeout_seconds) or cancel_drain_timeout_seconds <= 0:
             raise ValueError("cancel_drain_timeout_seconds must be positive")
         if not callable(clock):
             raise TypeError("clock must be callable")
@@ -137,6 +146,8 @@ class AutonomousSessionStore:
         self._postgres_connect_timeout_seconds = postgres_connect_timeout_seconds
         self._postgres_lock_timeout_ms = postgres_lock_timeout_ms
         self._postgres_statement_timeout_ms = postgres_statement_timeout_ms
+        self._postgres_tcp_user_timeout_ms = postgres_tcp_user_timeout_ms
+        self._schema_init_wait_timeout_seconds = schema_init_wait_timeout_seconds
         self._cancel_drain_timeout_seconds = cancel_drain_timeout_seconds
         self._clock = clock
         self._schema_ready = False
@@ -153,9 +164,7 @@ class AutonomousSessionStore:
             ),
             max_count=int(os.getenv("AUTONOMOUS_SESSION_MAX_COUNT", "200")),
             max_payload_bytes=int(
-                os.getenv(
-                    "AUTONOMOUS_SESSION_MAX_PAYLOAD_BYTES", str(2 * 1024 * 1024)
-                )
+                os.getenv("AUTONOMOUS_SESSION_MAX_PAYLOAD_BYTES", str(2 * 1024 * 1024))
             ),
             postgres_connect_timeout_seconds=int(
                 os.getenv("AUTONOMOUS_SESSION_PG_CONNECT_TIMEOUT_SECONDS", "5")
@@ -165,6 +174,15 @@ class AutonomousSessionStore:
             ),
             postgres_statement_timeout_ms=int(
                 os.getenv("AUTONOMOUS_SESSION_PG_STATEMENT_TIMEOUT_MS", "15000")
+            ),
+            postgres_tcp_user_timeout_ms=int(
+                os.getenv("AUTONOMOUS_SESSION_PG_TCP_USER_TIMEOUT_MS", "30000")
+            ),
+            schema_init_wait_timeout_seconds=float(
+                os.getenv(
+                    "AUTONOMOUS_SESSION_SCHEMA_INIT_WAIT_TIMEOUT_SECONDS",
+                    "30",
+                )
             ),
             cancel_drain_timeout_seconds=float(
                 os.getenv("AUTONOMOUS_SESSION_CANCEL_DRAIN_TIMEOUT_SECONDS", "20")
@@ -227,9 +245,7 @@ class AutonomousSessionStore:
             return None
         return await self._run_thread(self._status_sync, conversation_id)
 
-    async def claim(
-        self, conversation_id: str, continue_fingerprint: str
-    ) -> SessionClaim:
+    async def claim(self, conversation_id: str, continue_fingerprint: str) -> SessionClaim:
         """Claim a pause, reclaim a clean stale lease, or replay its outcome."""
         self._validate_conversation_id(conversation_id)
         self._validate_fingerprint(continue_fingerprint)
@@ -245,15 +261,24 @@ class AutonomousSessionStore:
         try:
             return await asyncio.shield(worker)
         except asyncio.CancelledError as cancelled:
-            completed, decision = await self._drain_cancelled_worker(
-                worker, track_on_timeout=False
+            deadline = asyncio.get_running_loop().time() + self._cancel_drain_timeout_seconds
+            completed, _ = await self._drain_cancelled_worker(
+                worker,
+                deadline=deadline,
+                track_on_timeout=False,
             )
             if completed:
-                if decision.claimed:
-                    cleanup = asyncio.create_task(
-                        self.cancel(conversation_id, claim_token)
+                cleanup = asyncio.create_task(
+                    self._run_thread(
+                        self._cancel_sync,
+                        conversation_id,
+                        claim_token,
                     )
-                    await self._drain_cancelled_worker(cleanup)
+                )
+                await self._drain_cancelled_worker(
+                    cleanup,
+                    deadline=deadline,
+                )
             else:
                 cleanup = asyncio.create_task(
                     self._release_late_claim(worker, conversation_id, claim_token)
@@ -267,9 +292,7 @@ class AutonomousSessionStore:
 
     async def mark_progress(self, conversation_id: str, claim_token: str) -> bool:
         self._validate_claim_token(claim_token)
-        return await self._run_thread(
-            self._mark_progress_sync, conversation_id, claim_token
-        )
+        return await self._run_thread(self._mark_progress_sync, conversation_id, claim_token)
 
     async def cancel(self, conversation_id: str, claim_token: str) -> bool:
         """Return only a live, clean claim to its original paused state."""
@@ -304,24 +327,42 @@ class AutonomousSessionStore:
         conversation_id: str,
         claim_token: str,
     ) -> None:
+        """Cancel only the captured token after a late claim worker settles."""
         try:
-            decision = await asyncio.shield(worker)
-            if decision.claimed:
-                await self.cancel(conversation_id, claim_token)
+            await asyncio.shield(worker)
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
+        except BaseException as exc:
+            logger.error(
+                "late Autonomous claim worker failed: error_type=%s",
+                type(exc).__name__,
+            )
+        try:
+            await self._run_thread(
+                self._cancel_sync,
+                conversation_id,
+                claim_token,
+            )
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
             logger.error(
                 "late Autonomous claim cleanup failed: error_type=%s",
                 type(exc).__name__,
             )
 
     async def _drain_cancelled_worker(
-        self, worker: asyncio.Task, *, track_on_timeout: bool = True
+        self,
+        worker: asyncio.Task,
+        *,
+        deadline: float | None = None,
+        track_on_timeout: bool = True,
     ) -> tuple[bool, Any]:
-        """Drain a shielded DB thread for a bounded period after cancellation."""
+        """Drain a shielded database worker without extending its deadline."""
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + self._cancel_drain_timeout_seconds
+        if deadline is None:
+            deadline = loop.time() + self._cancel_drain_timeout_seconds
+
         while not worker.done():
             remaining = deadline - loop.time()
             if remaining <= 0:
@@ -332,9 +373,19 @@ class AutonomousSessionStore:
                 await asyncio.wait_for(asyncio.shield(worker), timeout=remaining)
             except asyncio.CancelledError:
                 continue
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
-        return True, worker.result()
+            except BaseException:
+                break
+
+        try:
+            return True, worker.result()
+        except BaseException as exc:
+            logger.error(
+                "cancelled Autonomous store worker failed: error_type=%s",
+                type(exc).__name__,
+            )
+            return True, None
 
     def _track_background_worker(self, worker: asyncio.Task) -> None:
         self._background_workers.add(worker)
@@ -343,9 +394,7 @@ class AutonomousSessionStore:
             self._background_workers.discard(completed)
             try:
                 completed.result()
-            except asyncio.CancelledError:
-                logger.warning("background Autonomous store worker was cancelled")
-            except Exception as exc:
+            except BaseException as exc:
                 logger.error(
                     "background Autonomous store worker failed: error_type=%s",
                     type(exc).__name__,
@@ -364,11 +413,7 @@ class AutonomousSessionStore:
 
     @staticmethod
     def _validate_claim_token(claim_token: str) -> None:
-        if (
-            not isinstance(claim_token, str)
-            or not claim_token
-            or len(claim_token) > 256
-        ):
+        if not isinstance(claim_token, str) or not claim_token or len(claim_token) > 256:
             raise ValueError("invalid Autonomous session claim token")
 
     @staticmethod
@@ -376,14 +421,9 @@ class AutonomousSessionStore:
         if (
             not isinstance(continue_fingerprint, str)
             or len(continue_fingerprint) != 64
-            or any(
-                character not in "0123456789abcdef"
-                for character in continue_fingerprint
-            )
+            or any(character not in "0123456789abcdef" for character in continue_fingerprint)
         ):
-            raise ValueError(
-                "continue_fingerprint must be a lowercase SHA-256 hex digest"
-            )
+            raise ValueError("continue_fingerprint must be a lowercase SHA-256 hex digest")
 
     def _serialize_json_object(self, payload: dict[str, Any], label: str) -> str:
         if not isinstance(payload, dict):
@@ -438,9 +478,7 @@ class AutonomousSessionStore:
             return "ambiguous", None
         if not isinstance(envelope, dict) or envelope.get("schema_version") != 1:
             return "ambiguous", None
-        if envelope.get("kind") == "completed" and isinstance(
-            envelope.get("response"), dict
-        ):
+        if envelope.get("kind") == "completed" and isinstance(envelope.get("response"), dict):
             return "completed", envelope["response"]
         return "ambiguous", None
 
@@ -459,14 +497,37 @@ class AutonomousSessionStore:
     def _connect(self):
         if self._database_url:
             import psycopg
+            from psycopg.conninfo import conninfo_to_dict
+
+            try:
+                connection_parameters = conninfo_to_dict(self._database_url)
+            except Exception:
+                raise ValueError("PostgreSQL Autonomous session DATABASE_URL is invalid") from None
+            explicit_options = connection_parameters.get("options")
+            environment_options = os.getenv("PGOPTIONS", "").strip()
+            service_configured = bool(
+                connection_parameters.get("service") or os.getenv("PGSERVICE")
+            )
+            if service_configured and explicit_options is None and not environment_options:
+                raise ValueError(
+                    "PostgreSQL service DSNs must expose connection options "
+                    "through DATABASE_URL or PGOPTIONS so Autonomous session "
+                    "safety limits can be merged without silently discarding "
+                    "service-file options"
+                )
+            existing_options = (
+                str(explicit_options) if explicit_options is not None else environment_options
+            ).strip()
+            bounded_options = (
+                f"-c lock_timeout={self._postgres_lock_timeout_ms}ms "
+                f"-c statement_timeout={self._postgres_statement_timeout_ms}ms"
+            )
 
             return psycopg.connect(
                 self._database_url,
                 connect_timeout=self._postgres_connect_timeout_seconds,
-                options=(
-                    f"-c lock_timeout={self._postgres_lock_timeout_ms}ms "
-                    f"-c statement_timeout={self._postgres_statement_timeout_ms}ms"
-                ),
+                tcp_user_timeout=self._postgres_tcp_user_timeout_ms,
+                options=f"{existing_options} {bounded_options}".strip(),
             )
 
         path = Path(self._sqlite_path)
@@ -505,7 +566,10 @@ class AutonomousSessionStore:
     def _ensure_schema(self) -> None:
         if self._schema_ready:
             return
-        with self._schema_lock:
+        acquired = self._schema_lock.acquire(timeout=self._schema_init_wait_timeout_seconds)
+        if not acquired:
+            raise TimeoutError("Autonomous session schema initialization timed out")
+        try:
             if self._schema_ready:
                 return
             with self._transaction(write=True) as connection:
@@ -554,6 +618,8 @@ class AutonomousSessionStore:
                     f"ON {_TABLE} (claim_expires_at)"
                 )
             self._schema_ready = True
+        finally:
+            self._schema_lock.release()
 
     def _migrate_columns(self, connection) -> None:
         columns = {
@@ -568,16 +634,11 @@ class AutonomousSessionStore:
                 )
         else:
             existing = {
-                row[1]
-                for row in connection.execute(
-                    f"PRAGMA table_info({_TABLE})"
-                ).fetchall()
+                row[1] for row in connection.execute(f"PRAGMA table_info({_TABLE})").fetchall()
             }
             for name, column_type in columns.items():
                 if name not in existing:
-                    connection.execute(
-                        f"ALTER TABLE {_TABLE} ADD COLUMN {name} {column_type}"
-                    )
+                    connection.execute(f"ALTER TABLE {_TABLE} ADD COLUMN {name} {column_type}")
 
         # Give legacy in-flight rows one full rollout grace lease. Their absent
         # fingerprint later forces ambiguity instead of automatic replay.
@@ -596,9 +657,7 @@ class AutonomousSessionStore:
             created_at = self._now()
             self._reap_stale_claims(connection, created_at)
             self._purge_expired(connection, created_at)
-            if not self._insert_paused_row(
-                connection, conversation_id, payload_json, created_at
-            ):
+            if not self._insert_paused_row(connection, conversation_id, payload_json, created_at):
                 raise SessionAlreadyExistsError(conversation_id)
             self._enforce_capacity(connection, conversation_id)
 
@@ -642,9 +701,7 @@ class AutonomousSessionStore:
             )
             if completed.rowcount != 1:
                 return False
-            if not self._insert_paused_row(
-                connection, new_conversation_id, payload_json, now
-            ):
+            if not self._insert_paused_row(connection, new_conversation_id, payload_json, now):
                 raise SessionAlreadyExistsError(new_conversation_id)
             self._enforce_capacity(connection, new_conversation_id)
             return True
@@ -701,9 +758,7 @@ class AutonomousSessionStore:
             (now, now),
         )
 
-    def _purge_expired_target(
-        self, connection, conversation_id: str, now: float
-    ) -> None:
+    def _purge_expired_target(self, connection, conversation_id: str, now: float) -> None:
         p = self._placeholder
         connection.execute(
             f"""
@@ -750,9 +805,7 @@ class AutonomousSessionStore:
             (now, now, now),
         )
 
-    def _reap_stale_target(
-        self, connection, conversation_id: str, now: float
-    ) -> None:
+    def _reap_stale_target(self, connection, conversation_id: str, now: float) -> None:
         """Fence only one locked row, avoiding cross-row lock inversion."""
         p = self._placeholder
         connection.execute(
@@ -909,9 +962,7 @@ class AutonomousSessionStore:
             expires_at=float(expires_at),
             claimed_at=None if claimed_at is None else float(claimed_at),
             progress_started=bool(progress),
-            claim_expires_at=(
-                None if claim_expires_at is None else float(claim_expires_at)
-            ),
+            claim_expires_at=(None if claim_expires_at is None else float(claim_expires_at)),
             continue_fingerprint=continue_fingerprint,
             outcome=outcome,
         )
@@ -971,9 +1022,7 @@ class AutonomousSessionStore:
                 ):
                     return SessionClaim(claimed=False, reason="payload_mismatch")
                 if state == "completed":
-                    return SessionClaim(
-                        claimed=False, reason="completed", outcome=response
-                    )
+                    return SessionClaim(claimed=False, reason="completed", outcome=response)
                 return SessionClaim(claimed=False, reason="ambiguous")
 
             if physical_state == "paused":
@@ -1082,9 +1131,7 @@ class AutonomousSessionStore:
                     reason="invalid_payload",
                     claim_token=claim_token,
                 )
-            return SessionClaim(
-                claimed=True, claim_token=claim_token, payload=payload
-            )
+            return SessionClaim(claimed=True, claim_token=claim_token, payload=payload)
 
     def _renew_sync(self, conversation_id: str, claim_token: str) -> bool:
         self._ensure_schema()
@@ -1092,9 +1139,7 @@ class AutonomousSessionStore:
         with self._transaction(write=True) as connection:
             row = self._select_row(connection, conversation_id, for_update=True)
             now = self._now()
-            existing_lease = (
-                float(row[7]) if row is not None and row[7] is not None else 0.0
-            )
+            existing_lease = float(row[7]) if row is not None and row[7] is not None else 0.0
             existing_expiry = float(row[3]) if row is not None else 0.0
             cursor = connection.execute(
                 f"""
@@ -1180,11 +1225,7 @@ class AutonomousSessionStore:
                 outcome_state, _ = self._decode_outcome(outcome_json)
                 return SessionDiscardResult(
                     discarded=False,
-                    reason=(
-                        "completed"
-                        if outcome_state == "completed"
-                        else "ambiguous"
-                    ),
+                    reason=("completed" if outcome_state == "completed" else "ambiguous"),
                 )
             if physical_state == "in_flight":
                 return SessionDiscardResult(discarded=False, reason="in_progress")
