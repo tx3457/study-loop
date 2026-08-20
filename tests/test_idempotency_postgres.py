@@ -17,6 +17,13 @@ from services.idempotency import IdempotencyConflictError, IdempotencyStore
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
 
+_ADMIN_CONNECT_TIMEOUT_SECONDS = 5
+_ADMIN_LOCK_TIMEOUT_MS = 2_000
+_ADMIN_STATEMENT_TIMEOUT_MS = 5_000
+_FAST_LOCK_TIMEOUT_MS = 100
+_FAST_STATEMENT_TIMEOUT_MS = 100
+_TIMEOUT_ASSERTION_SECONDS = 6.0
+
 
 @unittest.skipUnless(TEST_DATABASE_URL, "TEST_DATABASE_URL is not configured")
 class TestPostgresIdempotencyStore(unittest.IsolatedAsyncioTestCase):
@@ -40,9 +47,7 @@ class TestPostgresIdempotencyStore(unittest.IsolatedAsyncioTestCase):
 
         async def claim(store):
             try:
-                return await store.begin(
-                    self.key, "agent.autonomous", {"query": "q"}
-                )
+                return await store.begin(self.key, "agent.autonomous", {"query": "q"})
             except IdempotencyConflictError as exc:
                 return exc.reason
 
@@ -93,39 +98,29 @@ class TestPostgresIdempotencyStore(unittest.IsolatedAsyncioTestCase):
                     ),
                     return_exceptions=True,
                 )
-            errors = [
-                result for result in decisions if isinstance(result, BaseException)
-            ]
+            errors = [result for result in decisions if isinstance(result, BaseException)]
             if errors:
                 raise errors[0]
             self.assertTrue(all(not decision.replayed for decision in decisions))
         finally:
             with psycopg.connect(TEST_DATABASE_URL) as connection:
                 connection.execute(
-                    sql.SQL("DROP TABLE IF EXISTS {}").format(
-                        sql.Identifier(table_name)
-                    )
+                    sql.SQL("DROP TABLE IF EXISTS {}").format(sql.Identifier(table_name))
                 )
 
     async def test_changed_payload_is_rejected_across_connections(self):
-        await self.store.begin(
-            self.key, "agent.autonomous", {"query": "first"}
-        )
+        await self.store.begin(self.key, "agent.autonomous", {"query": "first"})
         peer = IdempotencyStore(database_url=TEST_DATABASE_URL)
 
         with self.assertRaises(IdempotencyConflictError) as raised:
-            await peer.begin(
-                self.key, "agent.autonomous", {"query": "changed"}
-            )
+            await peer.begin(self.key, "agent.autonomous", {"query": "changed"})
 
         self.assertEqual(raised.exception.reason, "payload_mismatch")
 
     async def test_ambiguous_effect_state_persists_across_connections(self):
         payload = {"query": "update profile"}
         decision = await self.store.begin(self.key, "agent.autonomous", payload)
-        await self.store.mark_effect_started(
-            decision.lease, "update_learning_profile"
-        )
+        await self.store.mark_effect_started(decision.lease, "update_learning_profile")
         self.assertTrue(await self.store.abort(decision.lease))
 
         reopened = IdempotencyStore(database_url=TEST_DATABASE_URL)
@@ -169,9 +164,7 @@ class TestPostgresIdempotencyStore(unittest.IsolatedAsyncioTestCase):
         payload = {"conversation_id": "c", "user_reply": "继续"}
         operation = "agent.autonomous.continue"
         decision = await self.store.begin(self.key, operation, payload)
-        await self.store.mark_effect_started(
-            decision.lease, "update_learning_profile"
-        )
+        await self.store.mark_effect_started(decision.lease, "update_learning_profile")
         peer = IdempotencyStore(database_url=TEST_DATABASE_URL)
         response = {"final_answer": "canonical", "rounds_used": 2}
 
@@ -197,7 +190,8 @@ class TestPostgresIdempotencyStore(unittest.IsolatedAsyncioTestCase):
         fingerprint = idempotency_module._fingerprint(operation, payload)
         legacy_key = f"postgres-{uuid.uuid4().hex}"
         with psycopg.connect(TEST_DATABASE_URL) as connection:
-            connection.execute(sql.SQL("""
+            connection.execute(
+                sql.SQL("""
                 CREATE TABLE {} (
                     idempotency_key TEXT PRIMARY KEY,
                     operation TEXT NOT NULL,
@@ -208,15 +202,21 @@ class TestPostgresIdempotencyStore(unittest.IsolatedAsyncioTestCase):
                     created_at DOUBLE PRECISION NOT NULL,
                     updated_at DOUBLE PRECISION NOT NULL
                 )
-            """).format(sql.Identifier(table_name)))
-            connection.execute(sql.SQL("""
+            """).format(sql.Identifier(table_name))
+            )
+            connection.execute(
+                sql.SQL("""
                 INSERT INTO {} (
                     idempotency_key, operation, request_fingerprint, state,
                     created_at, updated_at
                 ) VALUES (%s, %s, %s, 'pending_v2', 1, 1)
-            """).format(sql.Identifier(table_name)), (
-                legacy_key, operation, fingerprint,
-            ))
+            """).format(sql.Identifier(table_name)),
+                (
+                    legacy_key,
+                    operation,
+                    fingerprint,
+                ),
+            )
 
         first = IdempotencyStore(database_url=TEST_DATABASE_URL)
         second = IdempotencyStore(database_url=TEST_DATABASE_URL)
@@ -227,11 +227,13 @@ class TestPostgresIdempotencyStore(unittest.IsolatedAsyncioTestCase):
                     second.begin(legacy_key, operation, payload),
                     return_exceptions=True,
                 )
-                self.assertTrue(all(
-                    isinstance(result, IdempotencyConflictError)
-                    and result.reason == "ambiguous"
-                    for result in results
-                ))
+                self.assertTrue(
+                    all(
+                        isinstance(result, IdempotencyConflictError)
+                        and result.reason == "ambiguous"
+                        for result in results
+                    )
+                )
                 with psycopg.connect(TEST_DATABASE_URL) as connection:
                     columns = {
                         row[0]
@@ -243,17 +245,191 @@ class TestPostgresIdempotencyStore(unittest.IsolatedAsyncioTestCase):
                             (table_name,),
                         )
                     }
-                self.assertTrue(
-                    {"owner_token", "recovery_token", "lease_expires_at"}
-                    <= columns
-                )
+                self.assertTrue({"owner_token", "recovery_token", "lease_expires_at"} <= columns)
         finally:
             with psycopg.connect(TEST_DATABASE_URL) as connection:
                 connection.execute(
-                    sql.SQL("DROP TABLE IF EXISTS {}").format(
-                        sql.Identifier(table_name)
+                    sql.SQL("DROP TABLE IF EXISTS {}").format(sql.Identifier(table_name))
+                )
+
+
+@unittest.skipUnless(TEST_DATABASE_URL, "TEST_DATABASE_URL is not configured")
+class TestPostgresIdempotencyRuntimeBounds(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.table_name = f"studyloop_idem_bound_{uuid.uuid4().hex}"
+        self.schema_lock_id = uuid.uuid4().int & ((1 << 63) - 1)
+        self.table_patch = patch.object(
+            idempotency_module,
+            "_TABLE",
+            self.table_name,
+        )
+        self.schema_lock_patch = patch.object(
+            idempotency_module,
+            "_POSTGRES_SCHEMA_LOCK_ID",
+            self.schema_lock_id,
+        )
+        self.table_patch.start()
+        self.schema_lock_patch.start()
+
+    def tearDown(self) -> None:
+        from psycopg import sql
+
+        try:
+            with self._admin_connect() as connection:
+                connection.execute(
+                    sql.SQL("DROP TABLE IF EXISTS {} CASCADE").format(
+                        sql.Identifier(self.table_name)
                     )
                 )
+        finally:
+            try:
+                self.schema_lock_patch.stop()
+            finally:
+                self.table_patch.stop()
+
+    @staticmethod
+    def _admin_connect():
+        import psycopg
+        from psycopg.conninfo import conninfo_to_dict
+
+        connection_parameters = conninfo_to_dict(TEST_DATABASE_URL)
+        if "options" in connection_parameters:
+            existing_options = (connection_parameters.get("options") or "").strip()
+        else:
+            existing_options = os.getenv("PGOPTIONS", "").strip()
+        bounded_options = (
+            f"-c lock_timeout={_ADMIN_LOCK_TIMEOUT_MS}ms "
+            f"-c statement_timeout={_ADMIN_STATEMENT_TIMEOUT_MS}ms"
+        )
+        return psycopg.connect(
+            TEST_DATABASE_URL,
+            connect_timeout=_ADMIN_CONNECT_TIMEOUT_SECONDS,
+            options=f"{existing_options} {bounded_options}".strip(),
+        )
+
+    @staticmethod
+    def _new_store(
+        *,
+        postgres_lock_timeout_ms: int = 5_000,
+        postgres_statement_timeout_ms: int = 15_000,
+    ) -> IdempotencyStore:
+        return IdempotencyStore(
+            database_url=TEST_DATABASE_URL,
+            postgres_connect_timeout_seconds=5,
+            postgres_lock_timeout_ms=postgres_lock_timeout_ms,
+            postgres_statement_timeout_ms=postgres_statement_timeout_ms,
+        )
+
+    async def _assert_finishes_with_database_error_while_blocked(
+        self,
+        operation,
+        expected_exception: type[BaseException],
+        release_blocker,
+    ) -> None:
+        task = asyncio.create_task(operation)
+        done, _ = await asyncio.wait(
+            {task},
+            timeout=_TIMEOUT_ASSERTION_SECONDS,
+        )
+        exception = task.exception() if done else None
+
+        release_blocker()
+        if not done:
+            await asyncio.gather(task, return_exceptions=True)
+
+        self.assertTrue(done, "database operation ignored its configured timeout")
+        self.assertIsInstance(exception, expected_exception)
+
+    async def test_schema_advisory_lock_times_out_then_initialization_retries(self):
+        import psycopg
+
+        store = self._new_store(
+            postgres_lock_timeout_ms=_FAST_LOCK_TIMEOUT_MS,
+            postgres_statement_timeout_ms=2_000,
+        )
+        with self._admin_connect() as blocker:
+            blocker.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (self.schema_lock_id,),
+            )
+            await self._assert_finishes_with_database_error_while_blocked(
+                store.begin(
+                    f"postgres-{uuid.uuid4().hex}",
+                    "agent.autonomous",
+                    {"query": "blocked schema"},
+                ),
+                psycopg.errors.LockNotAvailable,
+                blocker.rollback,
+            )
+
+        decision = await store.begin(
+            f"postgres-{uuid.uuid4().hex}",
+            "agent.autonomous",
+            {"query": "schema retry"},
+        )
+        self.assertFalse(decision.replayed)
+
+    async def test_receipt_row_lock_times_out_then_renew_retries(self):
+        import psycopg
+        from psycopg import sql
+
+        store = self._new_store(
+            postgres_lock_timeout_ms=_FAST_LOCK_TIMEOUT_MS,
+            postgres_statement_timeout_ms=2_000,
+        )
+        key = f"postgres-{uuid.uuid4().hex}"
+        decision = await store.begin(
+            key,
+            "agent.autonomous",
+            {"query": "locked receipt"},
+        )
+        with self._admin_connect() as blocker:
+            row = blocker.execute(
+                sql.SQL(
+                    "SELECT idempotency_key FROM {} WHERE idempotency_key = %s FOR UPDATE"
+                ).format(sql.Identifier(self.table_name)),
+                (key,),
+            ).fetchone()
+            self.assertEqual(row, (key,))
+            await self._assert_finishes_with_database_error_while_blocked(
+                store.renew(decision.lease),
+                psycopg.errors.LockNotAvailable,
+                blocker.rollback,
+            )
+
+        renewed = await store.renew(decision.lease)
+        self.assertIsNotNone(renewed)
+
+    async def test_statement_timeout_cancels_pg_sleep_then_store_retries(self):
+        import psycopg
+
+        store = self._new_store(
+            postgres_lock_timeout_ms=2_000,
+            postgres_statement_timeout_ms=_FAST_STATEMENT_TIMEOUT_MS,
+        )
+
+        def execute_slow_query() -> None:
+            with store._transaction() as connection:
+                connection.execute("SELECT pg_sleep(1)").fetchone()
+
+        task = asyncio.create_task(asyncio.to_thread(execute_slow_query))
+        done, _ = await asyncio.wait(
+            {task},
+            timeout=_TIMEOUT_ASSERTION_SECONDS,
+        )
+        exception = task.exception() if done else None
+        if not done:
+            await asyncio.gather(task, return_exceptions=True)
+
+        self.assertTrue(done, "pg_sleep ignored the configured statement timeout")
+        self.assertIsInstance(exception, psycopg.errors.QueryCanceled)
+
+        decision = await store.begin(
+            f"postgres-{uuid.uuid4().hex}",
+            "agent.autonomous",
+            {"query": "statement retry"},
+        )
+        self.assertFalse(decision.replayed)
 
 
 if __name__ == "__main__":
