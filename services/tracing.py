@@ -2,7 +2,7 @@
 双路 Tracing：LangSmith + Langfuse
 
 ── 为什么双路 ──────────────────────────────────────────────────────────────
-LangSmith：LangChain 原生栈，项目开发期默认启用，UI 深度适配 LangGraph。
+LangSmith：LangChain 原生栈，可按需启用，UI 深度适配 LangGraph。
 Langfuse：开源可自托管，适合生产部署（合规 / 数据主权 / 自定义评估）。
 
 统一入口 `@traceable` 让业务代码零修改，两个后端**同时**启用：
@@ -22,14 +22,14 @@ Langfuse 针对 LangGraph 的自动追踪走 CallbackHandler（不是装饰器�
 
 ── 配置（.env）─────────────────────────────────────────────────────────────
   # LangSmith（可选）
-  LANGCHAIN_TRACING_V2=true
-  LANGCHAIN_API_KEY=lsv2_pt_xxx
-  LANGCHAIN_PROJECT=study-loop
+  LANGSMITH_TRACING=true
+  LANGSMITH_API_KEY=lsv2_pt_xxx
+  LANGSMITH_PROJECT=study-loop
 
   # Langfuse（可选）
   LANGFUSE_PUBLIC_KEY=pk-lf-xxx
   LANGFUSE_SECRET_KEY=sk-lf-xxx
-  LANGFUSE_HOST=https://cloud.langfuse.com          # 自托管可改
+  LANGFUSE_BASE_URL=https://cloud.langfuse.com      # 自托管可改
 
 """
 import os
@@ -67,15 +67,38 @@ _RUN_TYPE_TO_LANGFUSE_AS_TYPE: dict[str, str] = {
 }
 
 
+def _env_flag(name: str, *, default: bool = False) -> bool:
+    """Parse an opt-in environment flag without treating ``"false"`` as true."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes"}
+
+
+def _langsmith_flag() -> bool:
+    """Mirror the precedence and exact-``true`` semantics of langsmith 0.7.22."""
+    for name in (
+        "LANGSMITH_TRACING_V2",
+        "LANGCHAIN_TRACING_V2",
+        "LANGSMITH_TRACING",
+        "LANGCHAIN_TRACING",
+    ):
+        raw = os.getenv(name)
+        if raw is not None and raw.strip():
+            return raw == "true"
+    return False
+
+
 def _langsmith_enabled() -> bool:
-    return _LANGSMITH_AVAILABLE and bool(os.getenv("LANGCHAIN_TRACING_V2"))
+    return _LANGSMITH_AVAILABLE and _langsmith_flag()
 
 
 def _langfuse_enabled() -> bool:
     return (
         _LANGFUSE_AVAILABLE
-        and bool(os.getenv("LANGFUSE_PUBLIC_KEY"))
-        and bool(os.getenv("LANGFUSE_SECRET_KEY"))
+        and _env_flag("LANGFUSE_TRACING_ENABLED", default=True)
+        and bool(os.getenv("LANGFUSE_PUBLIC_KEY", "").strip())
+        and bool(os.getenv("LANGFUSE_SECRET_KEY", "").strip())
     )
 
 
