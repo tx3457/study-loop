@@ -80,8 +80,12 @@ authorization or Pydantic-validation boundary; see `SECURITY.md`.
 - `services/adaptive_sessions.py` persists the complete private Adaptive
   aggregate, including partial grades, memory-write markers, decisions, and
   replay artifacts. Its browser projection excludes answers, explanations, and
-  source chunks; SQLite supports local restart recovery and PostgreSQL adds
-  cross-worker claims, revision CAS, and fencing.
+  source chunks. A terminal `switch_to_plan` artifact acts as a durable outbox:
+  only after that terminal aggregate is committed is its immutable plan
+  idempotently published to the Learning Path store, and start/submit replay or
+  snapshot reads repair a lost publication acknowledgement. SQLite supports
+  local restart recovery and PostgreSQL adds cross-worker claims, revision CAS,
+  and fencing.
 - Tutor remains an opt-in experimental Lab with its own narrower workflow-state
   boundary; it must not inherit Quiz or Adaptive durability claims by analogy.
 

@@ -126,6 +126,7 @@ function adaptiveSnapshot(overrides = {}) {
     summary: '',
     terminate_reason: '',
     learning_path: null,
+    learning_path_id: null,
     revision: 1,
     expires_at: FUTURE_EXPIRES_AT,
     busy: false,
@@ -1894,6 +1895,7 @@ test('adaptive GET restores quiz, lesson, and readable completed learning path s
         estimated_minutes: 25,
       }],
     },
+    learning_path_id: 'lp_cccccccccccccccccccccccccccccccc',
     revision: 4,
   })
   const snapshots = new Map([
@@ -1927,15 +1929,340 @@ test('adaptive GET restores quiz, lesson, and readable completed learning path s
       await expect(page.getByText('排序算法强化路径')).toBeVisible()
       await expect(page.getByText('先掌握分区和递归边界。')).toBeVisible()
       await expect(page.locator('.learning-path pre')).toHaveCount(0)
-      await page.getByRole('link', { name: '从第一阶段开始练习' }).click()
-      const quizUrl = new URL(page.url())
-      expect(quizUrl.pathname).toBe('/quiz')
-      expect(quizUrl.searchParams.get('document_id')).toBe('notes.md')
-      expect(quizUrl.searchParams.get('topic')).toBe('快速排序')
-      expect(quizUrl.searchParams.get('launch_id')).toMatch(UUID_V4_PATTERN)
+      await expect(page.getByRole('link', { name: '查看学习路径' })).toHaveAttribute(
+        'href',
+        '/learning-path?path_id=lp_cccccccccccccccccccccccccccccccc',
+      )
+      await expect(page.getByRole('link', { name: '从第一阶段开始练习' }))
+        .toHaveCount(0)
     }
   }
 
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('adaptive recovery accepts a canonical completed path before replaying a pending submit', async ({ page }) => {
+  const resource = learningPathResource({
+    id: 'lp_dddddddddddddddddddddddddddddddd',
+    title: '丢失响应后的持久路径',
+  })
+  const active = adaptiveSnapshot({ adaptive_session_id: 'adapt-path-committed' })
+  const done = adaptiveSnapshot({
+    adaptive_session_id: active.adaptive_session_id,
+    done: true,
+    questions: [],
+    summary: '服务端已经提交持久学习路径。',
+    terminate_reason: 'switch_to_plan',
+    decision: {
+      ...active.decision,
+      action: 'switch_to_plan',
+      topic: '混合检索',
+    },
+    learning_path: resource.path,
+    learning_path_id: resource.learning_path_id,
+    revision: 2,
+  })
+  const pending = {
+    idempotency_key: 'adaptive-path-submit-key',
+    body: {
+      adaptive_session_id: active.adaptive_session_id,
+      answers: ['Alpha'],
+      turn: 1,
+      revision: 1,
+    },
+  }
+  let submitAttempts = 0
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (
+      request.method() === 'GET'
+      && path === `/agent/adaptive/${active.adaptive_session_id}`
+    ) {
+      return { body: done }
+    }
+    if (request.method() === 'POST' && path === '/agent/adaptive/submit') {
+      submitAttempts += 1
+      return { body: done }
+    }
+    return null
+  })
+  await page.addInitScript(({ key, value }) => {
+    sessionStorage.setItem(key, JSON.stringify(value))
+  }, {
+    key: ADAPTIVE_RECOVERY_KEY,
+    value: adaptiveRecovery(active, pending),
+  })
+
+  await page.goto('/adaptive')
+
+  await expect(page.getByText('丢失响应后的持久路径')).toBeVisible()
+  await expect(page.getByRole('link', { name: '查看学习路径' })).toHaveAttribute(
+    'href',
+    `/learning-path?path_id=${resource.learning_path_id}`,
+  )
+  const stored = await page.evaluate(
+    key => JSON.parse(sessionStorage.getItem(key)),
+    ADAPTIVE_RECOVERY_KEY,
+  )
+  expect(stored.pending_submit).toBeNull()
+  expect(stored.snapshot.learning_path_id).toBe(resource.learning_path_id)
+  expect(submitAttempts).toBe(0)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('adaptive never trusts a cached path pointer before the canonical GET returns', async ({ page }) => {
+  const cachedResource = learningPathResource({
+    id: 'lp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    title: '缓存中的旧路径',
+  })
+  const canonicalResource = learningPathResource({
+    id: 'lp_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    title: '服务端权威路径',
+  })
+  const completed = resource => adaptiveSnapshot({
+    adaptive_session_id: 'adapt-canonical-path',
+    done: true,
+    questions: [],
+    summary: '建议转入持久学习路径。',
+    terminate_reason: 'switch_to_plan',
+    decision: {
+      ...adaptiveSnapshot().decision,
+      action: 'switch_to_plan',
+      topic: '检索',
+    },
+    learning_path: resource.path,
+    learning_path_id: resource.learning_path_id,
+    revision: 2,
+  })
+  const cached = completed(cachedResource)
+  const canonical = completed(canonicalResource)
+  let releaseGet
+  const getBlocked = new Promise(resolve => { releaseGet = resolve })
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (
+      request.method() === 'GET'
+      && path === `/agent/adaptive/${cached.adaptive_session_id}`
+    ) {
+      await getBlocked
+      return { body: canonical }
+    }
+    return null
+  })
+  await page.addInitScript(({ key, value }) => {
+    sessionStorage.setItem(key, JSON.stringify(value))
+  }, {
+    key: ADAPTIVE_RECOVERY_KEY,
+    value: adaptiveRecovery(cached),
+  })
+
+  await page.goto('/adaptive')
+  await expect(page.getByText('正在同步学习进度...')).toBeVisible()
+  await expect(page.getByText('缓存中的旧路径')).toHaveCount(0)
+  await expect(page.getByRole('link', { name: '查看学习路径' })).toHaveCount(0)
+  await expect(page.getByRole('link', { name: '前往学习路径重新生成' })).toHaveCount(0)
+
+  releaseGet()
+  await expect(page.getByText('服务端权威路径')).toBeVisible()
+  await expect(page.getByText('缓存中的旧路径')).toHaveCount(0)
+  await expect(page.getByRole('link', { name: '查看学习路径' })).toHaveAttribute(
+    'href',
+    `/learning-path?path_id=${canonicalResource.learning_path_id}`,
+  )
+  const stored = await page.evaluate(
+    key => JSON.parse(sessionStorage.getItem(key)),
+    ADAPTIVE_RECOVERY_KEY,
+  )
+  expect(stored.snapshot.learning_path_id).toBe(canonicalResource.learning_path_id)
+  expect(
+    await page.evaluate(key => sessionStorage.getItem(key), LEARNING_PATH_RECOVERY_KEY),
+  ).toBeNull()
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('adaptive keeps a confirmed legacy path preview out of an unbound quiz', async ({ page }) => {
+  const resource = learningPathResource({ title: '历史路径预览' })
+  const legacy = adaptiveSnapshot({
+    adaptive_session_id: 'adapt-legacy-path',
+    done: true,
+    questions: [],
+    summary: '这条历史记录生成于持久路径上线之前。',
+    terminate_reason: 'switch_to_plan',
+    decision: {
+      ...adaptiveSnapshot().decision,
+      action: 'switch_to_plan',
+      topic: '历史主题',
+    },
+    learning_path: resource.path,
+    learning_path_id: null,
+    revision: 2,
+  })
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (
+      request.method() === 'GET'
+      && path === `/agent/adaptive/${legacy.adaptive_session_id}`
+    ) {
+      return { body: legacy }
+    }
+    return null
+  })
+  await page.addInitScript(({ key, value }) => {
+    sessionStorage.setItem(key, JSON.stringify(value))
+  }, {
+    key: ADAPTIVE_RECOVERY_KEY,
+    value: adaptiveRecovery(legacy),
+  })
+
+  await page.goto('/adaptive')
+
+  await expect(page.getByText('历史路径预览')).toBeVisible()
+  await expect(page.getByText('这是旧版路径预览，阶段进度尚未绑定。')).toBeVisible()
+  await expect(page.getByRole('link', { name: '前往学习路径重新生成' }))
+    .toHaveAttribute('href', '/learning-path')
+  await expect(page.getByRole('link', { name: '从第一阶段开始练习' })).toHaveCount(0)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('adaptive rejects invalid, non-terminal, and cross-document path pointers', async ({ page }) => {
+  const resource = learningPathResource()
+  const validDone = adaptiveSnapshot({
+    adaptive_session_id: 'adapt-invalid-path',
+    done: true,
+    questions: [],
+    summary: '无效路径不应被恢复。',
+    terminate_reason: 'switch_to_plan',
+    decision: {
+      ...adaptiveSnapshot().decision,
+      action: 'switch_to_plan',
+      topic: '校验路径',
+    },
+    learning_path: resource.path,
+    learning_path_id: resource.learning_path_id,
+    revision: 2,
+  })
+  const invalidRecoveries = [
+    adaptiveRecovery({ ...validDone, learning_path_id: 'lp_invalid' }),
+    adaptiveRecovery({
+      ...adaptiveSnapshot({ adaptive_session_id: 'adapt-active-with-path' }),
+      learning_path_id: resource.learning_path_id,
+    }),
+    adaptiveRecovery({
+      ...validDone,
+      adaptive_session_id: 'adapt-wrong-document',
+      learning_path: { ...resource.path, document_id: 'other.md' },
+    }),
+  ]
+  let adaptiveReads = 0
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path.startsWith('/agent/adaptive/')) {
+      adaptiveReads += 1
+    }
+    return null
+  })
+  await page.goto('/adaptive')
+
+  for (const recovery of invalidRecoveries) {
+    await page.evaluate(({ key, value }) => {
+      sessionStorage.setItem(key, JSON.stringify(value))
+    }, { key: ADAPTIVE_RECOVERY_KEY, value: recovery })
+    await page.reload()
+    await expect(page.getByLabel('学习目标')).toBeEditable()
+    await expect(page.getByRole('link', { name: '查看学习路径' })).toHaveCount(0)
+    expect(
+      await page.evaluate(key => sessionStorage.getItem(key), ADAPTIVE_RECOVERY_KEY),
+    ).toBeNull()
+  }
+
+  expect(adaptiveReads).toBe(0)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('adaptive opens the canonical path before launching a stage-bound quiz', async ({ page }) => {
+  const resource = learningPathResource({
+    id: 'lp_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+    title: 'Adaptive 持久路径',
+    stageTitle: '权威阶段',
+    topics: ['服务端绑定'],
+  })
+  const done = adaptiveSnapshot({
+    adaptive_session_id: 'adapt-bound-path',
+    done: true,
+    questions: [],
+    summary: '通过权威学习路径继续。',
+    terminate_reason: 'switch_to_plan',
+    decision: {
+      ...adaptiveSnapshot().decision,
+      action: 'switch_to_plan',
+      topic: '服务端绑定',
+    },
+    learning_path: resource.path,
+    learning_path_id: resource.learning_path_id,
+    revision: 2,
+  })
+  let startBody = null
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (
+      request.method() === 'GET'
+      && path === `/agent/adaptive/${done.adaptive_session_id}`
+    ) {
+      return { body: done }
+    }
+    if (
+      request.method() === 'GET'
+      && path === `/learning-paths/${resource.learning_path_id}`
+    ) {
+      return { body: resource }
+    }
+    if (request.method() === 'POST' && path === '/session/start') {
+      startBody = await request.postDataJSON()
+      return {
+        body: {
+          session_id: 'quiz-from-adaptive-path',
+          total: 1,
+          questions: [{
+            index: 0,
+            question: '持久路径绑定成功了吗？',
+            options: ['是', '否'],
+            type: 'choice',
+          }],
+          revision: 1,
+          expires_at: FUTURE_EXPIRES_AT,
+          learning_path_source: {
+            learning_path_id: resource.learning_path_id,
+            stage_id: 1,
+          },
+        },
+      }
+    }
+    return null
+  })
+  await page.addInitScript(({ key, value }) => {
+    sessionStorage.setItem(key, JSON.stringify(value))
+  }, {
+    key: ADAPTIVE_RECOVERY_KEY,
+    value: adaptiveRecovery(done),
+  })
+
+  await page.goto('/adaptive')
+  await page.getByRole('link', { name: '查看学习路径' }).click()
+  await expect(page).toHaveURL(
+    new RegExp(`/learning-path\\?path_id=${resource.learning_path_id}`),
+  )
+  await expect(page.getByRole('heading', { name: 'Adaptive 持久路径' })).toBeVisible()
+  await page.getByRole('button', { name: '练习阶段 1：权威阶段' }).click()
+
+  const quizUrl = new URL(page.url())
+  expect(quizUrl.pathname).toBe('/quiz')
+  expect(quizUrl.searchParams.get('path_id')).toBe(resource.learning_path_id)
+  expect(quizUrl.searchParams.get('stage_id')).toBe('1')
+  expect(quizUrl.searchParams.get('launch_id')).toMatch(UUID_V4_PATTERN)
+  await page.getByRole('button', { name: '开始答题' }).click()
+  await expect(page.getByText('持久路径绑定成功了吗？')).toBeVisible()
+  expect(startBody.learning_path_source).toEqual({
+    learning_path_id: resource.learning_path_id,
+    stage_id: 1,
+  })
   expect(unexpectedRequests).toEqual([])
 })
 

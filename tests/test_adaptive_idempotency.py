@@ -13,10 +13,13 @@ from fastapi.testclient import TestClient
 from main import app
 from models.adaptive import NextStepDecision
 from models.grader import QuestionGrade
+from models.learning_path import LearningPath
 from models.quiz import Question, QuizResponse
 import routers.adaptive as adaptive_router
+import routers.learning_path as learning_path_router
 from services.adaptive_sessions import AdaptiveSessionStore
 from services.grader import grade_quiz_session as real_grade_quiz_session
+from services.learning_path_store import LearningPathStore
 
 
 def _decision(action: str = "continue") -> NextStepDecision:
@@ -43,19 +46,39 @@ def _quiz() -> QuizResponse:
     )
 
 
+def _path(document_id: str = "notes.md", title: str = "Sorting path") -> LearningPath:
+    return LearningPath.model_validate(
+        {
+            "document_id": document_id,
+            "title": title,
+            "total_stages": 1,
+            "stages": [
+                {
+                    "stage": 1,
+                    "title": "Foundations",
+                    "topics": ["merge sort"],
+                    "description": "Learn stable divide-and-conquer sorting.",
+                    "estimated_minutes": 20,
+                }
+            ],
+        }
+    )
+
+
 class TestAdaptiveDurableRoutes(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
         self.database_path = str(Path(self.tempdir.name) / "adaptive.sqlite3")
         self.store = AdaptiveSessionStore(sqlite_path=self.database_path)
-        self.store_patch = patch.object(
-            adaptive_router, "adaptive_sessions", self.store
+        self.path_store = LearningPathStore(sqlite_path=self.database_path)
+        self.store_patch = patch.object(adaptive_router, "adaptive_sessions", self.store)
+        self.path_store_patch = patch.object(
+            adaptive_router, "learning_path_store", self.path_store
         )
         self.store_patch.start()
+        self.path_store_patch.start()
 
-        async def commit_memory(
-            *args, after_write=None, on_core_written=None, **kwargs
-        ) -> None:
+        async def commit_memory(*args, after_write=None, on_core_written=None, **kwargs) -> None:
             if on_core_written is not None:
                 on_core_written()
             if after_write is not None:
@@ -67,9 +90,7 @@ class TestAdaptiveDurableRoutes(unittest.TestCase):
         self.memory = AsyncMock(side_effect=commit_memory)
         self.append = AsyncMock()
         self.patches = [
-            patch.object(
-                adaptive_router, "ensure_document_available", AsyncMock()
-            ),
+            patch.object(adaptive_router, "ensure_document_available", AsyncMock()),
             patch.object(
                 adaptive_router,
                 "check_injection",
@@ -78,12 +99,8 @@ class TestAdaptiveDurableRoutes(unittest.TestCase):
             patch.object(adaptive_router, "generate_question", self.generate),
             patch.object(adaptive_router, "decide_next_step", self.decide),
             patch.object(adaptive_router, "get_mastery", self.mastery),
-            patch.object(
-                adaptive_router, "get_weak_points", AsyncMock(return_value=[])
-            ),
-            patch.object(
-                adaptive_router, "commit_learning_memory", self.memory
-            ),
+            patch.object(adaptive_router, "get_weak_points", AsyncMock(return_value=[])),
+            patch.object(adaptive_router, "commit_learning_memory", self.memory),
             patch.object(adaptive_router, "append_decision", self.append),
         ]
         for active_patch in self.patches:
@@ -93,6 +110,7 @@ class TestAdaptiveDurableRoutes(unittest.TestCase):
     def tearDown(self) -> None:
         for active_patch in reversed(self.patches):
             active_patch.stop()
+        self.path_store_patch.stop()
         self.store_patch.stop()
         self.tempdir.cleanup()
 
@@ -143,9 +161,7 @@ class TestAdaptiveDurableRoutes(unittest.TestCase):
 
     def test_snapshot_is_safe_and_exposes_storage_metadata(self) -> None:
         start = self._start()
-        response = self.client.get(
-            f"/agent/adaptive/{start['adaptive_session_id']}"
-        )
+        response = self.client.get(f"/agent/adaptive/{start['adaptive_session_id']}")
 
         self.assertEqual(response.status_code, 200, response.text)
         snapshot = response.json()
@@ -187,49 +203,99 @@ class TestAdaptiveDurableRoutes(unittest.TestCase):
         self.assertEqual(self.generate.await_count, 0)
 
     def test_opening_switch_to_plan_returns_a_terminal_path(self) -> None:
-        fake_path = type(
-            "FakePath",
-            (),
-            {"model_dump": lambda self: {"stages": ["foundation"]}},
-        )()
+        fake_path = _path()
         self.mastery.return_value = 0.99
         self.decide.return_value = _decision("switch_to_plan")
-        with patch.object(
-            adaptive_router,
-            "generate_learning_path",
-            AsyncMock(return_value=fake_path),
+        generate_path = AsyncMock(return_value=fake_path)
+        original_create = self.path_store.create
+
+        async def create_after_terminal(*args, **kwargs):
+            stored = await self.store.find_start(
+                "adaptive-opening-path-1",
+                {
+                    "user_id": "user-1",
+                    "document_id": "notes.md",
+                    "goal": "learn sorting",
+                },
+            )
+            self.assertIsNotNone(stored)
+            self.assertEqual(stored.aggregate.status, "completed")
+            self.assertFalse(stored.busy)
+            return await original_create(*args, **kwargs)
+
+        with (
+            patch.object(
+                adaptive_router,
+                "generate_learning_path",
+                generate_path,
+            ),
+            patch.object(
+                self.path_store,
+                "create",
+                side_effect=create_after_terminal,
+            ),
         ):
-            start = self._start()
+            start = self._start("adaptive-opening-path-1")
+            replay = self._start("adaptive-opening-path-1")
 
         self.assertTrue(start["done"])
         self.assertEqual(start["terminate_reason"], "switch_to_plan")
-        self.assertEqual(start["learning_path"], {"stages": ["foundation"]})
+        self.assertEqual(start["learning_path"], fake_path.model_dump(mode="json"))
+        self.assertRegex(start["learning_path_id"], r"^lp_[0-9a-f]{32}$")
+        self.assertEqual(replay, start)
+        self.assertEqual(generate_path.await_count, 1)
         self.assertEqual(self.generate.await_count, 0)
+        published = self.path_store._get_sync(start["learning_path_id"])
+        self.assertEqual(published.user_id, "user-1")
+        with patch.object(
+            learning_path_router,
+            "learning_path_store",
+            self.path_store,
+        ):
+            fetched = self.client.get(f"/learning-paths/{start['learning_path_id']}")
+        self.assertEqual(fetched.status_code, 200, fetched.text)
+        self.assertEqual(fetched.json()["user_id"], "user-1")
 
     def test_switch_to_plan_precedes_mastery_termination(self) -> None:
-        fake_path = type(
-            "FakePath",
-            (),
-            {"model_dump": lambda self: {"stages": ["review"]}},
-        )()
+        fake_path = _path(title="Review path")
         self.mastery.side_effect = [0.2, 0.99]
         self.decide.side_effect = [_decision(), _decision("switch_to_plan")]
         start = self._start()
+        payload = self._submit_payload(start)
+        headers = {"Idempotency-Key": "adaptive-submit-path-1"}
+        generate_path = AsyncMock(return_value=fake_path)
 
         with patch.object(
             adaptive_router,
             "generate_learning_path",
-            AsyncMock(return_value=fake_path),
+            generate_path,
         ):
             switched = self.client.post(
                 "/agent/adaptive/submit",
-                json=self._submit_payload(start),
+                json=payload,
+                headers=headers,
+            )
+            replay = self.client.post(
+                "/agent/adaptive/submit",
+                json=payload,
+                headers=headers,
             )
 
         self.assertEqual(switched.status_code, 200, switched.text)
         self.assertTrue(switched.json()["done"])
         self.assertEqual(switched.json()["terminate_reason"], "switch_to_plan")
-        self.assertEqual(switched.json()["learning_path"], {"stages": ["review"]})
+        self.assertEqual(
+            switched.json()["learning_path"],
+            fake_path.model_dump(mode="json"),
+        )
+        self.assertRegex(
+            switched.json()["learning_path_id"],
+            r"^lp_[0-9a-f]{32}$",
+        )
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.json(), switched.json())
+        self.assertEqual(generate_path.await_count, 1)
+        self.assertEqual(self.memory.await_count, 1)
 
     def test_completed_submit_replays_after_sqlite_reopen(self) -> None:
         self.decide.side_effect = [_decision(), _decision("finish")]
@@ -237,17 +303,13 @@ class TestAdaptiveDurableRoutes(unittest.TestCase):
         payload = self._submit_payload(start)
         headers = {"Idempotency-Key": "adaptive-submit-replay-1"}
 
-        first = self.client.post(
-            "/agent/adaptive/submit", json=payload, headers=headers
-        )
+        first = self.client.post("/agent/adaptive/submit", json=payload, headers=headers)
         self.assertEqual(first.status_code, 200, first.text)
         self.assertTrue(first.json()["done"])
 
         reopened = AdaptiveSessionStore(sqlite_path=self.database_path)
         with patch.object(adaptive_router, "adaptive_sessions", reopened):
-            replay = self.client.post(
-                "/agent/adaptive/submit", json=payload, headers=headers
-            )
+            replay = self.client.post("/agent/adaptive/submit", json=payload, headers=headers)
 
         self.assertEqual(replay.status_code, 200, replay.text)
         self.assertEqual(replay.json(), first.json())
@@ -261,9 +323,7 @@ class TestAdaptiveDurableRoutes(unittest.TestCase):
         stale_record = self.store._inspect_sync(start["adaptive_session_id"])
         payload = self._submit_payload(start)
         headers = {"Idempotency-Key": "adaptive-receipt-race-1"}
-        first = self.client.post(
-            "/agent/adaptive/submit", json=payload, headers=headers
-        )
+        first = self.client.post("/agent/adaptive/submit", json=payload, headers=headers)
         self.assertEqual(first.status_code, 200, first.text)
 
         original_inspect = adaptive_router._inspect_live
@@ -281,9 +341,7 @@ class TestAdaptiveDurableRoutes(unittest.TestCase):
             "_inspect_live",
             side_effect=stale_optimistic_inspect,
         ):
-            replay = self.client.post(
-                "/agent/adaptive/submit", json=payload, headers=headers
-            )
+            replay = self.client.post("/agent/adaptive/submit", json=payload, headers=headers)
 
         self.assertEqual(replay.status_code, 200, replay.text)
         self.assertEqual(replay.json(), first.json())
@@ -313,12 +371,8 @@ class TestAdaptiveDurableRoutes(unittest.TestCase):
                 raise RuntimeError("grader disconnected after checkpoint")
             return await real_grade_quiz_session(session, checkpoint=checkpoint)
 
-        with patch.object(
-            adaptive_router, "grade_quiz_session", side_effect=flaky_grade
-        ):
-            failed = self.client.post(
-                "/agent/adaptive/submit", json=payload, headers=headers
-            )
+        with patch.object(adaptive_router, "grade_quiz_session", side_effect=flaky_grade):
+            failed = self.client.post("/agent/adaptive/submit", json=payload, headers=headers)
             self.assertEqual(failed.status_code, 500, failed.text)
 
             record = self.store._inspect_sync(start["adaptive_session_id"])
@@ -349,18 +403,14 @@ class TestAdaptiveDurableRoutes(unittest.TestCase):
         payload = self._submit_payload(start)
         headers = {"Idempotency-Key": "adaptive-stage-recovery-1"}
 
-        failed = self.client.post(
-            "/agent/adaptive/submit", json=payload, headers=headers
-        )
+        failed = self.client.post("/agent/adaptive/submit", json=payload, headers=headers)
         self.assertEqual(failed.status_code, 500, failed.text)
         record = self.store._inspect_sync(start["adaptive_session_id"])
         self.assertIsNotNone(record.aggregate.pending.next_decision)
         self.assertTrue(record.aggregate.current_quiz.profile_written)
         self.assertFalse(record.busy)
 
-        recovered = self.client.post(
-            "/agent/adaptive/submit", json=payload, headers=headers
-        )
+        recovered = self.client.post("/agent/adaptive/submit", json=payload, headers=headers)
         self.assertEqual(recovered.status_code, 200, recovered.text)
         self.assertEqual(recovered.json()["turn"], 2)
         self.assertEqual(self.memory.await_count, 1)
@@ -383,9 +433,7 @@ class TestAdaptiveDurableRoutes(unittest.TestCase):
         payload = self._submit_payload(start)
         headers = {"Idempotency-Key": "adaptive-snapshot-retry-1"}
 
-        failed = self.client.post(
-            "/agent/adaptive/submit", json=payload, headers=headers
-        )
+        failed = self.client.post("/agent/adaptive/submit", json=payload, headers=headers)
         self.assertEqual(failed.status_code, 500, failed.text)
         record = self.store._inspect_sync(start["adaptive_session_id"])
         self.assertIsNotNone(record.aggregate.pending)
@@ -401,9 +449,7 @@ class TestAdaptiveDurableRoutes(unittest.TestCase):
                 await after_write()
 
         self.memory.side_effect = successful_commit
-        recovered = self.client.post(
-            "/agent/adaptive/submit", json=payload, headers=headers
-        )
+        recovered = self.client.post("/agent/adaptive/submit", json=payload, headers=headers)
         self.assertEqual(recovered.status_code, 200, recovered.text)
         self.assertTrue(recovered.json()["done"])
         self.assertEqual(self.memory.await_count, 2)
@@ -412,9 +458,7 @@ class TestAdaptiveDurableRoutes(unittest.TestCase):
         self.decide.side_effect = [_decision(), _decision("finish")]
         self.append.side_effect = [RuntimeError("audit store unavailable"), None]
 
-        async def fail_soft_memory(
-            *args, after_write=None, on_core_written=None, **kwargs
-        ) -> None:
+        async def fail_soft_memory(*args, after_write=None, on_core_written=None, **kwargs) -> None:
             if on_core_written is not None:
                 on_core_written()
             if after_write is not None:
@@ -428,18 +472,14 @@ class TestAdaptiveDurableRoutes(unittest.TestCase):
         payload = self._submit_payload(start)
         headers = {"Idempotency-Key": "adaptive-decision-audit-1"}
 
-        failed = self.client.post(
-            "/agent/adaptive/submit", json=payload, headers=headers
-        )
+        failed = self.client.post("/agent/adaptive/submit", json=payload, headers=headers)
         self.assertEqual(failed.status_code, 500, failed.text)
         record = self.store._inspect_sync(start["adaptive_session_id"])
         self.assertIsNotNone(record.aggregate.pending)
         self.assertFalse(record.aggregate.current_quiz.profile_written)
         self.assertFalse(record.busy)
 
-        recovered = self.client.post(
-            "/agent/adaptive/submit", json=payload, headers=headers
-        )
+        recovered = self.client.post("/agent/adaptive/submit", json=payload, headers=headers)
         self.assertEqual(recovered.status_code, 200, recovered.text)
         self.assertTrue(recovered.json()["done"])
         self.assertEqual(self.memory.await_count, 2)
@@ -457,9 +497,7 @@ class TestAdaptiveDurableRoutes(unittest.TestCase):
             start["adaptive_session_id"], "external-test", "test-claim-token"
         )
         self.assertTrue(claim.claimed)
-        busy = self.client.post(
-            "/agent/adaptive/submit", json=self._submit_payload(start)
-        )
+        busy = self.client.post("/agent/adaptive/submit", json=self._submit_payload(start))
         self.assertEqual(busy.status_code, 409, busy.text)
         self.assertEqual(busy.json()["code"], "adaptive_session_busy")
         self.store._release_sync(start["adaptive_session_id"], "test-claim-token")
@@ -469,9 +507,7 @@ class TestAdaptiveDurableRoutes(unittest.TestCase):
         start = self._start()
         payload = self._submit_payload(start)
         headers = {"Idempotency-Key": "adaptive-submit-binding-1"}
-        first = self.client.post(
-            "/agent/adaptive/submit", json=payload, headers=headers
-        )
+        first = self.client.post("/agent/adaptive/submit", json=payload, headers=headers)
         self.assertEqual(first.status_code, 200, first.text)
 
         mismatch_payload = dict(payload)
@@ -499,9 +535,7 @@ class TestAdaptiveDurableRoutes(unittest.TestCase):
         with patch.object(adaptive_router, "adaptive_sessions", expiring_store):
             start = self._start()
             now[0] = 102.0
-            response = self.client.get(
-                f"/agent/adaptive/{start['adaptive_session_id']}"
-            )
+            response = self.client.get(f"/agent/adaptive/{start['adaptive_session_id']}")
 
         self.assertEqual(response.status_code, 410, response.text)
         self.assertEqual(response.json()["code"], "adaptive_session_expired")
@@ -521,9 +555,7 @@ class TestAdaptiveDurableRoutes(unittest.TestCase):
             connection.commit()
         finally:
             connection.close()
-        response = self.client.get(
-            f"/agent/adaptive/{start['adaptive_session_id']}"
-        )
+        response = self.client.get(f"/agent/adaptive/{start['adaptive_session_id']}")
 
         self.assertEqual(response.status_code, 503, response.text)
         self.assertEqual(response.json()["code"], "adaptive_session_corrupt")

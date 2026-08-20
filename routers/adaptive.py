@@ -29,6 +29,7 @@ from models.adaptive_session import (
     AdaptiveTurnResponse,
 )
 from models.grader import GradingReport
+from models.learning_path import LearningPath
 from models.session import QuestionView, QuizSession
 from services.adaptive_loop import decide_next_step, generate_lesson, should_terminate
 from services.adaptive_sessions import (
@@ -44,6 +45,13 @@ from services.grader import grade_quiz_session
 from services.idempotency import IdempotencyConflictError, normalize_idempotency_key
 from services.injection import check_injection
 from services.learning_path import generate_learning_path
+from services.learning_path_store import (
+    LearningPathCorruptError,
+    LearningPathCreationConflictError,
+    LearningPathPayloadTooLargeError,
+    LearningPathRecord,
+    learning_path_store,
+)
 from services.memory import (
     append_decision,
     commit_learning_memory,
@@ -58,6 +66,7 @@ from services.vectorstore import ensure_document_available
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+_ADAPTIVE_PATH_OPERATION = "adaptive_switch_to_plan_publish_v1"
 
 
 def _not_found() -> QuizSessionApiError:
@@ -127,6 +136,31 @@ def _too_large() -> QuizSessionApiError:
         413,
         "adaptive_session_too_large",
         "自适应学习会话内容过大，无法继续保存",
+    )
+
+
+def _path_too_large() -> QuizSessionApiError:
+    return QuizSessionApiError(
+        413,
+        "adaptive_learning_path_too_large",
+        "推荐学习路径内容过大，无法保存",
+    )
+
+
+def _path_corrupt() -> QuizSessionApiError:
+    return QuizSessionApiError(
+        503,
+        "adaptive_learning_path_corrupt",
+        "推荐学习路径数据无效，请重新开始",
+        reason="corrupt",
+    )
+
+
+def _path_unavailable() -> QuizSessionApiError:
+    return QuizSessionApiError(
+        503,
+        "adaptive_learning_path_store_unavailable",
+        "推荐学习路径存储暂时不可用，请重试",
     )
 
 
@@ -371,9 +405,7 @@ def _build_summary(
         "switch_to_plan": "转入系统学习路径",
     }
     trajectory = " → ".join(
-        f"T{turn.turn}({turn.score:.2f})"
-        if turn.score is not None
-        else f"T{turn.turn}(-)"
+        f"T{turn.turn}({turn.score:.2f})" if turn.score is not None else f"T{turn.turn}(-)"
         for turn in history
     )
     mastery_text = f"{mastery:.2f}" if mastery is not None else "未知"
@@ -426,15 +458,176 @@ def _artifact(
     )
 
 
-def _response(
+def _adaptive_path_binding(
+    record: StoredAdaptiveSession,
+    artifact: AdaptiveTurnArtifact,
+) -> tuple[LearningPath, str, str] | None:
+    if artifact.terminate_reason != "switch_to_plan":
+        return None
+
+    aggregate = record.aggregate
+    try:
+        if record.busy or aggregate.status != "completed":
+            raise ValueError("adaptive path source is not a settled terminal record")
+        canonical = aggregate.current_artifact
+        if artifact.model_dump(mode="json") != canonical.model_dump(mode="json"):
+            raise ValueError("adaptive path response is not the canonical artifact")
+        path = LearningPath.model_validate(canonical.learning_path)
+        if path.document_id != aggregate.document_id:
+            raise ValueError("adaptive path document binding is inconsistent")
+        fingerprint = _canonical_hash(
+            {
+                "operation": _ADAPTIVE_PATH_OPERATION,
+                "adaptive_session_id": aggregate.adaptive_session_id,
+                "user_id": aggregate.user_id,
+                "document_id": aggregate.document_id,
+                "goal": aggregate.goal,
+                "source_created_at": record.updated_at,
+                "learning_path": path.model_dump(mode="json"),
+            }
+        )
+    except (TypeError, ValueError, ValidationError) as exc:
+        logger.error(
+            "adaptive learning path binding is invalid: error_type=%s",
+            type(exc).__name__,
+        )
+        raise _path_corrupt() from exc
+
+    creation_key = f"{_ADAPTIVE_PATH_OPERATION}:{aggregate.adaptive_session_id}"
+    return path, creation_key, fingerprint
+
+
+def _validate_published_path(
+    published: LearningPathRecord,
+    record: StoredAdaptiveSession,
+    path: LearningPath,
+) -> str:
+    aggregate = record.aggregate
+    try:
+        if not isinstance(published, LearningPathRecord):
+            raise TypeError("published learning path record is invalid")
+        published_path = LearningPath.model_validate(published.path.model_dump(mode="json"))
+        if (
+            published.user_id != aggregate.user_id
+            or published.document_id != aggregate.document_id
+            or published.created_at != record.updated_at
+            or published_path.model_dump(mode="json") != path.model_dump(mode="json")
+        ):
+            raise ValueError("published learning path binding is inconsistent")
+        # Reuse the public resource model's path-id constraint without coupling
+        # the Adaptive aggregate to the external resource identifier.
+        if not (
+            isinstance(published.path_id, str)
+            and len(published.path_id) == 35
+            and published.path_id.startswith("lp_")
+            and all(char in "0123456789abcdef" for char in published.path_id[3:])
+        ):
+            raise ValueError("published learning path id is invalid")
+    except (TypeError, ValueError, ValidationError) as exc:
+        logger.error(
+            "published adaptive learning path is invalid: error_type=%s",
+            type(exc).__name__,
+        )
+        raise _path_corrupt() from exc
+    return published.path_id
+
+
+async def _publish_adaptive_learning_path(
+    record: StoredAdaptiveSession,
+    artifact: AdaptiveTurnArtifact,
+) -> str | None:
+    binding = _adaptive_path_binding(record, artifact)
+    if binding is None:
+        return None
+    path, creation_key, fingerprint = binding
+    aggregate = record.aggregate
+
+    try:
+        published = await learning_path_store.find_by_creation(
+            creation_key,
+            aggregate.user_id,
+            aggregate.document_id,
+            fingerprint,
+        )
+    except LearningPathCreationConflictError as exc:
+        logger.error("adaptive learning path creation binding conflicts")
+        raise _path_corrupt() from exc
+    except LearningPathCorruptError as exc:
+        logger.error("adaptive learning path record is corrupt")
+        raise _path_corrupt() from exc
+    except Exception as exc:
+        logger.error(
+            "adaptive learning path lookup failed: error_type=%s",
+            type(exc).__name__,
+        )
+        raise _path_unavailable() from exc
+
+    if published is None:
+        create_error: Exception | None = None
+        try:
+            published = await learning_path_store.create(
+                aggregate.user_id,
+                aggregate.document_id,
+                path,
+                idempotency_key=creation_key,
+                request_fingerprint=fingerprint,
+                source_created_at=record.updated_at,
+            )
+        except LearningPathPayloadTooLargeError as exc:
+            raise _path_too_large() from exc
+        except LearningPathCreationConflictError as exc:
+            logger.error("adaptive learning path creation binding conflicts")
+            raise _path_corrupt() from exc
+        except LearningPathCorruptError as exc:
+            logger.error("adaptive learning path create found corrupt storage")
+            raise _path_corrupt() from exc
+        except Exception as exc:
+            # A database commit can succeed even when its acknowledgement is
+            # lost. Re-read the deterministic binding before reporting an
+            # unavailable store so the canonical committed result wins.
+            create_error = exc
+
+        if published is None and create_error is not None:
+            try:
+                published = await learning_path_store.find_by_creation(
+                    creation_key,
+                    aggregate.user_id,
+                    aggregate.document_id,
+                    fingerprint,
+                )
+            except LearningPathCreationConflictError as exc:
+                logger.error("adaptive learning path recovery binding conflicts")
+                raise _path_corrupt() from exc
+            except LearningPathCorruptError as exc:
+                logger.error("adaptive learning path recovery found corrupt storage")
+                raise _path_corrupt() from exc
+            except Exception as recovery_error:
+                logger.error(
+                    "adaptive learning path recovery lookup failed: error_type=%s",
+                    type(recovery_error).__name__,
+                )
+                raise _path_unavailable() from create_error
+            if published is None:
+                logger.error(
+                    "adaptive learning path create failed without a durable receipt: error_type=%s",
+                    type(create_error).__name__,
+                )
+                raise _path_unavailable() from create_error
+
+    return _validate_published_path(published, record, path)
+
+
+async def _response(
     record: StoredAdaptiveSession,
     artifact: AdaptiveTurnArtifact,
 ) -> AdaptiveTurnResponse:
+    learning_path_id = await _publish_adaptive_learning_path(record, artifact)
     return AdaptiveTurnResponse(
         **artifact.model_dump(mode="json"),
         revision=record.revision,
         expires_at=record.expires_at,
         busy=record.busy,
+        learning_path_id=learning_path_id,
     )
 
 
@@ -636,7 +829,7 @@ async def adaptive_start(
         existing = await _find_start(key, request_payload)
         if existing is not None:
             record, aggregate = existing
-            return _response(record, aggregate.current_artifact)
+            return await _response(record, aggregate.current_artifact)
 
     try:
         await ensure_document_available(req.document_id)
@@ -645,7 +838,7 @@ async def adaptive_start(
             logger.warning("adaptive start input safety check rejected")
             raise HTTPException(status_code=400, detail="输入安全检查未通过")
         record, aggregate = await _create_start(req, key, request_payload)
-        return _response(record, aggregate.current_artifact)
+        return await _response(record, aggregate.current_artifact)
     except NotFoundError as exc:
         raise HTTPException(status_code=404, detail="文档不存在") from exc
     except ChromaError as exc:
@@ -662,7 +855,7 @@ async def adaptive_start(
 @router.get("/agent/adaptive/{adaptive_session_id}", response_model=AdaptiveTurnResponse)
 async def adaptive_snapshot(adaptive_session_id: str) -> AdaptiveTurnResponse:
     record, aggregate = await _inspect_live(adaptive_session_id)
-    return _response(record, aggregate.current_artifact)
+    return await _response(record, aggregate.current_artifact)
 
 
 def _find_receipt(
@@ -800,8 +993,7 @@ async def _write_checkpointed_memory(
             aggregate.user_id,
             {
                 "decision_id": (
-                    f"adaptive:{aggregate.adaptive_session_id}:"
-                    f"turn:{pending.turn}:decision"
+                    f"adaptive:{aggregate.adaptive_session_id}:turn:{pending.turn}:decision"
                 ),
                 "agent": "adaptive_loop",
                 "decision": answered_decision.action,
@@ -1028,7 +1220,7 @@ async def adaptive_submit(
     inspected_record, inspected = await _inspect_live(req.adaptive_session_id)
     replay = _find_receipt(inspected, key_hash, request_hash)
     if replay is not None:
-        return _response(inspected_record, replay)
+        return await _response(inspected_record, replay)
     _validate_submit_binding(
         req,
         inspected,
@@ -1044,16 +1236,14 @@ async def adaptive_submit(
         # claim. Re-read once so a response-loss retry with the same key still
         # receives its durable receipt instead of a misleading completed error.
         if exc.code == "adaptive_session_completed" and key_hash is not None:
-            raced_record, raced_aggregate = await _inspect_live(
-                req.adaptive_session_id
-            )
+            raced_record, raced_aggregate = await _inspect_live(req.adaptive_session_id)
             raced_replay = _find_receipt(
                 raced_aggregate,
                 key_hash,
                 request_hash,
             )
             if raced_replay is not None:
-                return _response(raced_record, raced_replay)
+                return await _response(raced_record, raced_replay)
         raise
     token = claim.token
     completed = False
@@ -1062,9 +1252,7 @@ async def adaptive_submit(
         if replay is not None:
             await _release(req.adaptive_session_id, token)
             completed = True
-            settled_record, settled_aggregate = await _inspect_live(
-                req.adaptive_session_id
-            )
+            settled_record, settled_aggregate = await _inspect_live(req.adaptive_session_id)
             settled_replay = _find_receipt(
                 settled_aggregate,
                 key_hash,
@@ -1072,7 +1260,7 @@ async def adaptive_submit(
             )
             if settled_replay is None:
                 raise _corrupt()
-            return _response(settled_record, settled_replay)
+            return await _response(settled_record, settled_replay)
         final_record, artifact = await _execute_claimed_submit(
             req,
             key_hash,
@@ -1082,7 +1270,7 @@ async def adaptive_submit(
             token,
         )
         completed = True
-        return _response(final_record, artifact)
+        return await _response(final_record, artifact)
     except (InvalidQuizResponseError, ValidationError) as exc:
         logger.warning("adaptive provider returned invalid structured output")
         raise HTTPException(

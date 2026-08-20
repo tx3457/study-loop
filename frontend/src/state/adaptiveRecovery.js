@@ -3,6 +3,7 @@ export const ADAPTIVE_RECOVERY_STORAGE_KEY = 'study-loop.adaptive.recovery.v1'
 const SCHEMA_VERSION = 1
 const DEFAULT_USER_ID = 'default_user'
 const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u
+const LEARNING_PATH_ID_PATTERN = /^lp_[0-9a-f]{32}$/u
 const QUESTION_TYPES = new Set(['choice', 'true_false', 'short_answer'])
 const ACTIONS = new Set([
   'advance',
@@ -23,10 +24,14 @@ function isObject(value) {
   return value != null && typeof value === 'object' && !Array.isArray(value)
 }
 
+function textLength(value) {
+  return Array.from(value.trim()).length
+}
+
 function boundedText(value, maxLength) {
   return typeof value === 'string'
-    && value.trim().length > 0
-    && value.trim().length <= maxLength
+    && textLength(value) > 0
+    && textLength(value) <= maxLength
 }
 
 function isIdempotencyKey(value) {
@@ -49,19 +54,6 @@ function optionalText(value, maxLength) {
   )
 }
 
-function jsonCopy(value) {
-  try {
-    const encoded = JSON.stringify(value)
-    // The durable aggregate has a 2 MiB encoded payload limit. UTF-8 bytes are
-    // never fewer than JSON string code units, so this cannot reject a payload
-    // that the server Store accepted merely because of a narrower Web cap.
-    if (encoded.length > 2_097_152) return null
-    return JSON.parse(encoded)
-  } catch {
-    return null
-  }
-}
-
 function normalizeIntent(value) {
   if (
     !isObject(value)
@@ -75,6 +67,60 @@ function normalizeIntent(value) {
     user_id: DEFAULT_USER_ID,
     document_id: value.document_id.trim(),
     goal: value.goal.trim(),
+  }
+}
+
+function normalizeLearningStage(value, index) {
+  if (
+    !isObject(value)
+    || value.stage !== index + 1
+    || !boundedText(value.title, 200)
+    || !Array.isArray(value.topics)
+    || value.topics.length < 1
+    || value.topics.length > 20
+    || value.topics.some(topic => !boundedText(topic, 200))
+    || !boundedText(value.description, 4000)
+    || !Number.isInteger(value.estimated_minutes)
+    || value.estimated_minutes < 1
+    || value.estimated_minutes > 480
+  ) {
+    return null
+  }
+
+  const topics = value.topics.map(topic => topic.trim())
+  if (new Set(topics.map(topic => topic.toLowerCase())).size !== topics.length) {
+    return null
+  }
+  return {
+    stage: value.stage,
+    title: value.title.trim(),
+    topics,
+    description: value.description.trim(),
+    estimated_minutes: value.estimated_minutes,
+  }
+}
+
+function normalizeLearningPath(value) {
+  if (
+    !isObject(value)
+    || !boundedText(value.document_id, 512)
+    || !boundedText(value.title, 200)
+    || !Number.isInteger(value.total_stages)
+    || value.total_stages < 1
+    || value.total_stages > 12
+    || !Array.isArray(value.stages)
+    || value.stages.length !== value.total_stages
+  ) {
+    return null
+  }
+
+  const stages = value.stages.map(normalizeLearningStage)
+  if (stages.some(stage => stage == null)) return null
+  return {
+    document_id: value.document_id.trim(),
+    title: value.title.trim(),
+    total_stages: value.total_stages,
+    stages,
   }
 }
 
@@ -268,8 +314,18 @@ export function normalizeAdaptiveSnapshot(value, expectedSessionId = null) {
     return null
   }
 
-  const learningPath = jsonCopy(value.learning_path)
+  const learningPath = value.learning_path == null
+    ? null
+    : normalizeLearningPath(value.learning_path)
   if (value.learning_path != null && !learningPath) return null
+  const learningPathId = value.learning_path_id == null
+    ? null
+    : typeof value.learning_path_id === 'string'
+      && LEARNING_PATH_ID_PATTERN.test(value.learning_path_id)
+      ? value.learning_path_id
+      : undefined
+  if (learningPathId === undefined) return null
+  const switchedToPlan = value.terminate_reason === 'switch_to_plan'
   if (
     (
       value.done
@@ -281,7 +337,8 @@ export function normalizeAdaptiveSnapshot(value, expectedSessionId = null) {
           (decision.action === 'switch_to_plan')
           !== (value.terminate_reason === 'switch_to_plan')
         )
-        || ((learningPath != null) !== (value.terminate_reason === 'switch_to_plan'))
+        || ((learningPath != null) !== switchedToPlan)
+        || (learningPathId != null && !switchedToPlan)
       )
     )
     || (
@@ -290,6 +347,7 @@ export function normalizeAdaptiveSnapshot(value, expectedSessionId = null) {
         value.summary !== ''
         || value.terminate_reason !== ''
         || learningPath != null
+        || learningPathId != null
         || ['finish', 'switch_to_plan'].includes(decision.action)
       )
     )
@@ -314,6 +372,7 @@ export function normalizeAdaptiveSnapshot(value, expectedSessionId = null) {
     summary: value.summary,
     terminate_reason: value.terminate_reason,
     learning_path: learningPath,
+    learning_path_id: learningPathId,
     revision: value.revision,
     expires_at: value.expires_at,
     busy: value.busy,
@@ -389,7 +448,13 @@ export function normalizeAdaptiveRecovery(value) {
     value.snapshot,
     session.adaptive_session_id,
   )
-  if (!snapshot) return null
+  if (
+    !snapshot
+    || (
+      snapshot.learning_path != null
+      && snapshot.learning_path.document_id !== intent.document_id
+    )
+  ) return null
   const pendingSubmit = normalizePendingSubmit(
     value.pending_submit,
     session.adaptive_session_id,

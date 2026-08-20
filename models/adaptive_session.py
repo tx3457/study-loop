@@ -66,9 +66,7 @@ def _validate_decision(decision: NextStepDecision) -> None:
         raise ValueError("adaptive decision has an invalid difficulty")
     if decision.question_type not in _QUESTION_TYPES:
         raise ValueError("adaptive decision has an invalid question type")
-    if not 0.0 <= decision.difficulty_score <= 1.0 or not math.isfinite(
-        decision.difficulty_score
-    ):
+    if not 0.0 <= decision.difficulty_score <= 1.0 or not math.isfinite(decision.difficulty_score):
         raise ValueError("adaptive decision difficulty score is out of range")
     if not 1 <= decision.count <= MAX_ADAPTIVE_ANSWERS:
         raise ValueError("adaptive decision question count is out of range")
@@ -77,8 +75,7 @@ def _validate_decision(decision: NextStepDecision) -> None:
     if len(decision.reason) > 8_000:
         raise ValueError("adaptive decision reason is too long")
     if len(decision.target_weak_points) > 100 or any(
-        not point.strip() or len(point) > 2_000
-        for point in decision.target_weak_points
+        not point.strip() or len(point) > 2_000 for point in decision.target_weak_points
     ):
         raise ValueError("adaptive decision weak points are invalid")
 
@@ -200,18 +197,14 @@ class AdaptiveTurnArtifact(_StrictModel):
         for item in self.trajectory:
             if item.action not in _ACTIONS:
                 raise ValueError("adaptive trajectory contains an invalid action")
-            if (
-                not math.isfinite(item.difficulty_score)
-                or not 0.0 <= item.difficulty_score <= 1.0
-            ):
+            if not math.isfinite(item.difficulty_score) or not 0.0 <= item.difficulty_score <= 1.0:
                 raise ValueError("adaptive trajectory difficulty is out of range")
             if item.score is not None and (
                 not math.isfinite(item.score) or not 0.0 <= item.score <= 1.0
             ):
                 raise ValueError("adaptive trajectory score is out of range")
             if item.mastery_after is not None and (
-                not math.isfinite(item.mastery_after)
-                or not 0.0 <= item.mastery_after <= 1.0
+                not math.isfinite(item.mastery_after) or not 0.0 <= item.mastery_after <= 1.0
             ):
                 raise ValueError("adaptive trajectory mastery is out of range")
             if not item.topic.strip() or len(item.topic) > 4_000:
@@ -219,8 +212,7 @@ class AdaptiveTurnArtifact(_StrictModel):
             if len(item.reason) > 8_000:
                 raise ValueError("adaptive trajectory reason is too long")
             if len(item.knowledge_gaps) > 100 or any(
-                not gap.strip() or len(gap) > 2_000
-                for gap in item.knowledge_gaps
+                not gap.strip() or len(gap) > 2_000 for gap in item.knowledge_gaps
             ):
                 raise ValueError("adaptive trajectory gaps are invalid")
 
@@ -238,9 +230,7 @@ class AdaptiveTurnArtifact(_StrictModel):
                 raise ValueError("completed artifact requires terminal metadata")
             if self.terminate_reason not in _TERMINATE_REASONS:
                 raise ValueError("completed artifact has an invalid terminate reason")
-            if (self.decision.action == "finish") != (
-                self.terminate_reason == "agent_finish"
-            ):
+            if (self.decision.action == "finish") != (self.terminate_reason == "agent_finish"):
                 raise ValueError("finish decision and terminate reason disagree")
             if (self.decision.action == "switch_to_plan") != (
                 self.terminate_reason == "switch_to_plan"
@@ -276,6 +266,17 @@ class AdaptiveTurnResponse(AdaptiveTurnArtifact):
     revision: int = Field(ge=1)
     expires_at: float = Field(gt=0)
     busy: bool = False
+    learning_path_id: str | None = Field(
+        default=None,
+        pattern=r"^lp_[0-9a-f]{32}$",
+    )
+
+    @model_validator(mode="after")
+    def validate_published_learning_path(self) -> Self:
+        requires_path = self.terminate_reason == "switch_to_plan"
+        if requires_path != (self.learning_path_id is not None):
+            raise ValueError("switch_to_plan response requires exactly one published path id")
+        return self
 
 
 class AdaptivePendingSubmit(_StrictModel):
@@ -395,10 +396,7 @@ class AdaptiveSessionAggregate(_StrictModel):
                 raise ValueError("adaptive quiz private metadata is too long")
             if question.options is not None and (
                 len(question.options) > 20
-                or any(
-                    not option.strip() or len(option) > 4_000
-                    for option in question.options
-                )
+                or any(not option.strip() or len(option) > 4_000 for option in question.options)
             ):
                 raise ValueError("adaptive quiz options are invalid")
 
@@ -427,8 +425,7 @@ class AdaptiveSessionAggregate(_StrictModel):
             ):
                 raise ValueError("adaptive quiz grading report is inconsistent")
             if any(
-                report.grades[index].model_dump()
-                != quiz.question_grades[index].model_dump()
+                report.grades[index].model_dump() != quiz.question_grades[index].model_dump()
                 for index in expected_indices
             ):
                 raise ValueError("adaptive quiz report differs from cached grades")
@@ -445,8 +442,7 @@ class AdaptiveSessionAggregate(_StrictModel):
             not report.session_id
             or report.total <= 0
             or len(report.grades) != report.total
-            or [grade.index for grade in report.grades]
-            != list(range(report.total))
+            or [grade.index for grade in report.grades] != list(range(report.total))
         ):
             raise ValueError("adaptive last report is inconsistent")
         correct = sum(grade.is_correct for grade in report.grades)
@@ -466,9 +462,7 @@ class AdaptiveSessionAggregate(_StrictModel):
         if self.last_report is not None:
             self._validate_report_integrity(self.last_report)
         if quiz is not None:
-            expected_quiz_id = (
-                f"adaptive:{self.adaptive_session_id}:turn:{artifact.turn}"
-            )
+            expected_quiz_id = f"adaptive:{self.adaptive_session_id}:turn:{artifact.turn}"
             if quiz.session_id != expected_quiz_id:
                 raise ValueError("adaptive quiz id does not match session turn")
             if quiz.user_id != self.user_id or quiz.document_id != self.document_id:
@@ -476,22 +470,17 @@ class AdaptiveSessionAggregate(_StrictModel):
             self._validate_quiz_integrity(quiz)
             if quiz.status == "completed" and quiz.grading_report is not None:
                 report_matches = self.last_report is not None and (
-                    self.last_report.model_dump()
-                    == quiz.grading_report.model_dump()
+                    self.last_report.model_dump() == quiz.grading_report.model_dump()
                 )
                 if quiz.profile_written or artifact.done:
                     if not report_matches:
-                        raise ValueError(
-                            "completed adaptive quiz report was not recorded"
-                        )
+                        raise ValueError("completed adaptive quiz report was not recorded")
                 elif (
                     self.last_report is not None
                     and self.last_report.session_id == quiz.session_id
                     and not report_matches
                 ):
-                    raise ValueError(
-                        "adaptive last report differs from current quiz report"
-                    )
+                    raise ValueError("adaptive last report differs from current quiz report")
 
         pending = self.pending
         if pending is not None:
@@ -541,24 +530,18 @@ class AdaptiveSessionAggregate(_StrictModel):
             if [item.model_dump(mode="json") for item in artifact.last_report_feedback] != [
                 item.model_dump(mode="json") for item in expected_feedback
             ]:
-                raise ValueError(
-                    "adaptive artifact feedback differs from canonical report"
-                )
+                raise ValueError("adaptive artifact feedback differs from canonical report")
 
         if artifact.done:
             if pending is not None:
                 raise ValueError("completed adaptive session cannot have pending work")
-            expected_current_report_id = (
-                f"adaptive:{self.adaptive_session_id}:turn:{artifact.turn}"
-            )
+            expected_current_report_id = f"adaptive:{self.adaptive_session_id}:turn:{artifact.turn}"
             answered_current_turn = (
                 self.last_report is not None
                 and self.last_report.session_id == expected_current_report_id
             ) or artifact.trajectory[-1].score is not None
             if quiz is None and answered_current_turn:
-                raise ValueError(
-                    "completed answered turn requires its private adaptive quiz"
-                )
+                raise ValueError("completed answered turn requires its private adaptive quiz")
             if quiz is not None:
                 if quiz.status == "active":
                     raise ValueError("completed adaptive session cannot have an active quiz")
@@ -619,12 +602,9 @@ class AdaptiveSessionAggregate(_StrictModel):
                 raise ValueError("adaptive submit receipt response refers to a future turn")
             if receipt.response.done and (
                 self.status != "completed"
-                or receipt.response.model_dump(mode="json")
-                != artifact.model_dump(mode="json")
+                or receipt.response.model_dump(mode="json") != artifact.model_dump(mode="json")
             ):
-                raise ValueError(
-                    "completed adaptive submit receipt is not the canonical state"
-                )
+                raise ValueError("completed adaptive submit receipt is not the canonical state")
         return self
 
     @classmethod
