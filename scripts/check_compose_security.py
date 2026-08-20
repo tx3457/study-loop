@@ -87,8 +87,8 @@ def _assert_safe_config(config: dict) -> None:
         raise ComposeSecurityError("embedded Chroma backend must force one worker")
 
     health_test = services["backend"].get("healthcheck", {}).get("test", [])
-    if "/health/live" not in " ".join(str(part) for part in health_test):
-        raise ComposeSecurityError("backend healthcheck must use /health/live")
+    if "/health/ready" not in " ".join(str(part) for part in health_test):
+        raise ComposeSecurityError("backend healthcheck must use storage readiness")
 
     backend_dependency = services["frontend"].get("depends_on", {}).get("backend", {})
     if backend_dependency.get("condition") != "service_healthy":

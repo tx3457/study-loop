@@ -42,6 +42,15 @@ client = build_managed_async_openai(_embedding_config)
 _CHROMA_DIR = os.getenv("CHROMA_DIR") or str(Path(__file__).parent.parent / "chroma_db")
 chromadb_client = chromadb.PersistentClient(_CHROMA_DIR)
 
+
+def probe_vectorstore_readiness() -> None:
+    """Read Chroma's persistent collection catalog without mutating it.
+
+    Chroma's ``heartbeat()`` only returns the current time, so it cannot prove
+    that the embedded metadata database remains readable.
+    """
+    chromadb_client.count_collections()
+
 # 单次 embedding 请求最多 chunk 数:大文档分批,避免撞厂商单请求 input 上限
 EMBED_BATCH_SIZE = 64
 _STAGING_PREFIX = "studyloop-staging-"

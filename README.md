@@ -58,7 +58,7 @@ docker compose up --build -d --wait
 - API 文档：<http://localhost:8001/docs>
 
 默认 Compose 仅将 Web 与 API 绑定到本机回环地址，PostgreSQL 不发布宿主端口。
-启动命令会等待 PostgreSQL 与后端 `/health/live` 就绪；该检查不访问模型服务。
+启动命令会等待 PostgreSQL 与后端 `/health/ready` 的存储检查通过；该检查不访问模型服务。
 后端以固定的非 root 用户运行；启动前的一次性初始化容器会修复旧 Chroma 卷的
 目录属主，因此从早期 root 镜像升级时无需删除已有索引卷。
 如需共享访问，应先在反向代理层增加认证与 TLS，不要直接将后端端口暴露到公网。
@@ -148,10 +148,23 @@ Structured Output 和 Embeddings 的专用 key 与地址必须成对配置；两
 
 ```bash
 curl -i http://localhost:8001/health/live
+curl -i http://localhost:8001/health/ready
 curl -i http://localhost:8001/health/providers
 ```
 
-`/health/live` 只检查进程存活，不访问外部服务。`/health/providers` 调用 Provider 的 `models.list`，不会发起 Chat、Structured Output 或 Embedding 请求；结果默认缓存 30 秒。全部模型在目录中可见时返回 200，否则返回 503 和稳定的诊断码。目录可达只代表凭据、地址和模型可见性正常，不代表 Structured Output、Tool Calling 或 Embedding 能力已经实际验证。
+`/health/live` 只检查进程存活，不访问存储或模型服务。`/health/ready` 检查当前进程使用的
+Chroma collection 元数据是否可读；配置 `DATABASE_URL` 时还会执行有界的 PostgreSQL
+`SELECT 1`，并读取应用实际持有的 learner-memory Store；未配置数据库时则校验 Web 主流程实际选择的
+SQLite 文件以及本机 learner-memory 快照目录可读写。必需存储不可用时返回 503 和固定诊断码，
+但不会返回数据库地址、Chroma 路径或原始异常。该检查证明存储连接、collection catalog 与本地状态
+文件当前可访问，不等于完整上传、出题或写入流程的端到端测试。PostgreSQL 进程重启后应同时重启
+backend，让其持有的 learner-memory 连接重新建立。`/health/providers` 调用 Provider 的 `models.list`，
+不会发起 Chat、Structured Output 或 Embedding 请求；结果默认缓存 30 秒。全部模型在目录中可见时
+返回 200，否则返回 503 和稳定的诊断码。目录可达只代表凭据、地址和模型可见性正常，不代表
+Structured Output、Tool Calling 或 Embedding 能力已经实际验证。
+
+通过 Web 容器探测时使用 `http://localhost:4001/api/health/ready`；裸的 Web 路径
+`/health/ready` 属于前端路由，不是 API readiness 端点。
 
 统一的 `llm_chat`、`llm_parse` 和 Embedding 重试链路默认各有 60 秒端到端预算（含退避等待），可通过 `PROVIDER_REQUEST_DEADLINE_SECONDS` 调整。HTTP 边界会返回稳定错误码：限流为 `provider_rate_limited`（429）、超时为 `provider_timeout`（504）、其他上游故障为 `provider_unavailable`（503），未配置则为 `provider_not_configured`（503）；前端不需要解析 Provider 原始异常。
 每个 HTTP 响应都会带服务端生成或严格校验后的 `X-Request-ID`；浏览器的通用 API 与
