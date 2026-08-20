@@ -36,6 +36,10 @@ from services.request_context import (
     current_request_id,
     public_error_payload,
 )
+from services.origin_guard import (
+    ALLOWED_BROWSER_ORIGINS,
+    OriginGuardMiddleware,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -125,16 +129,12 @@ app = FastAPI(
 app.add_middleware(SafeErrorMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",   # Vite dev
-        "http://127.0.0.1:5173",   # Vite dev（loopback 地址）
-        "http://localhost:4001",   # Docker 前端（直接访问后端时）
-        "http://127.0.0.1:4001",   # Docker 前端（loopback 地址）
-    ],
+    allow_origins=ALLOWED_BROWSER_ORIGINS,
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["X-Request-ID"],
 )
+app.add_middleware(OriginGuardMiddleware)
 app.add_middleware(RequestContextMiddleware)
 
 app.include_router(chat_router)

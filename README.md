@@ -58,6 +58,10 @@ docker compose up --build -d --wait
 - API 文档：<http://localhost:8001/docs>
 
 默认 Compose 仅将 Web 与 API 绑定到本机回环地址，PostgreSQL 不发布宿主端口。
+浏览器写请求默认仅接受本项目的 `localhost`/`127.0.0.1` Web、开发前端与 API 文档
+来源（端口 4001、5173、8001）；命令行请求不带 `Origin` 时不受此限制。自定义域名或
+HTTPS 反向代理不在默认支持范围内，部署者必须把其精确的 scheme、host、port 加入
+`services/origin_guard.py` 的共享受信来源并重新构建，不能只改代理的 `Host`。
 启动命令会等待 PostgreSQL 与后端 `/health/ready` 的存储检查通过；该检查不访问模型服务。
 后端以固定的非 root 用户运行；启动前的一次性初始化容器会修复旧 Chroma 卷的
 目录属主，因此从早期 root 镜像升级时无需删除已有索引卷。
