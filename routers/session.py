@@ -289,22 +289,53 @@ async def _release_claim(session_id: str, token: str | None) -> None:
         logger.error("durable quiz session claim release failed")
 
 
-async def _persist_objective_memory(session_id: str) -> None:
-    """Best-effort memory write after the completed answer is already durable."""
+def _objective_memory_pending(record: StoredQuizSession) -> bool:
+    session = record.aggregate.session
+    return (
+        session.status == "completed"
+        and not session.profile_written
+        and all(question.type != "short_answer" for question in session.questions)
+    )
+
+
+async def _persist_objective_memory(
+    session_id: str,
+    record: StoredQuizSession,
+) -> StoredQuizSession:
+    """Best-effort repair of the durable objective-memory outbox marker."""
+    if not _objective_memory_pending(record):
+        return record
+
     claim = None
     try:
         claim = await quiz_sessions.claim(session_id, "objective_memory")
         if not claim.claimed or claim.record is None or claim.token is None:
-            return
+            return record
         aggregate = claim.record.aggregate.model_copy(deep=True)
         session = aggregate.session
-        if session.profile_written:
+        if not _objective_memory_pending(claim.record):
             await quiz_sessions.release(session_id, claim.token)
-            return
+            refreshed = await quiz_sessions.inspect(session_id)
+            return refreshed or record
 
-        await write_objective_profile(session, session_id)
-        if await quiz_sessions.complete(session_id, claim.token, aggregate) is None:
+        if session.grading_report is not None:
+            await commit_learning_memory(
+                session.user_id,
+                session.grading_report,
+                session.document_id,
+                questions=session.questions,
+                on_core_written=lambda: setattr(session, "profile_written", True),
+            )
+        else:
+            await write_objective_profile(session, session_id)
+        if not session.profile_written:
+            raise RuntimeError("objective memory writer did not publish its marker")
+        completed = await quiz_sessions.complete(session_id, claim.token, aggregate)
+        if completed is None:
             logger.warning("objective memory marker lost its quiz session claim")
+            await _release_claim(session_id, claim.token)
+            return record
+        return completed
     except BaseException as exc:
         if claim is not None and claim.claimed:
             await _release_claim(session_id, claim.token)
@@ -314,6 +345,7 @@ async def _persist_objective_memory(session_id: str) -> None:
             "objective quiz memory write failed without blocking answer: %s",
             type(exc).__name__,
         )
+        return record
 
 
 async def _checkpoint_claim(
@@ -488,7 +520,9 @@ async def start(
 
 @router.get("/{session_id}", response_model=SessionSnapshot)
 async def snapshot(session_id: str):
-    return _snapshot(await _inspect_live(session_id))
+    record = await _inspect_live(session_id)
+    record = await _persist_objective_memory(session_id, record)
+    return _snapshot(record)
 
 
 @router.post(
@@ -508,7 +542,8 @@ async def answer(
         key_hash, request_hash = _answer_request_hashes(key, session_id, req)
         replay = _replay_bound_answer(current, key_hash, request_hash, req)
         if replay is not None:
-            return replay
+            current = await _persist_objective_memory(session_id, current)
+            return _replay_bound_answer(current, key_hash, request_hash, req) or replay
 
     claim = None
     try:
@@ -522,9 +557,14 @@ async def answer(
                 req,
             )
             if replay is not None:
+                replay_record = claim.record
                 await _release_claim(session_id, claim.token)
                 claim = None
-                return replay
+                repaired = await _persist_objective_memory(session_id, replay_record)
+                return (
+                    _replay_bound_answer(repaired, key_hash, request_hash, req)
+                    or replay
+                )
         response = await apply_answer_to_session(
             aggregate.session,
             req.answer,
@@ -539,8 +579,7 @@ async def answer(
         if response.is_last and not any(
             question.type == "short_answer" for question in aggregate.session.questions
         ):
-            await _persist_objective_memory(session_id)
-            committed = await _inspect_live(session_id)
+            committed = await _persist_objective_memory(session_id, committed)
 
         response = _answer_response(committed, req.question_index)
         return response
@@ -562,6 +601,7 @@ async def answer(
 @router.get("/{session_id}/result", response_model=SessionResult)
 async def result(session_id: str):
     record = await _inspect_live(session_id)
+    record = await _persist_objective_memory(session_id, record)
     try:
         response = build_result(record.aggregate.session)
     except SessionConflictError as exc:

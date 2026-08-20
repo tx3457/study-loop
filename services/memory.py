@@ -497,10 +497,51 @@ async def append_session_brief(user_id: str, brief: dict) -> None:
     _append_session_brief_sync(user_id, brief)
 
 
-async def append_error(user_id: str, error: dict) -> None:
+def _append_error_sync(user_id: str, error: dict) -> None:
     key = error.get("error_id") or f"err_{uuid.uuid4().hex[:12]}"
-    payload = {**error, "error_id": key}
-    await append_bank_event(user_id, "error_log", key, payload)
+    namespace = _bank_ns(user_id, "error_log")
+    with _store_access_lock():
+        # error_id identifies the original mistake. Retries and later failed
+        # practice attempts must not rewrite that event, especially after a
+        # successful practice has added the monotonic resolution fields.
+        if store.get(namespace, key) is not None:
+            return
+        payload = {**copy.deepcopy(error), "error_id": key}
+        payload.setdefault("timestamp", _now_iso())
+        store.put(namespace, key, payload)
+
+
+async def append_error(user_id: str, error: dict) -> None:
+    if DATABASE_URL:
+        await asyncio.to_thread(
+            _run_with_postgres_session_archive_lock,
+            user_id,
+            DATABASE_URL,
+            lambda: _append_error_sync(user_id, error),
+        )
+        return
+    _append_error_sync(user_id, error)
+
+
+def _resolve_error_sync(
+    user_id: str,
+    error_id: str,
+    resolved_session_id: str,
+) -> bool:
+    namespace = _bank_ns(user_id, "error_log")
+    with _store_access_lock():
+        item = store.get(namespace, error_id)
+        if item is None:
+            return False
+        payload = copy.deepcopy(item.value)
+        if payload.get("resolved_at"):
+            return True
+        payload.update(
+            resolved_at=_now_iso(),
+            resolved_session_id=resolved_session_id,
+        )
+        store.put(namespace, error_id, payload)
+    return True
 
 
 async def resolve_error(
@@ -509,18 +550,22 @@ async def resolve_error(
     resolved_session_id: str,
 ) -> bool:
     """把重练答对的错题标为已解决，同时保留原始事件供审计。"""
-    namespace = _bank_ns(user_id, "error_log")
-    with _store_access_lock():
-        item = store.get(namespace, error_id)
-        if item is None:
-            return False
-        payload = {
-            **copy.deepcopy(item.value),
-            "resolved_at": _now_iso(),
-            "resolved_session_id": resolved_session_id,
-        }
-        store.put(namespace, error_id, payload)
-    return True
+    if DATABASE_URL:
+        result: list[bool] = []
+
+        def operation() -> None:
+            result.append(
+                _resolve_error_sync(user_id, error_id, resolved_session_id)
+            )
+
+        await asyncio.to_thread(
+            _run_with_postgres_session_archive_lock,
+            user_id,
+            DATABASE_URL,
+            operation,
+        )
+        return result[0]
+    return _resolve_error_sync(user_id, error_id, resolved_session_id)
 
 
 async def append_decision(user_id: str, decision: dict) -> None:
@@ -758,8 +803,8 @@ async def write_episodic_memory(
             continue
 
         await append_error(user_id, {
-            # 同一份批改报告重试时覆盖原记录，不重复追加错题。
-            # 重练仍答错时覆盖原错题，使未解决列表不会分裂出副本。
+            # error_id 对应原始错题事件：报告重试与重练仍答错都保持同一条，
+            # 只有答对后的 resolve_error 会单调追加解决状态。
             "error_id": source_error_id or f"{report.session_id}:{g.index}",
             "session_id": report.session_id,
             "question_index": g.index,
