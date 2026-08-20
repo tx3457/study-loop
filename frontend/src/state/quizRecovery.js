@@ -19,6 +19,27 @@ function isIdempotencyKey(value) {
   return typeof value === 'string' && IDEMPOTENCY_KEY_PATTERN.test(value.trim())
 }
 
+function normalizeLaunchId(value) {
+  if (value == null) return null
+  return isIdempotencyKey(value) ? value.trim() : null
+}
+
+function normalizeLaunchPreset(value) {
+  if (value == null) return null
+  if (
+    !isObject(value)
+    || !isBoundedText(value.document_id, 512)
+    || typeof value.topic !== 'string'
+    || value.topic.trim().length > 4000
+  ) {
+    return null
+  }
+  return {
+    document_id: value.document_id.trim(),
+    topic: value.topic.trim(),
+  }
+}
+
 function normalizeStandardRequest(value) {
   if (
     !isObject(value)
@@ -121,11 +142,16 @@ export function normalizeQuizRecovery(value) {
   const intent = normalizeIntent(value.intent)
   const session = normalizeSession(value.session)
   const pendingAnswer = normalizePendingAnswer(value.pending_answer)
+  const launchId = normalizeLaunchId(value.launch_id)
+  const launchPreset = normalizeLaunchPreset(value.launch_preset)
   const acknowledgedAnswerCount = value.acknowledged_answer_count
 
   if (
     !intent
     || !isIdempotencyKey(value.start_idempotency_key)
+    || (value.launch_id != null && !launchId)
+    || (value.launch_preset != null && !launchPreset)
+    || Boolean(launchId) !== Boolean(launchPreset)
     || !Number.isInteger(acknowledgedAnswerCount)
     || acknowledgedAnswerCount < 0
     || (pendingAnswer && !session)
@@ -136,6 +162,8 @@ export function normalizeQuizRecovery(value) {
   return {
     schema_version: SCHEMA_VERSION,
     intent,
+    launch_id: launchId,
+    launch_preset: launchPreset,
     start_idempotency_key: value.start_idempotency_key.trim(),
     session,
     acknowledged_answer_count: acknowledgedAnswerCount,
@@ -143,10 +171,17 @@ export function normalizeQuizRecovery(value) {
   }
 }
 
-export function createStandardQuizRecovery(request, idempotencyKey) {
+export function createStandardQuizRecovery(
+  request,
+  idempotencyKey,
+  launchId = null,
+  launchPreset = null,
+) {
   return normalizeQuizRecovery({
     schema_version: SCHEMA_VERSION,
     intent: { kind: 'standard', request },
+    launch_id: launchId,
+    launch_preset: launchPreset,
     start_idempotency_key: idempotencyKey,
     session: null,
     acknowledged_answer_count: 0,
@@ -165,6 +200,8 @@ export function createWrongQuestionQuizRecovery(
       kind: 'wrong_question',
       request: { document_id: documentId, user_id: userId },
     },
+    launch_id: null,
+    launch_preset: null,
     start_idempotency_key: idempotencyKey,
     session: null,
     acknowledged_answer_count: 0,

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { useLocation } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import DocumentPrerequisite from '../components/DocumentPrerequisite'
 import {
   createIdempotencyKey,
@@ -39,7 +39,54 @@ const TYPE_OPTIONS = [
   { value: 'short_answer', label: '简答题' },
 ]
 
+const DEFAULT_QUIZ_CONFIG = {
+  document_id: '',
+  description: '',
+  count: 5,
+  difficulty: 'medium',
+  type: 'choice',
+  user_id: 'default_user',
+}
+
 const LABELED_OPTION_PATTERN = /^([A-Za-z])(?:\s*[.．、:：)）]\s*|\s+)(.+)$/u
+const QUIZ_LAUNCH_ID_PATTERN = /^[A-Za-z0-9._:-]{8,128}$/u
+
+function readQuizPreset(search) {
+  const params = new URLSearchParams(search)
+  const documentId = (params.get('document_id') || '').trim()
+  const topic = (params.get('topic') || '').trim()
+  const rawLaunchId = (params.get('launch_id') || '').trim()
+  return {
+    documentId,
+    topic,
+    launchId: QUIZ_LAUNCH_ID_PATTERN.test(rawLaunchId) ? rawLaunchId : null,
+    invalidLaunchId: Boolean(rawLaunchId) && !QUIZ_LAUNCH_ID_PATTERN.test(rawLaunchId),
+    invalidBounds: documentId.length > 512 || topic.length > 4000,
+    hasIntent: Boolean(documentId || topic),
+  }
+}
+
+function presetConflictsWithRecovery(preset, recovery) {
+  if (!preset.hasIntent || !recovery) return false
+  if (
+    recovery.intent.kind !== 'standard'
+    || preset.invalidLaunchId
+    || preset.invalidBounds
+  ) return true
+
+  if (preset.launchId) {
+    return (
+      !recovery.launch_id
+      || preset.launchId !== recovery.launch_id
+      || preset.documentId !== recovery.launch_preset?.document_id
+      || preset.topic !== recovery.launch_preset?.topic
+    )
+  }
+
+  const request = recovery.intent.request
+  const expectedTopic = request.description === '全文' ? '' : request.description
+  return preset.documentId !== request.document_id || preset.topic !== expectedTopic
+}
 
 function normalizeText(value) {
   return typeof value === 'string'
@@ -151,6 +198,7 @@ function isRecoveryBusyError(error) {
 
 export default function Quiz() {
   const location = useLocation()
+  const navigate = useNavigate()
   const presetHydratedSearch = useRef(null)
 
   const [recovery, setRecovery] = useState(() => readQuizRecovery())
@@ -161,6 +209,8 @@ export default function Quiz() {
   const recoveryEpoch = useRef(0)
   const recoveryRetryTimer = useRef(null)
   const mountedRef = useRef(true)
+  const incomingPreset = readQuizPreset(location.search)
+  const presetConflict = presetConflictsWithRecovery(incomingPreset, recovery)
 
   /* ── 状态 ──────────────────────────────────────────────────────── */
   const [phase, setPhase] = useState(() => recovery ? 'loading' : 'setup') // setup | loading | answering | feedback | results | grading | report
@@ -180,14 +230,7 @@ export default function Quiz() {
   const reportingInFlight = useRef(false)
 
   // 配置
-  const [config, setConfig] = useState({
-    document_id: '',
-    description: '',
-    count: 5,
-    difficulty: 'medium',
-    type: 'choice',
-    user_id: 'default_user',
-  })
+  const [config, setConfig] = useState(() => ({ ...DEFAULT_QUIZ_CONFIG }))
 
   // 答题状态
   const [sessionId, setSessionId] = useState(null)
@@ -468,7 +511,12 @@ export default function Quiz() {
   }, [hydrateSnapshot, persistRecovery])
 
   useEffect(() => {
-    if (recoveryReady || recoveryInFlight.current || !recoveryRef.current) return
+    if (
+      presetConflict
+      || recoveryReady
+      || recoveryInFlight.current
+      || !recoveryRef.current
+    ) return
     void recoveryAttempt
     recoveryInFlight.current = true
     const epoch = ++recoveryEpoch.current
@@ -505,7 +553,14 @@ export default function Quiz() {
     }).finally(() => {
       if (epoch === recoveryEpoch.current) recoveryInFlight.current = false
     })
-  }, [discardRecovery, persistRecovery, recoverQuiz, recoveryAttempt, recoveryReady])
+  }, [
+    discardRecovery,
+    persistRecovery,
+    presetConflict,
+    recoverQuiz,
+    recoveryAttempt,
+    recoveryReady,
+  ])
 
   useEffect(() => {
     if (
@@ -518,9 +573,8 @@ export default function Quiz() {
       return
     }
 
-    const params = new URLSearchParams(location.search)
-    const documentId = (params.get('document_id') || '').trim()
-    const topic = (params.get('topic') || '').trim()
+    const preset = readQuizPreset(location.search)
+    const { documentId, topic } = preset
     presetHydratedSearch.current = location.search
 
     if (!documentId && !topic) {
@@ -530,6 +584,16 @@ export default function Quiz() {
         description: '',
       }))
       setError(null)
+      return
+    }
+
+    if (preset.invalidLaunchId || preset.invalidBounds) {
+      setConfig(current => ({
+        ...current,
+        document_id: '',
+        description: '',
+      }))
+      setError('练习链接参数无效，请返回原页面重新选择练习')
       return
     }
 
@@ -573,11 +637,19 @@ export default function Quiz() {
       }
       const intent = { kind: 'standard', request: startRequest }
       const existing = readQuizRecovery()
+      const preset = readQuizPreset(location.search)
       nextRecovery = existing
         && !existing.session
         && sameQuizIntent(existing.intent, intent)
         ? existing
-        : createStandardQuizRecovery(startRequest, createIdempotencyKey())
+        : createStandardQuizRecovery(
+            startRequest,
+            createIdempotencyKey(),
+            preset.launchId,
+            preset.launchId
+              ? { document_id: preset.documentId, topic: preset.topic }
+              : null,
+          )
     } catch (err) {
       setError(err.message)
       setPhase('setup')
@@ -609,6 +681,7 @@ export default function Quiz() {
       setError('当前答题会话无法恢复，请重新开始')
       return
     }
+    const operationEpoch = recoveryEpoch.current
 
     const pendingAnswer = record.pending_answer || {
       idempotency_key: createIdempotencyKey(),
@@ -637,6 +710,10 @@ export default function Quiz() {
         question_index: questionIndex,
         idempotency_key: pendingAnswer.idempotency_key,
       })
+      if (
+        operationEpoch !== recoveryEpoch.current
+        || recoveryRef.current?.session?.session_id !== sessionId
+      ) return
       persistRecovery({
         ...record,
         session: {
@@ -653,6 +730,7 @@ export default function Quiz() {
       setFeedback(fb)
       setPhase('feedback')
     } catch (err) {
+      if (operationEpoch !== recoveryEpoch.current) return
       if (shouldClearQuizSession(err)) {
         clearSession()
       } else if (isPayloadMismatch(err)) {
@@ -672,7 +750,7 @@ export default function Quiz() {
       }
       setError(err.message)
     } finally {
-      setSubmitting(false)
+      if (operationEpoch === recoveryEpoch.current) setSubmitting(false)
     }
   }
 
@@ -681,6 +759,7 @@ export default function Quiz() {
     if (advancingInFlight.current) return
     advancingInFlight.current = true
     setAdvancing(true)
+    const operationEpoch = recoveryEpoch.current
     const record = recoveryRef.current
     const acknowledgedRecord = record
       ? persistRecovery({
@@ -695,6 +774,10 @@ export default function Quiz() {
       stopTimer()
       try {
         const res = await getSessionResult(sessionId)
+        if (
+          operationEpoch !== recoveryEpoch.current
+          || recoveryRef.current?.session?.session_id !== sessionId
+        ) return
         if (acknowledgedRecord) {
           persistRecovery({
             ...acknowledgedRecord,
@@ -715,10 +798,12 @@ export default function Quiz() {
           void runGrade(sessionId)
         }
       } catch (err) {
-        setError(err.message)
+        if (operationEpoch === recoveryEpoch.current) setError(err.message)
       } finally {
-        advancingInFlight.current = false
-        setAdvancing(false)
+        if (operationEpoch === recoveryEpoch.current) {
+          advancingInFlight.current = false
+          setAdvancing(false)
+        }
       }
     } else {
       setCurrentIdx(idx => idx + 1)
@@ -756,6 +841,23 @@ export default function Quiz() {
     setGrading(false)
     setReporting(false)
     setElapsed(0)
+  }
+
+  const continueCurrentQuiz = () => {
+    presetHydratedSearch.current = null
+    setError(null)
+    navigate('/quiz', { replace: true })
+  }
+
+  const startIncomingQuiz = () => {
+    if (!incomingPresetCanStart) {
+      setError('新练习材料尚未通过校验，请先重新加载文档后再试')
+      return
+    }
+    presetHydratedSearch.current = null
+    clearSession()
+    setConfig({ ...DEFAULT_QUIZ_CONFIG })
+    setError(null)
   }
 
   /* ── 重新开始 ──────────────────────────────────────────────────── */
@@ -856,6 +958,34 @@ export default function Quiz() {
     ?? Math.max((result?.total || 0) - (result?.correct || 0) - resultPending, 0)
   const resultHasFinalScore = result != null && resultPending === 0 && typeof result.score === 'number'
   const pendingAnswerLocked = Boolean(recovery?.pending_answer)
+  const currentQuizLabel = recovery
+    ? `${recovery.intent.request.document_id} / ${
+        recovery.intent.kind === 'standard'
+          ? recovery.intent.request.description
+          : '错题重练'
+      }`
+    : ''
+  const incomingQuizLabel = `${incomingPreset.documentId || '未指定材料'} / ${
+    incomingPreset.topic || '全文'
+  }`
+  const incomingPresetCanStart = Boolean(
+    incomingPreset.hasIntent
+    && !incomingPreset.invalidLaunchId
+    && !incomingPreset.invalidBounds
+    && incomingPreset.documentId
+    && !docsLoading
+    && !docsError
+    && documents.includes(incomingPreset.documentId)
+  )
+  const incomingPresetStatus = docsLoading
+    ? '正在验证新练习材料…'
+    : docsError
+      ? '暂时无法验证新练习材料；当前进度尚未被删除。'
+      : !incomingPreset.documentId || !documents.includes(incomingPreset.documentId)
+        ? '新练习材料不存在或已被删除；当前进度尚未被删除。'
+        : incomingPreset.invalidLaunchId || incomingPreset.invalidBounds
+          ? '新练习链接无效；当前进度尚未被删除。'
+          : null
 
   const retryRecovery = () => {
     setError(null)
@@ -879,8 +1009,54 @@ export default function Quiz() {
         </div>
       )}
 
+      {presetConflict && (
+        <section
+          className="quiz-intent-conflict"
+          aria-labelledby="quiz-intent-conflict-title"
+          aria-describedby="quiz-intent-conflict-desc"
+        >
+          <h2 id="quiz-intent-conflict-title">检测到另一项练习</h2>
+          <p id="quiz-intent-conflict-desc">
+            浏览器中还有可恢复的练习进度。请选择继续原练习，或明确放弃它并使用刚选择的新目标。
+          </p>
+          <dl>
+            <div>
+              <dt>当前进度</dt>
+              <dd>{currentQuizLabel}</dd>
+            </div>
+            <div>
+              <dt>新练习</dt>
+              <dd>{incomingQuizLabel}</dd>
+            </div>
+          </dl>
+          {incomingPresetStatus && (
+            <div className="quiz-intent-validation" role="status">
+              <span>{incomingPresetStatus}</span>
+              {docsError && (
+                <button type="button" className="state-action" onClick={loadDocuments}>
+                  重新加载文档
+                </button>
+              )}
+            </div>
+          )}
+          <div className="quiz-intent-actions">
+            <button type="button" className="restart-btn" onClick={continueCurrentQuiz}>
+              继续当前练习
+            </button>
+            <button
+              type="button"
+              className="start-btn"
+              onClick={startIncomingQuiz}
+              disabled={!incomingPresetCanStart}
+            >
+              放弃并开始新练习
+            </button>
+          </div>
+        </section>
+      )}
+
       {/* ══════════════ Setup Phase ══════════════ */}
-      {phase === 'setup' && docsError && (
+      {!presetConflict && phase === 'setup' && docsError && (
         <div className="load-error-state" role="alert">
           <p className="state-title">无法加载文档列表</p>
           <p className="state-desc">{docsError}</p>
@@ -890,11 +1066,11 @@ export default function Quiz() {
         </div>
       )}
 
-      {phase === 'setup' && !docsError && !docsLoading && documents.length === 0 && (
+      {!presetConflict && phase === 'setup' && !docsError && !docsLoading && documents.length === 0 && (
         <DocumentPrerequisite description="开始答题前，需要先上传一份学习材料供系统检索和出题。" />
       )}
 
-      {phase === 'setup' && !docsError && (docsLoading || documents.length > 0) && (
+      {!presetConflict && phase === 'setup' && !docsError && (docsLoading || documents.length > 0) && (
         <div className="quiz-setup">
           {/* 文档选择 */}
           <div className="setup-field">
@@ -998,7 +1174,7 @@ export default function Quiz() {
       )}
 
       {/* ══════════════ Loading Phase ══════════════ */}
-      {phase === 'loading' && (
+      {!presetConflict && phase === 'loading' && (
         <div className="quiz-loading" role="status" aria-live="polite">
           <div className="loading-spinner" />
           <p className="loading-text">
@@ -1027,7 +1203,7 @@ export default function Quiz() {
       )}
 
       {/* ══════════════ Answering / Feedback Phase ══════════════ */}
-      {(phase === 'answering' || phase === 'feedback') && currentQ && (
+      {!presetConflict && (phase === 'answering' || phase === 'feedback') && currentQ && (
         <div className="quiz-active">
           {/* 进度条 + 计时 */}
           <div className="quiz-toolbar">
@@ -1168,7 +1344,7 @@ export default function Quiz() {
       )}
 
       {/* ══════════════ Results Phase ══════════════ */}
-      {phase === 'results' && result && (
+      {!presetConflict && phase === 'results' && result && (
         <div className="quiz-results">
           {/* 得分卡片 */}
           <div className="result-score-card">
@@ -1242,7 +1418,7 @@ export default function Quiz() {
       )}
 
       {/* ══════════════ Grading Phase ══════════════ */}
-      {phase === 'grading' && gradingReport && (
+      {!presetConflict && phase === 'grading' && gradingReport && (
         <div className="quiz-grading">
           <div className="grading-header">
             <h2 className="grading-title">AI 批改报告</h2>
@@ -1322,7 +1498,7 @@ export default function Quiz() {
       )}
 
       {/* ══════════════ Report Phase ══════════════ */}
-      {phase === 'report' && learningReport && (
+      {!presetConflict && phase === 'report' && learningReport && (
         <div className="quiz-report">
           <div className="report-header-card">
             <h2 className="report-title">学习评估报告</h2>
