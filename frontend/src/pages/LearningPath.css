@@ -146,6 +146,17 @@
   animation: fadeInUp 0.5s var(--ease-out);
 }
 
+.lp-retained-note {
+  padding: 12px 14px;
+  margin-bottom: 16px;
+  border: 1px solid #F0D58A;
+  border-radius: var(--radius-sm);
+  background: #FFF8E1;
+  color: #725510;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
 .lp-header-card {
   background: var(--bg-card);
   border: 1px solid var(--border-light);
@@ -331,9 +342,28 @@
   transform: translateY(-1px);
 }
 
+.tc-practice-btn:disabled {
+  border-color: var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-tertiary);
+  cursor: not-allowed;
+  transform: none;
+}
+
 .tc-practice-btn:focus-visible {
   outline: 2px solid var(--accent-blue);
   outline-offset: 2px;
+}
+
+.error-retry {
+  margin-left: auto;
+  padding: 5px 9px;
+  border: 1px solid currentColor;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  font-weight: 600;
 }
 
 /* ── Responsive ───────────────────────────────────────────────────── */

@@ -106,13 +106,16 @@ npm run dev
 | Structured Output | `STRUCTURED_API_KEY`、`STRUCTURED_BASE_URL`、`STRUCTURED_MODEL` |
 | Embeddings | `EMBEDDING_API_KEY`、`EMBEDDING_BASE_URL`、`LLM_EMBEDDING_MODEL` |
 
-Web 前端会为 Autonomous 请求、Quiz 创建与单题答案、Adaptive 创建与单轮提交生成
+Web 前端会为 Autonomous 请求、Learning Path 创建、Quiz 创建与单题答案、Adaptive 创建与单轮提交生成
 `Idempotency-Key`；同一内容重试时复用原 key，修改答案后生成新 key。Quiz 的题号以及
 Adaptive 的轮次与状态版本也会随请求提交，服务端会拒绝过期覆盖。Web Quiz 与
 Adaptive 都把完整私有题目、阶段性批改、画像写入标记和规范进度保存在服务端；浏览器
 只保存恢复意图、最近一次安全快照和尚未确认的完整请求。因此刷新、切页、响应丢失或
 后端重启后可以继续，未作答题目的答案、解析和来源不会返回浏览器。使用
-`DATABASE_URL` 时，重试 receipt、Web Quiz、Adaptive 与人工确认暂停快照保存在
+Learning Path 生成结果也会保存为不可变资源，刷新时由资源 ID 恢复；新标签页没有浏览器
+恢复指针时会读取默认用户最近创建的路径。删除原材料时该路径
+作为学习记录保留，但只能查看，不能再从已删除材料发起阶段练习。使用
+`DATABASE_URL` 时，重试 receipt、Learning Path、Web Quiz、Adaptive 与人工确认暂停快照保存在
 PostgreSQL；本地无数据库时默认使用 `IDEMPOTENCY_DB_PATH` 指定的 SQLite 文件，也可用
 功能专属路径覆盖。Autonomous 与 Adaptive 默认保留 1 小时，Web Quiz 默认保留 24 小时。
 相关容量和 TTL 配置见
