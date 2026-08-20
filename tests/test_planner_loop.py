@@ -164,6 +164,13 @@ class TestPathReviserNodeFallback(unittest.IsolatedAsyncioTestCase):
             result = await pa._node_path_reviser(state)
 
         self.assertEqual(result["learning_path"]["document_id"], "ORIGINAL_DOC")
+        from models.learning_path import LearningPathWire
+        self.assertIs(
+            mock_client.beta.chat.completions.parse.await_args.kwargs[
+                "response_format"
+            ],
+            LearningPathWire,
+        )
 
 
 class TestSubgraphIntegration(unittest.IsolatedAsyncioTestCase):

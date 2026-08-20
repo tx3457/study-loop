@@ -2,7 +2,7 @@ import logging
 
 from chromadb.errors import ChromaError, NotFoundError
 from fastapi import APIRouter, HTTPException
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from models.learning_path import LearningPath
 from services.learning_path import (
@@ -17,7 +17,11 @@ logger = logging.getLogger(__name__)
 @router.post("/learning-path/{document_id}", response_model=LearningPath)
 async def create_learning_path(document_id: str):
     try:
-        return await generate_learning_path(document_id)
+        generated = await generate_learning_path(document_id)
+        payload = generated.model_dump(mode="python") if isinstance(
+            generated, BaseModel
+        ) else generated
+        return LearningPath.model_validate(payload)
     except NotFoundError as exc:
         raise HTTPException(status_code=404, detail="文档不存在") from exc
     except LearningPathEvidenceUnavailableError as exc:

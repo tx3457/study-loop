@@ -8,11 +8,64 @@ Learning Path 数据模型
   - LearningPath      : synthesize 阶段产出（保留原结构兼容下游）
   - PathCritique      : critique 阶段产出（决定是否 revise）
 """
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 # ── 对外 schema（保持下游兼容）──────────────────────────────────────────────
 class LearningStage(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        revalidate_instances="always",
+        str_strip_whitespace=True,
+    )
+
+    stage: int = Field(ge=1, le=12, strict=True)
+    title: str = Field(min_length=1, max_length=200)
+    topics: list[str] = Field(min_length=1, max_length=20)
+    description: str = Field(min_length=1, max_length=4000)
+    estimated_minutes: int = Field(ge=1, le=480, strict=True)
+
+    @field_validator("topics")
+    @classmethod
+    def validate_topics(cls, topics: list[str]) -> list[str]:
+        normalized = [topic.strip() for topic in topics]
+        if any(not topic or len(topic) > 200 for topic in normalized):
+            raise ValueError("topics must contain non-empty strings up to 200 characters")
+        if len({topic.casefold() for topic in normalized}) != len(normalized):
+            raise ValueError("topics must be unique within a stage")
+        return normalized
+
+
+class LearningPath(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+        revalidate_instances="always",
+        str_strip_whitespace=True,
+    )
+
+    document_id: str = Field(min_length=1, max_length=512)
+    title: str = Field(min_length=1, max_length=200)
+    total_stages: int = Field(ge=1, le=12, strict=True)
+    stages: list[LearningStage] = Field(min_length=1, max_length=12)
+
+    @model_validator(mode="after")
+    def validate_stage_sequence(self) -> "LearningPath":
+        if self.total_stages != len(self.stages):
+            raise ValueError("total_stages must equal the number of stages")
+        expected = list(range(1, self.total_stages + 1))
+        actual = [stage.stage for stage in self.stages]
+        if actual != expected:
+            raise ValueError("stages must be ordered and numbered from 1")
+        return self
+
+
+# Provider wire schema intentionally contains only JSON types, required fields,
+# and additionalProperties=false. Some OpenAI-compatible providers reject
+# min/max JSON-Schema keywords even though the local SDK accepts them. The
+# strict domain model above is therefore applied after parsing the wire shape.
+class LearningStageWire(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
     stage: int
     title: str
     topics: list[str]
@@ -20,11 +73,13 @@ class LearningStage(BaseModel):
     estimated_minutes: int
 
 
-class LearningPath(BaseModel):
+class LearningPathWire(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
     document_id: str
     title: str
     total_stages: int
-    stages: list[LearningStage]
+    stages: list[LearningStageWire]
 
 
 # ── 多阶段中间数据 ──────────────────────────────────────────────────────────

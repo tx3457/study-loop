@@ -15,14 +15,17 @@ Learning Path 多阶段流水线
 
 import asyncio
 import logging
+from collections.abc import Mapping
 from pathlib import Path
 
 from dotenv import load_dotenv
+from pydantic import BaseModel
 
 from models.learning_path import (
     CompressedReport,
     ExplorationReport,
     LearningPath,
+    LearningPathWire,
     PathBrief,
     PathCritique,
 )
@@ -206,13 +209,20 @@ async def synthesize(
             {"role": "system", "content": _SYNTHESIZE_SYSTEM},
             {"role": "user", "content": user_msg},
         ],
-        LearningPath,
+        LearningPathWire,
         client=_client,
         model=_model,
     )
-    path = resp.choices[0].message.parsed
-    path.document_id = document_id
-    return path
+    parsed = resp.choices[0].message.parsed
+    if isinstance(parsed, BaseModel):
+        payload = parsed.model_dump()
+    elif isinstance(parsed, Mapping):
+        payload = dict(parsed)
+    else:
+        payload = LearningPath.model_validate(parsed).model_dump()
+    # document_id is an authoritative route input, not a model-controlled field.
+    payload["document_id"] = document_id
+    return LearningPath.model_validate(payload)
 
 
 # ── 阶段 E：critique (可选) ──────────────────────────────────────────────
