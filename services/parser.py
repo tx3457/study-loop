@@ -32,6 +32,8 @@ from langchain_community.document_loaders import (
 )
 from langchain_core.documents import Document
 
+from services.docx_archive import DocxArchiveValidationError, validate_docx_archive
+
 logger = logging.getLogger(__name__)
 
 
@@ -340,6 +342,10 @@ def _parse_sync(file_bytes: bytes, filename: str) -> list[Document]:
 
     # DOCX
     if ext == ".docx":
+        try:
+            validate_docx_archive(file_bytes)
+        except DocxArchiveValidationError as exc:
+            raise DocumentParseError from exc
         with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
             tmp.write(file_bytes)
             tmp_path = tmp.name

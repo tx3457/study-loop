@@ -205,6 +205,8 @@ python scripts/check_provider_capabilities.py
 示例材料位于 [`examples/sample_document.md`](examples/sample_document.md)。
 
 支持 `.pdf`、`.docx`、`.txt`、`.md` 及常见图片格式，默认上传上限为 20 MB。
+DOCX 还受固定的归档条目、中央目录、单项/总解压量、XML 体积和压缩比预算约束；
+仅接受单卷 classic ZIP 中 stored/deflated 的文档，超出预算或使用 ZIP64 会按不可解析处理。
 
 ## 测试
 
