@@ -136,6 +136,12 @@ PostgreSQL 状态组件内部的初始化、连接、语句、并发锁与取消
 多 worker/replica。未配置 `DATABASE_URL` 时，学习者
 记忆还会额外使用单进程内存和本地 JSON 快照兜底。
 
+配置 `DATABASE_URL` 时，learner-memory 冷启动会先在独立的有界连接中完成并校验 Store schema，
+再打开长期运行连接；运行期同步 Store I/O 会先在事件循环侧排队，同一时刻只允许一个后台线程任务
+进入共享执行器，因此慢查询不会直接冻结 API 事件循环或用等待线程占满共享执行器。连接、锁、语句、排队和取消收尾预算均可在
+[`.env.example`](.env.example) 中配置。这不是连接池或热恢复机制：PostgreSQL 进程重启后，仍应按
+下方 readiness 说明重启 backend，以重新建立长期连接。
+
 Structured Output 和 Embeddings 的专用 key 与地址必须成对配置；两者同时留空时才会整组回退到 `LLM_*`。完整配置见 [`.env.example`](.env.example)。
 
 `.env` 是本项目的本地配置，不会从其他项目自动复制，也不会提交到 Git。配置真实 Provider 时：
