@@ -32,6 +32,17 @@ message or traceback. Application logs can still contain ordinary operational
 metadata and must remain access-controlled.
 The bundled Uvicorn process and Nginx `/api/` proxy disable their raw-URL access
 logs; the application instead records a route-template, status, and request ID.
+Browser requests that can change state require one exact trusted `Origin`. The
+bundled allowlist covers only the `localhost` and `127.0.0.1` origins on ports
+4001, 5173, and 8001; an absent Origin remains available to command-line clients.
+Custom domains and HTTPS reverse proxies are not trusted automatically. Such a
+deployment must add its exact scheme, host, and port to the shared
+`ALLOWED_BROWSER_ORIGINS` source constant and rebuild the application; changing
+only a forwarded `Host` does not extend the trust boundary.
+This is a browser CSRF/origin control, not authentication or general Host
+validation: a non-browser client can omit or forge `Origin`. Any deployment
+beyond the bundled loopback topology still needs authentication, TLS, and
+trusted-proxy/Host enforcement at its network boundary.
 
 Although individual PostgreSQL-backed stores implement cross-worker fencing,
 the supported bundled deployment remains one backend worker and one replica.
