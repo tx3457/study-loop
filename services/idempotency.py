@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -29,6 +30,7 @@ from dotenv import load_dotenv
 
 
 load_dotenv(Path(__file__).parent.parent / ".env")
+logger = logging.getLogger(__name__)
 
 _TABLE = "studyloop_idempotency_receipts"
 _KEY_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
@@ -95,18 +97,33 @@ class IdempotencyStore:
         postgres_connect_timeout_seconds: int = 5,
         postgres_lock_timeout_ms: int = 5_000,
         postgres_statement_timeout_ms: int = 15_000,
+        postgres_tcp_user_timeout_ms: int = 30_000,
+        schema_init_wait_timeout_seconds: float = 30,
+        cancel_drain_timeout_seconds: float = 20,
         clock: Callable[[], float] = time.time,
     ) -> None:
         if database_url and sqlite_path:
             raise ValueError("database_url and sqlite_path are mutually exclusive")
         if not math.isfinite(lease_seconds) or lease_seconds <= 0:
             raise ValueError("lease_seconds must be positive")
-        if postgres_connect_timeout_seconds <= 0:
+        if (
+            not math.isfinite(postgres_connect_timeout_seconds)
+            or postgres_connect_timeout_seconds <= 0
+        ):
             raise ValueError("postgres_connect_timeout_seconds must be positive")
-        if postgres_lock_timeout_ms <= 0:
+        if not math.isfinite(postgres_lock_timeout_ms) or postgres_lock_timeout_ms <= 0:
             raise ValueError("postgres_lock_timeout_ms must be positive")
-        if postgres_statement_timeout_ms <= 0:
+        if not math.isfinite(postgres_statement_timeout_ms) or postgres_statement_timeout_ms <= 0:
             raise ValueError("postgres_statement_timeout_ms must be positive")
+        if not math.isfinite(postgres_tcp_user_timeout_ms) or postgres_tcp_user_timeout_ms <= 0:
+            raise ValueError("postgres_tcp_user_timeout_ms must be positive")
+        if (
+            not math.isfinite(schema_init_wait_timeout_seconds)
+            or schema_init_wait_timeout_seconds <= 0
+        ):
+            raise ValueError("schema_init_wait_timeout_seconds must be positive")
+        if not math.isfinite(cancel_drain_timeout_seconds) or cancel_drain_timeout_seconds <= 0:
+            raise ValueError("cancel_drain_timeout_seconds must be positive")
         self._database_url = database_url
         self._sqlite_path = sqlite_path or os.getenv(
             "IDEMPOTENCY_DB_PATH", "./.idempotency.sqlite3"
@@ -115,26 +132,35 @@ class IdempotencyStore:
         self._postgres_connect_timeout_seconds = postgres_connect_timeout_seconds
         self._postgres_lock_timeout_ms = postgres_lock_timeout_ms
         self._postgres_statement_timeout_ms = postgres_statement_timeout_ms
+        self._postgres_tcp_user_timeout_ms = postgres_tcp_user_timeout_ms
+        self._schema_init_wait_timeout_seconds = schema_init_wait_timeout_seconds
+        self._cancel_drain_timeout_seconds = cancel_drain_timeout_seconds
         self._clock = clock
         self._schema_ready = False
         self._schema_lock = threading.Lock()
+        self._background_workers: set[asyncio.Task] = set()
 
     @classmethod
     def from_environment(cls) -> "IdempotencyStore":
         database_url = os.getenv("DATABASE_URL") or None
         return cls(
             database_url=database_url,
-            lease_seconds=float(
-                os.getenv("IDEMPOTENCY_RECEIPT_LEASE_SECONDS", "600")
-            ),
+            lease_seconds=float(os.getenv("IDEMPOTENCY_RECEIPT_LEASE_SECONDS", "600")),
             postgres_connect_timeout_seconds=int(
                 os.getenv("IDEMPOTENCY_PG_CONNECT_TIMEOUT_SECONDS", "5")
             ),
-            postgres_lock_timeout_ms=int(
-                os.getenv("IDEMPOTENCY_PG_LOCK_TIMEOUT_MS", "5000")
-            ),
+            postgres_lock_timeout_ms=int(os.getenv("IDEMPOTENCY_PG_LOCK_TIMEOUT_MS", "5000")),
             postgres_statement_timeout_ms=int(
                 os.getenv("IDEMPOTENCY_PG_STATEMENT_TIMEOUT_MS", "15000")
+            ),
+            postgres_tcp_user_timeout_ms=int(
+                os.getenv("IDEMPOTENCY_PG_TCP_USER_TIMEOUT_MS", "30000")
+            ),
+            schema_init_wait_timeout_seconds=float(
+                os.getenv("IDEMPOTENCY_SCHEMA_INIT_WAIT_TIMEOUT_SECONDS", "30")
+            ),
+            cancel_drain_timeout_seconds=float(
+                os.getenv("IDEMPOTENCY_CANCEL_DRAIN_TIMEOUT_SECONDS", "20")
             ),
         )
 
@@ -146,14 +172,16 @@ class IdempotencyStore:
     ) -> BeginDecision:
         if not isinstance(key, str) or not key or len(key) > 128:
             raise ValueError("invalid idempotency key")
+        owner_token = secrets.token_urlsafe(32)
+        recovery_token = secrets.token_urlsafe(32)
         worker = asyncio.create_task(
             asyncio.to_thread(
                 self._begin_sync,
                 key,
                 operation,
                 _fingerprint(operation, payload),
-                secrets.token_urlsafe(32),
-                secrets.token_urlsafe(32),
+                owner_token,
+                recovery_token,
             )
         )
         try:
@@ -161,28 +189,27 @@ class IdempotencyStore:
             # thread can still commit a claim behind it.
             return await asyncio.shield(worker)
         except asyncio.CancelledError as cancelled:
-            while not worker.done():
-                try:
-                    await asyncio.shield(worker)
-                except asyncio.CancelledError:
-                    # Multiple cancellation sources (for example disconnect
-                    # plus shutdown) still cannot orphan a committed claim.
-                    continue
-            try:
-                decision = worker.result()
-            except BaseException:
-                # No successful ownership decision means there is no claim we
-                # can safely identify as ours.
-                raise cancelled
-
-            if decision.lease is not None:
-                cleanup = asyncio.create_task(self.abort(decision.lease))
-                while not cleanup.done():
-                    try:
-                        await asyncio.shield(cleanup)
-                    except asyncio.CancelledError:
-                        continue
-                cleanup.result()
+            deadline = asyncio.get_running_loop().time() + self._cancel_drain_timeout_seconds
+            completed, _ = await self._drain_cancelled_worker(
+                worker,
+                deadline=deadline,
+                track_on_timeout=False,
+            )
+            if completed:
+                cleanup = asyncio.create_task(self._run_thread(self._abort_sync, key, owner_token))
+                await self._drain_cancelled_worker(
+                    cleanup,
+                    deadline=deadline,
+                )
+            else:
+                cleanup = asyncio.create_task(
+                    self._abort_late_begin(
+                        worker,
+                        key=key,
+                        owner_token=owner_token,
+                    )
+                )
+                self._track_background_worker(cleanup)
             raise cancelled
 
     async def renew(self, lease: ReceiptLease) -> ReceiptLease | None:
@@ -296,16 +323,86 @@ class IdempotencyStore:
         try:
             return await asyncio.shield(worker)
         except asyncio.CancelledError as cancelled:
-            while not worker.done():
-                try:
-                    await asyncio.shield(worker)
-                except asyncio.CancelledError:
-                    continue
-            try:
-                worker.result()
-            except BaseException:
-                raise cancelled
+            await self._drain_cancelled_worker(worker)
             raise cancelled
+
+    async def _abort_late_begin(
+        self,
+        worker: asyncio.Task,
+        *,
+        key: str,
+        owner_token: str,
+    ) -> None:
+        """Abort only the captured owner after a late begin worker settles."""
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            logger.error(
+                "late idempotency begin worker failed: error_type=%s",
+                type(exc).__name__,
+            )
+        try:
+            await self._run_thread(self._abort_sync, key, owner_token)
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            logger.error(
+                "late idempotency begin cleanup failed: error_type=%s",
+                type(exc).__name__,
+            )
+
+    async def _drain_cancelled_worker(
+        self,
+        worker: asyncio.Task,
+        *,
+        deadline: float | None = None,
+        track_on_timeout: bool = True,
+    ) -> tuple[bool, Any]:
+        """Drain a shielded database worker without extending its deadline."""
+        loop = asyncio.get_running_loop()
+        if deadline is None:
+            deadline = loop.time() + self._cancel_drain_timeout_seconds
+
+        while not worker.done():
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                if track_on_timeout:
+                    self._track_background_worker(worker)
+                return False, None
+            try:
+                await asyncio.wait_for(asyncio.shield(worker), timeout=remaining)
+            except asyncio.CancelledError:
+                continue
+            except TimeoutError:
+                continue
+            except BaseException:
+                break
+
+        try:
+            return True, worker.result()
+        except BaseException as exc:
+            logger.error(
+                "cancelled idempotency store worker failed: error_type=%s",
+                type(exc).__name__,
+            )
+            return True, None
+
+    def _track_background_worker(self, worker: asyncio.Task) -> None:
+        self._background_workers.add(worker)
+
+        def on_done(completed: asyncio.Task) -> None:
+            self._background_workers.discard(completed)
+            try:
+                completed.result()
+            except BaseException as exc:
+                logger.error(
+                    "background idempotency store worker failed: error_type=%s",
+                    type(exc).__name__,
+                )
+
+        worker.add_done_callback(on_done)
 
     @staticmethod
     def _validate_lease(lease: ReceiptLease) -> None:
@@ -338,14 +435,37 @@ class IdempotencyStore:
     def _connect(self):
         if self._database_url:
             import psycopg
+            from psycopg.conninfo import conninfo_to_dict
+
+            try:
+                connection_parameters = conninfo_to_dict(self._database_url)
+            except Exception:
+                raise ValueError("PostgreSQL idempotency DATABASE_URL is invalid") from None
+            explicit_options = connection_parameters.get("options")
+            environment_options = os.getenv("PGOPTIONS", "").strip()
+            service_configured = bool(
+                connection_parameters.get("service") or os.getenv("PGSERVICE")
+            )
+            if service_configured and explicit_options is None and not environment_options:
+                raise ValueError(
+                    "PostgreSQL service DSNs must expose connection options "
+                    "through DATABASE_URL or PGOPTIONS so idempotency safety "
+                    "limits can be merged without silently discarding "
+                    "service-file options"
+                )
+            existing_options = (
+                str(explicit_options) if explicit_options is not None else environment_options
+            ).strip()
+            bounded_options = (
+                f"-c lock_timeout={self._postgres_lock_timeout_ms}ms "
+                f"-c statement_timeout={self._postgres_statement_timeout_ms}ms"
+            )
 
             return psycopg.connect(
                 self._database_url,
                 connect_timeout=self._postgres_connect_timeout_seconds,
-                options=(
-                    f"-c lock_timeout={self._postgres_lock_timeout_ms}ms "
-                    f"-c statement_timeout={self._postgres_statement_timeout_ms}ms"
-                ),
+                tcp_user_timeout=self._postgres_tcp_user_timeout_ms,
+                options=f"{existing_options} {bounded_options}".strip(),
             )
 
         path = Path(self._sqlite_path)
@@ -379,7 +499,10 @@ class IdempotencyStore:
     def _ensure_schema(self) -> None:
         if self._schema_ready:
             return
-        with self._schema_lock:
+        acquired = self._schema_lock.acquire(timeout=self._schema_init_wait_timeout_seconds)
+        if not acquired:
+            raise TimeoutError("idempotency schema initialization timed out")
+        try:
             if self._schema_ready:
                 return
             statement = f"""
@@ -406,12 +529,10 @@ class IdempotencyStore:
                 connection.execute(statement)
                 if self._postgres:
                     connection.execute(
-                        f"ALTER TABLE {_TABLE} "
-                        "ADD COLUMN IF NOT EXISTS owner_token TEXT"
+                        f"ALTER TABLE {_TABLE} ADD COLUMN IF NOT EXISTS owner_token TEXT"
                     )
                     connection.execute(
-                        f"ALTER TABLE {_TABLE} "
-                        "ADD COLUMN IF NOT EXISTS recovery_token TEXT"
+                        f"ALTER TABLE {_TABLE} ADD COLUMN IF NOT EXISTS recovery_token TEXT"
                     )
                     connection.execute(
                         f"ALTER TABLE {_TABLE} "
@@ -420,24 +541,19 @@ class IdempotencyStore:
                 else:
                     columns = {
                         row[1]
-                        for row in connection.execute(
-                            f"PRAGMA table_info({_TABLE})"
-                        ).fetchall()
+                        for row in connection.execute(f"PRAGMA table_info({_TABLE})").fetchall()
                     }
                     if "owner_token" not in columns:
-                        connection.execute(
-                            f"ALTER TABLE {_TABLE} ADD COLUMN owner_token TEXT"
-                        )
+                        connection.execute(f"ALTER TABLE {_TABLE} ADD COLUMN owner_token TEXT")
                     if "recovery_token" not in columns:
-                        connection.execute(
-                            f"ALTER TABLE {_TABLE} ADD COLUMN recovery_token TEXT"
-                        )
+                        connection.execute(f"ALTER TABLE {_TABLE} ADD COLUMN recovery_token TEXT")
                     if "lease_expires_at" not in columns:
                         connection.execute(
-                            f"ALTER TABLE {_TABLE} "
-                            "ADD COLUMN lease_expires_at DOUBLE PRECISION"
+                            f"ALTER TABLE {_TABLE} ADD COLUMN lease_expires_at DOUBLE PRECISION"
                         )
             self._schema_ready = True
+        finally:
+            self._schema_lock.release()
 
     def _begin_sync(
         self,
@@ -498,9 +614,7 @@ class IdempotencyStore:
                 if cursor.rowcount == 1:
                     return BeginDecision(
                         replayed=False,
-                        lease=ReceiptLease(
-                            key, owner_token, recovery_token, expires_at
-                        ),
+                        lease=ReceiptLease(key, owner_token, recovery_token, expires_at),
                     )
                 row = self._select_receipt(connection, key, for_update=True)
                 now = self._now()
@@ -517,10 +631,7 @@ class IdempotencyStore:
                 lease_expires_at,
                 existing_recovery_token,
             ) = row
-            if (
-                existing_operation != operation
-                or existing_fingerprint != request_fingerprint
-            ):
+            if existing_operation != operation or existing_fingerprint != request_fingerprint:
                 raise IdempotencyConflictError("payload_mismatch")
             if state == "completed" and response_json:
                 response = json.loads(response_json)
@@ -532,11 +643,7 @@ class IdempotencyStore:
                 # deployment. It must never be reclaimed automatically.
                 raise IdempotencyConflictError("in_progress")
             if state == "pending_v2":
-                if (
-                    not existing_token
-                    or lease_expires_at is None
-                    or not existing_recovery_token
-                ):
+                if not existing_token or lease_expires_at is None or not existing_recovery_token:
                     raise IdempotencyConflictError("ambiguous")
                 if float(lease_expires_at) > now:
                     raise IdempotencyConflictError("in_progress")
@@ -595,11 +702,7 @@ class IdempotencyStore:
             existing_token = row[4]
             existing_expiry = row[5]
             recovery_token = row[6]
-            if (
-                state == "effect_started_v2"
-                and existing_token == owner_token
-                and recovery_token
-            ):
+            if state == "effect_started_v2" and existing_token == owner_token and recovery_token:
                 connection.execute(
                     f"""
                     UPDATE {_TABLE} SET updated_at = {p}
@@ -717,23 +820,16 @@ class IdempotencyStore:
                 _lease_expires_at,
                 _recovery_token,
             ) = row
-            if (
-                existing_operation != operation
-                or existing_fingerprint != request_fingerprint
-            ):
+            if existing_operation != operation or existing_fingerprint != request_fingerprint:
                 raise IdempotencyConflictError("payload_mismatch")
             if state == "completed":
                 try:
                     existing_response = json.loads(existing_response_json)
                     expected_response = json.loads(response_json)
                 except (TypeError, json.JSONDecodeError) as exc:
-                    raise RuntimeError(
-                        "completed idempotency response is invalid JSON"
-                    ) from exc
+                    raise RuntimeError("completed idempotency response is invalid JSON") from exc
                 if existing_response != expected_response:
-                    raise RuntimeError(
-                        "canonical outcome disagrees with completed receipt"
-                    )
+                    raise RuntimeError("canonical outcome disagrees with completed receipt")
                 return
             repairable_states = {"pending_v2"}
             if allow_effect_started:
@@ -841,25 +937,25 @@ class IdempotencyStore:
                 f"SELECT state FROM {_TABLE} WHERE idempotency_key = {p}",
                 (key,),
             ).fetchone()
-        return bool(
-            row
-            and row[0] in {"effect_started", "effect_started_v2", "ambiguous"}
-        )
+        return bool(row and row[0] in {"effect_started", "effect_started_v2", "ambiguous"})
 
 
 async def abort_idempotency_claim(
     store: IdempotencyStore,
     lease: ReceiptLease,
 ) -> bool:
-    """Finish receipt cleanup even if the owning request is being cancelled."""
+    """Bound exact-lease cleanup after the owning request was cancelled."""
     cleanup = asyncio.create_task(store.abort(lease))
-    while True:
-        try:
-            return await asyncio.shield(cleanup)
-        except asyncio.CancelledError:
-            if cleanup.done():
-                return cleanup.result()
-            continue
+    deadline = asyncio.get_running_loop().time() + store._cancel_drain_timeout_seconds
+    completed, result = await store._drain_cancelled_worker(
+        cleanup,
+        deadline=deadline,
+    )
+    if completed and isinstance(result, bool):
+        return result
+    # The exact-token abort remains strongly referenced in the background.
+    # Until it settles, callers must conservatively assume a durable effect.
+    return True
 
 
 request_idempotency = IdempotencyStore.from_environment()
