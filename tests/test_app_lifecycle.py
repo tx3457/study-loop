@@ -101,6 +101,9 @@ class TestApplicationLifespan(unittest.TestCase):
         async def save_memory():
             events.append("memory_save")
 
+        async def shutdown_vectorstore():
+            events.append("vectorstore_shutdown")
+
         async def close_providers():
             events.append("providers_close")
 
@@ -110,6 +113,8 @@ class TestApplicationLifespan(unittest.TestCase):
             main, "_cleanup_mcp_live_servers", new=cleanup_mcp
         ), patch.object(
             main, "_save_memory_snapshot", new=save_memory
+        ), patch.object(
+            main, "_shutdown_vectorstore_io", new=shutdown_vectorstore
         ), patch.object(
             main, "close_managed_provider_clients", new=close_providers
         ):
@@ -125,16 +130,52 @@ class TestApplicationLifespan(unittest.TestCase):
                 "mcp_connect",
                 "mcp_cleanup",
                 "memory_save",
+                "vectorstore_shutdown",
                 "providers_close",
                 "memory",
                 "mcp_connect",
                 "mcp_cleanup",
                 "memory_save",
+                "vectorstore_shutdown",
                 "providers_close",
             ],
         )
         self.assertEqual(main.app.router.on_startup, [])
         self.assertEqual(main.app.router.on_shutdown, [])
+
+    def test_vectorstore_shutdown_failure_does_not_skip_provider_close(self):
+        events: list[str] = []
+
+        async def noop():
+            return None
+
+        async def failing_vectorstore_shutdown():
+            events.append("vectorstore_shutdown")
+            raise RuntimeError("Chroma worker hung")
+
+        async def close_providers():
+            events.append("providers_close")
+
+        async def run_lifespan():
+            async with main.lifespan(main.app):
+                events.append("application")
+
+        with patch.object(main, "_load_memory_snapshot", new=noop), patch.object(
+            main, "_connect_mcp_live_servers", new=noop
+        ), patch.object(main, "_cleanup_mcp_live_servers", new=noop), patch.object(
+            main, "_save_memory_snapshot", new=noop
+        ), patch.object(
+            main,
+            "_shutdown_vectorstore_io",
+            new=failing_vectorstore_shutdown,
+        ), patch.object(main, "close_managed_provider_clients", new=close_providers):
+            with self.assertRaisesRegex(RuntimeError, "Chroma worker hung"):
+                asyncio.run(run_lifespan())
+
+        self.assertEqual(
+            events,
+            ["application", "vectorstore_shutdown", "providers_close"],
+        )
 
     def test_lifespan_closes_registered_client_and_next_cycle_recreates_it(self):
         factory = _RecordingClientFactory()

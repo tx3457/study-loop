@@ -80,9 +80,17 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
 
     async def test_write_failure_rolls_back_only_staging_collection(self):
         client = MagicMock()
-        client.get_collection.side_effect = NotFoundError("missing")
         staging = MagicMock()
         staging.name = "studyloop-staging-owned"
+        staging.metadata = {
+            "source_document_id": "notes.md",
+            "ingest_status": "indexing",
+        }
+        client.get_collection.side_effect = [
+            NotFoundError("missing"),
+            NotFoundError("missing"),
+            staging,
+        ]
         write_error = RuntimeError("index write failed")
         staging.add.side_effect = write_error
         client.create_collection.return_value = staging
@@ -96,15 +104,24 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
                 await vectorstore.deal_document("notes.md", "notes.md", ["content"])
 
         self.assertIs(raised.exception, write_error)
-        client.delete_collection.assert_called_once_with(name="studyloop-staging-owned")
+        client.delete_collection.assert_called_once()
+        self.assertNotEqual(client.delete_collection.call_args.kwargs["name"], "notes.md")
         staging.modify.assert_not_called()
         self.assertIn("notes.md", vectorstore._bm25_cache)
 
     async def test_cleanup_failure_does_not_mask_index_failure(self):
         client = MagicMock()
-        client.get_collection.side_effect = NotFoundError("missing")
         staging = MagicMock()
         staging.name = "studyloop-staging-owned"
+        staging.metadata = {
+            "source_document_id": "notes.md",
+            "ingest_status": "indexing",
+        }
+        client.get_collection.side_effect = [
+            NotFoundError("missing"),
+            NotFoundError("missing"),
+            staging,
+        ]
         write_error = RuntimeError("primary write failure")
         staging.add.side_effect = write_error
         client.create_collection.return_value = staging
@@ -122,9 +139,17 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
 
     async def test_cancellation_waits_for_write_then_removes_staging(self):
         client = MagicMock()
-        client.get_collection.side_effect = NotFoundError("missing")
         staging = MagicMock()
         staging.name = "studyloop-staging-owned"
+        staging.metadata = {
+            "source_document_id": "notes.md",
+            "ingest_status": "indexing",
+        }
+        client.get_collection.side_effect = [
+            NotFoundError("missing"),
+            NotFoundError("missing"),
+            staging,
+        ]
         started = threading.Event()
         release = threading.Event()
 
@@ -148,7 +173,8 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await task
 
-        client.delete_collection.assert_called_once_with(name="studyloop-staging-owned")
+        client.delete_collection.assert_called_once()
+        self.assertNotEqual(client.delete_collection.call_args.kwargs["name"], "notes.md")
 
     async def test_existing_document_is_rejected_without_mutation(self):
         client = MagicMock()
@@ -167,13 +193,18 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
     async def test_concurrent_publish_conflict_is_reported_as_duplicate(self):
         client = MagicMock()
         existing = MagicMock(name="published")
+        staging = MagicMock()
+        staging.name = "studyloop-staging-owned"
+        staging.metadata = {
+            "source_document_id": "notes.md",
+            "ingest_status": "indexing",
+        }
         client.get_collection.side_effect = [
             NotFoundError("missing before embedding"),
             NotFoundError("missing before publish"),
             existing,
+            staging,
         ]
-        staging = MagicMock()
-        staging.name = "studyloop-staging-owned"
         staging.modify.side_effect = RuntimeError("rename conflict")
         client.create_collection.return_value = staging
 
@@ -184,7 +215,8 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(vectorstore.DocumentAlreadyExistsError):
                 await vectorstore.deal_document("notes.md", "notes.md", ["content"])
 
-        client.delete_collection.assert_called_once_with(name="studyloop-staging-owned")
+        client.delete_collection.assert_called_once()
+        self.assertNotEqual(client.delete_collection.call_args.kwargs["name"], "notes.md")
 
     async def test_document_list_hides_unpublished_staging_collections(self):
         client = MagicMock()
@@ -353,7 +385,7 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(metadata["ingest_status"], "deleted")
         self.assertEqual(metadata["source_document_id"], "legacy.md")
 
-    async def test_delete_fences_an_inflight_bm25_cache_builder(self):
+    async def test_concurrent_cold_bm25_misses_build_once_on_single_worker(self):
         client = MagicMock()
         collection = MagicMock()
         collection.name = "notes.md"
@@ -362,37 +394,48 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
             "source_filename": "notes.md",
             "ingest_status": "indexed",
         }
-        build_started = threading.Event()
+        loop = asyncio.get_running_loop()
+        build_started = asyncio.Event()
         release_build = threading.Event()
 
         def get_chunks(*, include):
             if include == ["documents"]:
-                build_started.set()
-                release_build.wait(timeout=5)
                 return {"ids": ["notes.md_chunk_0"], "documents": ["secret text"]}
             return {"ids": ["notes.md_chunk_0"]}
 
-        def update_metadata(*, metadata):
-            collection.metadata = metadata
+        original_build = vectorstore.build_bm25_index
+
+        def gate_bm25_build(documents):
+            loop.call_soon_threadsafe(build_started.set)
+            if not release_build.wait(timeout=5):
+                raise RuntimeError("test BM25 build was not released")
+            return original_build(documents)
 
         collection.get.side_effect = get_chunks
-        collection.modify.side_effect = update_metadata
-        collection.count.return_value = 0
         client.get_collection.return_value = collection
 
-        with patch.object(vectorstore, "chromadb_client", client):
-            build_task = asyncio.create_task(
+        with patch.object(vectorstore, "chromadb_client", client), patch.object(
+            vectorstore,
+            "build_bm25_index",
+            gate_bm25_build,
+        ):
+            first_task = asyncio.create_task(
                 vectorstore._get_bm25_index(collection, "notes.md")
             )
-            self.assertTrue(await asyncio.to_thread(build_started.wait, 2))
-            await vectorstore.delete_document("notes.md")
-            release_build.set()
-            with self.assertRaises(NotFoundError):
-                await build_task
+            await asyncio.wait_for(build_started.wait(), timeout=2)
+            second_task = asyncio.create_task(
+                vectorstore._get_bm25_index(collection, "notes.md")
+            )
+            try:
+                await asyncio.sleep(0)
+            finally:
+                release_build.set()
+            first, second = await asyncio.gather(first_task, second_task)
 
-        self.assertNotIn("notes.md", vectorstore._bm25_cache)
+        self.assertIs(first, second)
+        self.assertEqual(collection.get.call_count, 1)
 
-    async def test_delete_fences_a_builder_started_after_initial_invalidation(self):
+    async def test_cancelled_late_bm25_build_never_publishes_cache(self):
         client = MagicMock()
         collection = MagicMock()
         collection.name = "notes.md"
@@ -407,6 +450,111 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
                 return {"ids": ["notes.md_chunk_0"], "documents": ["secret text"]}
             return {"ids": ["notes.md_chunk_0"]}
 
+        collection.get.side_effect = get_chunks
+        client.get_collection.return_value = collection
+
+        loop = asyncio.get_running_loop()
+        build_started = asyncio.Event()
+        release_build = threading.Event()
+        original_build = vectorstore.build_bm25_index
+
+        def gate_bm25_build(documents):
+            loop.call_soon_threadsafe(build_started.set)
+            if not release_build.wait(timeout=5):
+                raise RuntimeError("test BM25 build was not released")
+            return original_build(documents)
+
+        with patch.object(vectorstore, "chromadb_client", client), patch.object(
+            vectorstore,
+            "build_bm25_index",
+            gate_bm25_build,
+        ):
+            build_task = asyncio.create_task(
+                vectorstore._get_bm25_index(collection, "notes.md")
+            )
+            await asyncio.wait_for(build_started.wait(), timeout=2)
+            try:
+                build_task.cancel()
+            finally:
+                release_build.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await build_task
+            await asyncio.wait_for(vectorstore.get_all_document(), timeout=2)
+
+        self.assertNotIn("notes.md", vectorstore._bm25_cache)
+
+    async def test_timed_out_bm25_build_never_publishes_cache(self):
+        client = MagicMock()
+        collection = MagicMock()
+        collection.name = "notes.md"
+        collection.metadata = {
+            "source_document_id": "notes.md",
+            "source_filename": "notes.md",
+            "ingest_status": "indexed",
+        }
+        loop = asyncio.get_running_loop()
+        build_started = asyncio.Event()
+        build_finished = asyncio.Event()
+        release_build = threading.Event()
+        original_build = vectorstore.build_bm25_index
+
+        def get_chunks(*, include):
+            if include == ["documents"]:
+                return {"ids": ["notes.md_chunk_0"], "documents": ["secret text"]}
+            return {"ids": ["notes.md_chunk_0"]}
+
+        def gate_bm25_build(documents):
+            loop.call_soon_threadsafe(build_started.set)
+            if not release_build.wait(timeout=5):
+                raise RuntimeError("test BM25 build was not released")
+            loop.call_soon_threadsafe(build_finished.set)
+            return original_build(documents)
+
+        collection.get.side_effect = get_chunks
+        client.get_collection.return_value = collection
+
+        with patch.object(vectorstore, "chromadb_client", client), patch.object(
+            vectorstore,
+            "build_bm25_index",
+            gate_bm25_build,
+        ), patch.object(vectorstore, "CHROMA_IO_OPERATION_TIMEOUT_SECONDS", 0.05):
+            build_task = asyncio.create_task(
+                vectorstore._get_bm25_index(collection, "notes.md")
+            )
+            await asyncio.wait_for(build_started.wait(), timeout=2)
+            with self.assertRaises(vectorstore.ChromaIOOperationTimeoutError):
+                await asyncio.wait_for(build_task, timeout=1)
+            release_build.set()
+            await asyncio.wait_for(build_finished.wait(), timeout=2)
+            await asyncio.wait_for(vectorstore.get_all_document(), timeout=2)
+
+        self.assertNotIn("notes.md", vectorstore._bm25_cache)
+
+    async def test_delete_queued_after_bm25_build_invalidates_completed_cache(self):
+        client = MagicMock()
+        collection = MagicMock()
+        collection.name = "notes.md"
+        collection.metadata = {
+            "source_document_id": "notes.md",
+            "source_filename": "notes.md",
+            "ingest_status": "indexed",
+        }
+        loop = asyncio.get_running_loop()
+        build_started = asyncio.Event()
+        release_build = threading.Event()
+        original_build = vectorstore.build_bm25_index
+
+        def get_chunks(*, include):
+            if include == ["documents"]:
+                return {"ids": ["notes.md_chunk_0"], "documents": ["secret text"]}
+            return {"ids": ["notes.md_chunk_0"]}
+
+        def gate_bm25_build(documents):
+            loop.call_soon_threadsafe(build_started.set)
+            if not release_build.wait(timeout=5):
+                raise RuntimeError("test BM25 build was not released")
+            return original_build(documents)
+
         def update_metadata(*, metadata):
             collection.metadata = metadata
 
@@ -415,34 +563,20 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
         collection.count.return_value = 0
         client.get_collection.return_value = collection
 
-        first_invalidation = threading.Event()
-        release_delete = threading.Event()
-        original_invalidate = vectorstore._invalidate_bm25_cache
-        invalidation_calls = 0
-
-        def gated_invalidate(document_id):
-            nonlocal invalidation_calls
-            original_invalidate(document_id)
-            invalidation_calls += 1
-            if invalidation_calls == 1:
-                first_invalidation.set()
-                release_delete.wait(timeout=5)
-
         with patch.object(vectorstore, "chromadb_client", client), patch.object(
             vectorstore,
-            "_invalidate_bm25_cache",
-            gated_invalidate,
+            "build_bm25_index",
+            gate_bm25_build,
         ):
+            build_task = asyncio.create_task(
+                vectorstore._get_bm25_index(collection, "notes.md")
+            )
+            await asyncio.wait_for(build_started.wait(), timeout=2)
             delete_task = asyncio.create_task(vectorstore.delete_document("notes.md"))
-            self.assertTrue(await asyncio.to_thread(first_invalidation.wait, 2))
-
-            await vectorstore._get_bm25_index(collection, "notes.md")
-            self.assertIn("notes.md", vectorstore._bm25_cache)
-
-            release_delete.set()
+            release_build.set()
+            await build_task
             self.assertEqual(await delete_task, "material_deleted")
 
-        self.assertGreaterEqual(invalidation_calls, 2)
         self.assertNotIn("notes.md", vectorstore._bm25_cache)
 
 

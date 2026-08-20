@@ -92,6 +92,26 @@ async def _cleanup_mcp_live_servers():
         pass
 
 
+async def _shutdown_vectorstore_io():
+    """Give owned embedded-Chroma work a bounded opportunity to finish."""
+    try:
+        from services.vectorstore import shutdown_vectorstore_io
+
+        await shutdown_vectorstore_io()
+    except Exception as exc:
+        logger.warning(
+            "[shutdown] vectorstore I/O cleanup failed; continuing error_type=%s",
+            type(exc).__name__,
+        )
+
+
+async def _start_vectorstore_io():
+    """Open a fresh embedded-Chroma lifecycle before accepting requests."""
+    from services.vectorstore import start_vectorstore_io
+
+    start_vectorstore_io()
+
+
 def _include_experimental_routers(application: FastAPI) -> bool:
     """Register opt-in Lab APIs only when enabled at process startup."""
     if not supervisor_enabled():
@@ -106,6 +126,7 @@ def _include_experimental_routers(application: FastAPI) -> bool:
 async def lifespan(_app: FastAPI):
     """Own startup resources and release them in reverse dependency order."""
     try:
+        await _start_vectorstore_io()
         await _load_memory_snapshot()
         await _connect_mcp_live_servers()
         yield
@@ -116,7 +137,10 @@ async def lifespan(_app: FastAPI):
             try:
                 await _save_memory_snapshot()
             finally:
-                await close_managed_provider_clients()
+                try:
+                    await _shutdown_vectorstore_io()
+                finally:
+                    await close_managed_provider_clients()
 
 
 app = FastAPI(

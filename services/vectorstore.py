@@ -1,20 +1,25 @@
-import chromadb
+import asyncio
+import concurrent.futures
 import hashlib
 import logging
+import math
 import os
+import queue
 import re
 import threading
 import time
 import uuid
 from pathlib import Path
+
+import chromadb
 from dotenv import load_dotenv
-import asyncio
-from chromadb.errors import NotFoundError
+from chromadb.errors import ChromaError, NotFoundError
 from services.provider_config import (
     build_managed_async_openai,
     load_provider_configs,
     run_with_provider_deadline,
 )
+from overrides import override
 from services.retry import with_retry
 from services.tracing import traceable
 from services.reranker import RerankerUnavailable, rerank_docs, reranker_enabled
@@ -43,13 +48,438 @@ _CHROMA_DIR = os.getenv("CHROMA_DIR") or str(Path(__file__).parent.parent / "chr
 chromadb_client = chromadb.PersistentClient(_CHROMA_DIR)
 
 
+def _positive_finite_float_environment(name: str, default: float) -> float:
+    """Read a non-secret duration without letting a malformed deploy config crash import."""
+    raw_value = os.getenv(name)
+    if raw_value is None or not raw_value.strip():
+        return default
+    try:
+        value = float(raw_value)
+    except ValueError:
+        value = 0.0
+    if not math.isfinite(value) or value <= 0:
+        logger.warning("[vectorstore] invalid %s; using safe default", name)
+        return default
+    return value
+
+
+def _positive_integer_environment(name: str, default: int) -> int:
+    raw_value = os.getenv(name)
+    if raw_value is None or not raw_value.strip():
+        return default
+    try:
+        value = int(raw_value)
+    except ValueError:
+        value = 0
+    if value <= 0:
+        logger.warning("[vectorstore] invalid %s; using safe default", name)
+        return default
+    return value
+
+
+# The application deliberately serializes its process-local PersistentClient.
+# The semaphore bounds both the one active worker and its waiting backlog; it
+# is independent from event loops so tests and short-lived CLI loops cannot
+# leak a loop-bound gate.
+CHROMA_IO_MAX_PENDING = _positive_integer_environment("CHROMA_IO_MAX_PENDING", 16)
+CHROMA_IO_QUEUE_WAIT_SECONDS = _positive_finite_float_environment(
+    "CHROMA_IO_QUEUE_WAIT_SECONDS", 10.0
+)
+CHROMA_IO_CANCEL_DRAIN_SECONDS = _positive_finite_float_environment(
+    "CHROMA_IO_CANCEL_DRAIN_SECONDS", 2.0
+)
+CHROMA_IO_OPERATION_TIMEOUT_SECONDS = _positive_finite_float_environment(
+    "CHROMA_IO_OPERATION_TIMEOUT_SECONDS", 30.0
+)
+CHROMA_IO_SHUTDOWN_DRAIN_SECONDS = _positive_finite_float_environment(
+    "CHROMA_IO_SHUTDOWN_DRAIN_SECONDS", 5.0
+)
+_CHROMA_IO_QUEUE_POLL_SECONDS = 0.01
+_chroma_io_slots = threading.BoundedSemaphore(CHROMA_IO_MAX_PENDING)
+_chroma_io_active = threading.Lock()
+_chroma_io_jobs: queue.Queue = queue.Queue(maxsize=1)
+_chroma_io_worker_lock = threading.Lock()
+_chroma_io_worker: threading.Thread | None = None
+_chroma_background_jobs: set[concurrent.futures.Future] = set()
+_chroma_background_jobs_lock = threading.Lock()
+_chroma_io_lifecycle_lock = threading.Lock()
+_chroma_io_accepting = True
+_chroma_io_generation = 0
+
+
+class ChromaIOWaitTimeoutError(ChromaError):
+    """The bounded embedded-Chroma queue did not accept work in time."""
+
+    @classmethod
+    @override
+    def name(cls) -> str:
+        return "ChromaIOWaitTimeout"
+
+
+class ChromaIOOperationTimeoutError(ChromaError):
+    """A Chroma call exceeded its public waiting budget but keeps draining."""
+
+    @classmethod
+    @override
+    def name(cls) -> str:
+        return "ChromaIOOperationTimeout"
+
+
+class ChromaIOShuttingDownError(ChromaError):
+    """The process is draining the embedded Chroma worker."""
+
+    @classmethod
+    @override
+    def name(cls) -> str:
+        return "ChromaIOShuttingDown"
+
+
+def _chroma_io_is_accepting() -> bool:
+    with _chroma_io_lifecycle_lock:
+        return _chroma_io_accepting
+
+
+def _capture_chroma_io_generation() -> int:
+    """Bind a request to one lifecycle generation before it starts waiting."""
+    with _chroma_io_lifecycle_lock:
+        if not _chroma_io_accepting:
+            raise ChromaIOShuttingDownError("embedded Chroma worker is shutting down")
+        return _chroma_io_generation
+
+
+def start_vectorstore_io() -> None:
+    """Open a clean lifecycle; never reopen while a timed-out worker survives."""
+    global _chroma_io_accepting, _chroma_io_generation, _chroma_io_worker
+    with _chroma_io_lifecycle_lock, _chroma_io_worker_lock:
+        if _chroma_io_accepting:
+            return
+        if _chroma_io_worker is not None and _chroma_io_worker.is_alive():
+            raise ChromaIOShuttingDownError("embedded Chroma worker is still draining")
+        _chroma_io_worker = None
+        _chroma_io_generation += 1
+        _chroma_io_accepting = True
+
+
+async def _acquire_chroma_io_slot(deadline: float) -> None:
+    """Wait for bounded queue capacity without tying it to one event loop."""
+    loop = asyncio.get_running_loop()
+    while not _chroma_io_slots.acquire(blocking=False):
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise ChromaIOWaitTimeoutError("embedded Chroma I/O queue is full")
+        await asyncio.sleep(min(_CHROMA_IO_QUEUE_POLL_SECONDS, remaining))
+
+
+def _consume_chroma_worker_result(
+    worker: concurrent.futures.Future,
+    operation_name: str,
+    detached: threading.Event,
+) -> None:
+    """Consume late failures so cancellation hand-off cannot create warnings."""
+    try:
+        worker.result()
+    except asyncio.CancelledError:
+        if detached.is_set():
+            logger.warning(
+                "[vectorstore] detached Chroma worker cancelled: operation=%s",
+                operation_name,
+            )
+    except BaseException as exc:
+        if detached.is_set():
+            logger.error(
+                "[vectorstore] detached Chroma worker failed: "
+                "operation=%s error_type=%s",
+                operation_name,
+                type(exc).__name__,
+            )
+
+
+def _track_chroma_worker(
+    worker: concurrent.futures.Future,
+    operation_name: str,
+    detached: threading.Event,
+) -> None:
+    """Release capacity and retain a hand-off until its synchronous I/O exits."""
+    with _chroma_background_jobs_lock:
+        _chroma_background_jobs.add(worker)
+
+    def on_done(completed: concurrent.futures.Future) -> None:
+        with _chroma_background_jobs_lock:
+            _chroma_background_jobs.discard(completed)
+        _chroma_io_slots.release()
+        _consume_chroma_worker_result(completed, operation_name, detached)
+
+    worker.add_done_callback(on_done)
+
+
+async def _drain_cancelled_chroma_io(worker: concurrent.futures.Future) -> bool:
+    """Drain repeated cancellation only until one absolute finite deadline."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + CHROMA_IO_CANCEL_DRAIN_SECONDS
+    while not worker.done():
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return False
+        try:
+            await asyncio.sleep(min(_CHROMA_IO_QUEUE_POLL_SECONDS, remaining))
+        except asyncio.CancelledError:
+            continue
+    return True
+
+
+def _execute_chroma_job(job: tuple) -> None:
+    """Execute one job in a short-lived frame so its client refs are released."""
+    func, args, kwargs, worker = job
+    if not worker.set_running_or_notify_cancel():
+        _chroma_io_active.release()
+        return
+    try:
+        result = func(*args, **kwargs)
+    except BaseException as exc:
+        _chroma_io_active.release()
+        worker.set_exception(exc)
+    else:
+        _chroma_io_active.release()
+        worker.set_result(result)
+
+
+def _chroma_worker_main() -> None:
+    """Run exactly one daemon worker, never tied to a request event loop."""
+    while True:
+        job = _chroma_io_jobs.get()
+        if job is None:
+            return
+        _execute_chroma_job(job)
+        del job
+
+
+def _ensure_chroma_worker() -> None:
+    global _chroma_io_worker
+    with _chroma_io_worker_lock:
+        if _chroma_io_worker is not None and _chroma_io_worker.is_alive():
+            return
+        _chroma_io_worker = threading.Thread(
+            target=_chroma_worker_main,
+            name="studyloop-chroma",
+            daemon=True,
+        )
+        _chroma_io_worker.start()
+
+
+def _submit_chroma_job(
+    worker: concurrent.futures.Future,
+    func,
+    args: tuple,
+    kwargs: dict,
+    *,
+    generation: int,
+    operation_name: str,
+    detached: threading.Event,
+) -> None:
+    """Atomically reject a waiter from an earlier stopped lifecycle."""
+    with _chroma_io_lifecycle_lock:
+        if not _chroma_io_accepting or generation != _chroma_io_generation:
+            raise ChromaIOShuttingDownError("embedded Chroma worker is shutting down")
+        _ensure_chroma_worker()
+        _track_chroma_worker(worker, operation_name, detached)
+        _chroma_io_jobs.put_nowait((func, args, kwargs, worker))
+
+
+async def shutdown_vectorstore_io() -> None:
+    """Reject new work and give owned Chroma transactions a finite shutdown drain."""
+    global _chroma_io_accepting, _chroma_io_worker
+    with _chroma_io_lifecycle_lock:
+        _chroma_io_accepting = False
+        worker = _chroma_io_worker
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + CHROMA_IO_SHUTDOWN_DRAIN_SECONDS
+    while True:
+        with _chroma_background_jobs_lock:
+            pending = bool(_chroma_background_jobs)
+        if not pending and not _chroma_io_active.locked():
+            break
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            logger.error(
+                "[vectorstore] Chroma shutdown drain timed out: error_type=TimeoutError"
+            )
+            return
+        await asyncio.sleep(min(_CHROMA_IO_QUEUE_POLL_SECONDS, remaining))
+
+    # A request may have passed the final accepting check immediately before
+    # shutdown flipped it. Re-read after the drain rather than trusting the
+    # initial snapshot, then stop whichever worker actually owns the channel.
+    with _chroma_io_worker_lock:
+        worker = _chroma_io_worker
+    if worker is not None and worker.is_alive():
+        _chroma_io_jobs.put_nowait(None)
+        while worker.is_alive():
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                logger.error(
+                    "[vectorstore] Chroma worker shutdown timed out: error_type=TimeoutError"
+                )
+                return
+            await asyncio.sleep(min(_CHROMA_IO_QUEUE_POLL_SECONDS, remaining))
+
+    with _chroma_io_lifecycle_lock:
+        if _chroma_io_worker is worker:
+            _chroma_io_worker = None
+
+
+def _run_chroma_io_sync(func, /, *args, operation_name: str, **kwargs):
+    """Use the daemon channel from blocking probes as well as async APIs."""
+    generation = _capture_chroma_io_generation()
+    deadline = time.monotonic() + CHROMA_IO_QUEUE_WAIT_SECONDS
+    slot_acquired = False
+    active_acquired = False
+    submitted = False
+    detached = threading.Event()
+    try:
+        while not _chroma_io_slots.acquire(blocking=False):
+            if time.monotonic() >= deadline:
+                raise ChromaIOWaitTimeoutError("embedded Chroma I/O queue is full")
+            time.sleep(_CHROMA_IO_QUEUE_POLL_SECONDS)
+        slot_acquired = True
+        while not _chroma_io_active.acquire(blocking=False):
+            if time.monotonic() >= deadline:
+                raise ChromaIOWaitTimeoutError("embedded Chroma worker is busy")
+            time.sleep(_CHROMA_IO_QUEUE_POLL_SECONDS)
+        active_acquired = True
+        worker: concurrent.futures.Future = concurrent.futures.Future()
+        _submit_chroma_job(
+            worker,
+            func,
+            args,
+            kwargs,
+            generation=generation,
+            operation_name=operation_name,
+            detached=detached,
+        )
+        submitted = True
+        try:
+            return worker.result(timeout=CHROMA_IO_OPERATION_TIMEOUT_SECONDS)
+        except concurrent.futures.TimeoutError:
+            detached.set()
+            raise ChromaIOOperationTimeoutError(
+                "embedded Chroma operation timed out"
+            ) from None
+    finally:
+        if not submitted:
+            if active_acquired:
+                _chroma_io_active.release()
+            if slot_acquired:
+                _chroma_io_slots.release()
+
+
+async def _acquire_chroma_io_active(deadline: float) -> None:
+    loop = asyncio.get_running_loop()
+    if not _chroma_io_is_accepting():
+        raise ChromaIOShuttingDownError("embedded Chroma worker is shutting down")
+    while not _chroma_io_active.acquire(blocking=False):
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise ChromaIOWaitTimeoutError("embedded Chroma worker is busy")
+        await asyncio.sleep(min(_CHROMA_IO_QUEUE_POLL_SECONDS, remaining))
+
+
+async def _wait_for_chroma_worker(
+    worker: concurrent.futures.Future,
+    deadline: float,
+) -> object:
+    loop = asyncio.get_running_loop()
+    while not worker.done():
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise ChromaIOOperationTimeoutError("embedded Chroma operation timed out")
+        await asyncio.sleep(min(_CHROMA_IO_QUEUE_POLL_SECONDS, remaining))
+    return worker.result()
+
+
+async def _run_chroma_io(
+    func,
+    /,
+    *args,
+    operation_name: str,
+    cancellation_event: threading.Event | None = None,
+    **kwargs,
+):
+    """Serialize Chroma calls, with bounded pressure and cancellation hand-off.
+
+    Once submitted, a mutating operation must continue: staging publication and
+    tombstone cleanup otherwise could be left in an ambiguous state.  A caller
+    waits only a bounded additional interval after cancellation; the worker
+    remains strongly referenced and releases the slot only when it really exits.
+    """
+    loop = asyncio.get_running_loop()
+    generation = _capture_chroma_io_generation()
+    queue_deadline = loop.time() + CHROMA_IO_QUEUE_WAIT_SECONDS
+    submitted = False
+    slot_acquired = False
+    active_acquired = False
+    detached = threading.Event()
+    try:
+        await _acquire_chroma_io_slot(queue_deadline)
+        slot_acquired = True
+        await _acquire_chroma_io_active(queue_deadline)
+        active_acquired = True
+        worker: concurrent.futures.Future = concurrent.futures.Future()
+        _submit_chroma_job(
+            worker,
+            func,
+            args,
+            kwargs,
+            generation=generation,
+            operation_name=operation_name,
+            detached=detached,
+        )
+        submitted = True
+        operation_deadline = loop.time() + CHROMA_IO_OPERATION_TIMEOUT_SECONDS
+        return await _wait_for_chroma_worker(worker, operation_deadline)
+    except asyncio.CancelledError as cancellation:
+        if not submitted:
+            raise cancellation
+        if worker.cancel():
+            raise cancellation
+        if cancellation_event is not None:
+            cancellation_event.set()
+        completed = await _drain_cancelled_chroma_io(worker)
+        if not completed:
+            detached.set()
+            logger.warning(
+                "[vectorstore] cancelled request stopped waiting for Chroma I/O; "
+                "operation=%s",
+                operation_name,
+            )
+        raise cancellation
+    except ChromaIOOperationTimeoutError:
+        if worker.cancel():
+            raise
+        if cancellation_event is not None:
+            cancellation_event.set()
+        detached.set()
+        raise
+    finally:
+        if not submitted:
+            # No worker owns the capacity/active lock when a queue waiter
+            # times out or is cancelled, so it must not be left for a callback.
+            if active_acquired:
+                _chroma_io_active.release()
+            if slot_acquired:
+                _chroma_io_slots.release()
+
+
 def probe_vectorstore_readiness() -> None:
     """Read Chroma's persistent collection catalog without mutating it.
 
     Chroma's ``heartbeat()`` only returns the current time, so it cannot prove
     that the embedded metadata database remains readable.
     """
-    chromadb_client.count_collections()
+    _run_chroma_io_sync(
+        chromadb_client.count_collections,
+        operation_name="probe_vectorstore_readiness",
+    )
 
 # 单次 embedding 请求最多 chunk 数:大文档分批,避免撞厂商单请求 input 上限
 EMBED_BATCH_SIZE = 64
@@ -98,9 +528,10 @@ async def _get_public_document_collection(
     *,
     include_tombstone: bool = False,
 ):
-    collection = await asyncio.to_thread(
+    collection = await _run_chroma_io(
         chromadb_client.get_collection,
         name=_storage_document_id(document_id),
+        operation_name="get_collection",
     )
     collection = _require_public_document_owner(collection, document_id)
     metadata = collection.metadata if isinstance(collection.metadata, dict) else {}
@@ -134,7 +565,11 @@ async def _embed(texts: list[str]):
 
 async def _collection_exists(name: str) -> bool:
     try:
-        await asyncio.to_thread(chromadb_client.get_collection, name=name)
+        await _run_chroma_io(
+            chromadb_client.get_collection,
+            name=name,
+            operation_name="get_collection",
+        )
     except NotFoundError:
         return False
     return True
@@ -142,7 +577,11 @@ async def _collection_exists(name: str) -> bool:
 
 async def _get_collection_if_exists(name: str):
     try:
-        return await asyncio.to_thread(chromadb_client.get_collection, name=name)
+        return await _run_chroma_io(
+            chromadb_client.get_collection,
+            name=name,
+            operation_name="get_collection",
+        )
     except NotFoundError:
         return None
 
@@ -154,11 +593,12 @@ def _staging_is_stale(metadata: dict, now: float | None = None) -> bool:
     return (now or time.time()) - created_at >= _STAGING_TTL_SECONDS
 
 
-async def _ensure_document_slot_available(document_id: str) -> None:
+def _ensure_document_slot_available_sync(document_id: str) -> None:
     """Reject real duplicates while migrating legacy empty ghost collections."""
     storage_id = _storage_document_id(document_id)
-    existing = await _get_collection_if_exists(storage_id)
-    if existing is None:
+    try:
+        existing = chromadb_client.get_collection(name=storage_id)
+    except NotFoundError:
         return
 
     metadata = existing.metadata if isinstance(existing.metadata, dict) else {}
@@ -167,15 +607,16 @@ async def _ensure_document_slot_available(document_id: str) -> None:
         raise DocumentAlreadyExistsError(
             f"文档 '{document_id}' 已关联保留的学习历史，不能同名重传，请先重命名文件"
         )
-    count = await asyncio.to_thread(existing.count)
+    count = existing.count()
     removable = (status == "indexing" and _staging_is_stale(metadata)) or (
         status != "indexed" and count == 0
     )
     if removable:
         try:
-            await asyncio.to_thread(chromadb_client.delete_collection, name=storage_id)
+            chromadb_client.delete_collection(name=storage_id)
         except NotFoundError:
             pass
+        _invalidate_bm25_cache(document_id)
         logger.info(
             "[vectorstore] removed incomplete collection before upload: %s", document_id
         )
@@ -184,46 +625,31 @@ async def _ensure_document_slot_available(document_id: str) -> None:
     raise DocumentAlreadyExistsError(f"文档 '{document_id}' 已存在，请先删除后再上传")
 
 
-async def _run_blocking_to_completion(func, /, *args, **kwargs):
-    """Do not abandon an in-flight Chroma thread when the HTTP task is cancelled."""
-    task = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
-    try:
-        return await asyncio.shield(task)
-    except asyncio.CancelledError as cancellation:
-        while not task.done():
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError:
-                continue
-            except Exception:
-                break
-        if task.done() and not task.cancelled():
-            try:
-                task.result()
-            except Exception:
-                pass
-        raise cancellation
+async def _ensure_document_slot_available(document_id: str) -> None:
+    await _run_chroma_io(
+        _ensure_document_slot_available_sync,
+        document_id,
+        operation_name="ensure_document_slot_available",
+    )
 
 
-async def deal_document(document_id: str, filename: str, chunks: list[str]):
-    # 同名重传不能继续用 add：Chroma 会忽略重复 id，导致接口成功但正文仍未更新。
+def _deal_document_sync(
+    document_id: str,
+    filename: str,
+    chunks: list[str],
+    embeddings: list,
+    cancellation_event: threading.Event,
+) -> int:
+    """Perform one complete staging→published transition on the Chroma worker."""
     storage_id = _storage_document_id(document_id)
-    await _ensure_document_slot_available(document_id)
-
-    # 先完成所有外部 embedding 调用，provider 失败时不产生任何 Chroma 写入。
-    # 分批 embed:几百 chunk 一次性 embed 会撞 API input 上限(多数厂商 ~2048 条/8k token)
-    embeddings: list = []
-    for start in range(0, len(chunks), EMBED_BATCH_SIZE):
-        resp = await _embed(chunks[start : start + EMBED_BATCH_SIZE])
-        embeddings.extend(item.embedding for item in resp.data)
-
-    # 写入唯一 staging collection；只有 add 完整成功后才 rename 发布为 document_id。
-    # 即使 cleanup 失败，列表也会过滤 staging/indexing collection，不会宣称上传成功。
+    # Re-check inside the same serialized worker immediately before mutation.
+    # The async preflight only avoids wasting embedding calls on obvious dupes.
+    _ensure_document_slot_available_sync(document_id)
     staging_name = f"{_STAGING_PREFIX}{uuid.uuid4().hex}"
     collection = None
     try:
-        # create 同步执行，确保取消信号到达时已经拿到本次 staging 的所有权，
-        # 外层 cleanup 不会因后台线程稍后才创建成功而漏删。
+        # This synchronous transaction is never abandoned after submission.
+        # Its finally cleanup therefore still runs if the HTTP caller leaves.
         collection = chromadb_client.create_collection(
             name=staging_name,
             metadata={
@@ -234,8 +660,9 @@ async def deal_document(document_id: str, filename: str, chunks: list[str]):
             },
         )
         _active_staging_names.add(staging_name)
-        await _run_blocking_to_completion(
-            collection.add,
+        if cancellation_event.is_set():
+            raise asyncio.CancelledError
+        collection.add(
             documents=chunks,
             embeddings=embeddings,
             ids=[f"{storage_id}_chunk_{i}" for i in range(len(chunks))],
@@ -244,12 +671,11 @@ async def deal_document(document_id: str, filename: str, chunks: list[str]):
                 for i in range(len(chunks))
             ],
         )
+        if cancellation_event.is_set():
+            raise asyncio.CancelledError
 
-        # 防止两个并发上传在首次检查后同时发布同一个 document_id。
-        await _ensure_document_slot_available(document_id)
         try:
-            await _run_blocking_to_completion(
-                collection.modify,
+            collection.modify(
                 name=storage_id,
                 metadata={
                     "ingest_status": "indexed",
@@ -257,20 +683,29 @@ async def deal_document(document_id: str, filename: str, chunks: list[str]):
                     "source_document_id": document_id,
                 },
             )
+            # The canonical name may now resolve to new text even if a later
+            # client cancellation prevents the outer coroutine from returning.
+            _invalidate_bm25_cache(document_id)
+            if cancellation_event.is_set():
+                raise asyncio.CancelledError
         except Exception as publish_error:
             # Chroma 的 rename 冲突没有稳定的专用异常类型；以正式 collection
             # 是否已出现判定并发同名上传，统一返回 409 而不是误报存储故障。
-            if await _collection_exists(storage_id):
+            try:
+                chromadb_client.get_collection(name=storage_id)
+                published_exists = True
+            except NotFoundError:
+                published_exists = False
+            if published_exists:
+                _invalidate_bm25_cache(document_id)
                 raise DocumentAlreadyExistsError(
                     f"文档 '{document_id}' 已存在，请先删除后再上传"
                 ) from publish_error
             raise
     except BaseException:
         if collection is not None:
-            cleanup_name = getattr(collection, "name", staging_name) or staging_name
             try:
-                # 同步 cleanup，避免请求已经取消时第二个 await 再次中断清理。
-                chromadb_client.delete_collection(name=cleanup_name)
+                _cleanup_staging_collection_sync(staging_name, document_id)
             except Exception as cleanup_error:
                 logger.error(
                     "[vectorstore] staging cleanup failure: error_type=%s",
@@ -280,8 +715,46 @@ async def deal_document(document_id: str, filename: str, chunks: list[str]):
     finally:
         _active_staging_names.discard(staging_name)
 
-    _invalidate_bm25_cache(document_id)  # 文档内容已变,BM25 缓存失效
     return len(chunks)
+
+
+def _cleanup_staging_collection_sync(staging_name: str, document_id: str) -> None:
+    """Delete only this transaction's unguessable, immutable staging name."""
+    # ``staging_name`` is generated before create and never reused; unlike
+    # collection.name it cannot turn into the public collection after rename.
+    # A catalog re-read would make rollback depend on a second failed I/O and
+    # provides no stronger ownership proof than this capability-like UUID.
+    del document_id
+    try:
+        chromadb_client.delete_collection(name=staging_name)
+    except NotFoundError:
+        # A successful rename/ACK-loss path no longer owns this staging name.
+        return
+
+
+async def deal_document(document_id: str, filename: str, chunks: list[str]):
+    # 同名重传不能继续用 add：Chroma 会忽略重复 id，导致接口成功但正文仍未更新。
+    await _ensure_document_slot_available(document_id)
+
+    # 先完成所有外部 embedding 调用，provider 失败时不产生任何 Chroma 写入。
+    # 分批 embed:几百 chunk 一次性 embed 会撞 API input 上限(多数厂商 ~2048 条/8k token)
+    embeddings: list = []
+    for start in range(0, len(chunks), EMBED_BATCH_SIZE):
+        resp = await _embed(chunks[start : start + EMBED_BATCH_SIZE])
+        embeddings.extend(item.embedding for item in resp.data)
+
+    # Staging 的创建、写入、发布和失败清理必须由同一个不可中断 worker 收束。
+    cancellation_event = threading.Event()
+    return await _run_chroma_io(
+        _deal_document_sync,
+        document_id,
+        filename,
+        chunks,
+        embeddings,
+        cancellation_event,
+        operation_name="deal_document",
+        cancellation_event=cancellation_event,
+    )
 
 
 # ── BM25 索引缓存(按 document_id),避免每次查询全量 collection.get + 重建索引 ──────
@@ -300,6 +773,46 @@ def _invalidate_bm25_cache(document_id: str) -> None:
         _bm25_cache.pop(document_id, None)
 
 
+def _get_or_build_bm25_index_sync(
+    collection,
+    document_id: str,
+    cache_epoch: int,
+    document_version: int,
+    cancellation_event: threading.Event,
+) -> dict:
+    """Single-flight corpus read/build/publish on the bounded storage worker."""
+    with _bm25_cache_lock:
+        cached = _bm25_cache.get(document_id)
+        if cached is not None:
+            return cached
+    all_results = collection.get(include=["documents"])
+    all_docs = all_results["documents"]
+    all_ids = all_results["ids"]
+    bm25 = build_bm25_index(all_docs)
+    if cancellation_event.is_set():
+        raise asyncio.CancelledError
+    entry = {
+        "bm25": bm25,
+        "all_docs": all_docs,
+        "all_ids": all_ids,
+        "tokenizer_id": BM25_TOKENIZER_ID,
+    }
+    current = chromadb_client.get_collection(name=_storage_document_id(document_id))
+    _require_public_document_owner(current, document_id)
+    metadata = current.metadata if isinstance(current.metadata, dict) else {}
+    if metadata.get("ingest_status") in {"deleting", "deleted"}:
+        raise NotFoundError(f"Document {document_id!r} not found")
+    with _bm25_cache_lock:
+        if (
+            cancellation_event.is_set()
+            or cache_epoch != _bm25_cache_epoch
+            or document_version != _bm25_document_versions.get(document_id, 0)
+        ):
+            raise NotFoundError(f"Document {document_id!r} not found")
+        _bm25_cache[document_id] = entry
+    return entry
+
+
 async def _get_bm25_index(collection, document_id: str) -> dict:
     """取或构建某文档的 BM25 索引,带进程内缓存。返回 {bm25, all_docs, all_ids}。
 
@@ -312,29 +825,17 @@ async def _get_bm25_index(collection, document_id: str) -> dict:
         document_version = _bm25_document_versions.get(document_id, 0)
         if cached is not None:
             return cached
-    all_results = await asyncio.to_thread(collection.get, include=["documents"])
-    all_docs = all_results["documents"]
-    all_ids = all_results["ids"]
-    bm25 = build_bm25_index(all_docs)
-    entry = {
-        "bm25": bm25,
-        "all_docs": all_docs,
-        "all_ids": all_ids,
-        "tokenizer_id": BM25_TOKENIZER_ID,
-    }
-    # A delete can run while collection.get/build_bm25_index is in flight. The
-    # public collection check prevents a deleting/deleted collection from being
-    # published back into process memory; the lifecycle version closes the
-    # final validate→cache race with delete_document.
-    await _get_public_document_collection(document_id)
-    with _bm25_cache_lock:
-        if (
-            cache_epoch != _bm25_cache_epoch
-            or document_version != _bm25_document_versions.get(document_id, 0)
-        ):
-            raise NotFoundError(f"Document {document_id!r} not found")
-        _bm25_cache[document_id] = entry
-    return entry
+    cancellation_event = threading.Event()
+    return await _run_chroma_io(
+        _get_or_build_bm25_index_sync,
+        collection,
+        document_id,
+        cache_epoch,
+        document_version,
+        cancellation_event,
+        operation_name="get_or_build_bm25_index",
+        cancellation_event=cancellation_event,
+    )
 
 
 def clear_bm25_cache() -> None:
@@ -348,8 +849,11 @@ def clear_bm25_cache() -> None:
 async def query_document(document_id: str, query: str):
     collection = await _get_public_document_collection(document_id)
     query_vec = await _embed([query])
-    return await asyncio.to_thread(
-        collection.query, query_embeddings=[query_vec.data[0].embedding], n_results=5
+    return await _run_chroma_io(
+        collection.query,
+        query_embeddings=[query_vec.data[0].embedding],
+        n_results=5,
+        operation_name="query_document",
     )
 
 
@@ -384,10 +888,11 @@ async def hybrid_query_document(
     # 1. 向量检索
     collection = await _get_public_document_collection(document_id)
     query_vec = await _embed([query])
-    vec_results = await asyncio.to_thread(
+    vec_results = await _run_chroma_io(
         collection.query,
         query_embeddings=[query_vec.data[0].embedding],
         n_results=recall_n,
+        operation_name="hybrid_vector_query",
     )
     vec_docs = vec_results["documents"][0]  # list[str]
     vec_ids = vec_results["ids"][0]  # list[str]
@@ -398,7 +903,13 @@ async def hybrid_query_document(
     if bm25 is None:
         bm25_ids, bm25_docs = [], []
     else:
-        bm25_ranked = rank_bm25(bm25, query, recall_n)
+        bm25_ranked = await _run_chroma_io(
+            rank_bm25,
+            bm25,
+            query,
+            recall_n,
+            operation_name="rank_bm25",
+        )
         bm25_ids = [all_ids[i] for i, _ in bm25_ranked]
         bm25_docs = [all_docs[i] for i, _ in bm25_ranked]
 
@@ -525,14 +1036,20 @@ async def bm25_only_query_document(
     all_docs, all_ids, bm25 = idx["all_docs"], idx["all_ids"], idx["bm25"]
     if bm25 is None:
         return {"documents": [[]], "ids": [[]]}
-    ranked = rank_bm25(bm25, query, n_results)
+    ranked = await _run_chroma_io(
+        rank_bm25,
+        bm25,
+        query,
+        n_results,
+        operation_name="rank_bm25",
+    )
     top_ids = [all_ids[i] for i, _ in ranked]
     top_docs = [all_docs[i] for i, _ in ranked]
     return {"documents": [top_docs], "ids": [top_ids]}
 
 
-async def get_all_document():
-    collections = await asyncio.to_thread(chromadb_client.list_collections)
+def _get_all_document_sync():
+    collections = chromadb_client.list_collections()
     visible = []
     now = time.time()
     for collection in collections:
@@ -545,7 +1062,7 @@ async def get_all_document():
                 or collection.name
             )
             try:
-                await delete_document(public_id)
+                _delete_document_sync(public_id)
             except Exception as cleanup_error:
                 logger.warning(
                     "[vectorstore] deleting tombstone cleanup deferred for %s: %s",
@@ -560,9 +1077,7 @@ async def get_all_document():
                 metadata, now
             ):
                 try:
-                    await asyncio.to_thread(
-                        chromadb_client.delete_collection, name=collection.name
-                    )
+                    chromadb_client.delete_collection(name=collection.name)
                 except NotFoundError:
                     pass
                 except Exception as cleanup_error:
@@ -573,11 +1088,9 @@ async def get_all_document():
             continue
 
         # 没有 metadata 且 count=0 的 embedding ghost：隐藏并迁移清理。
-        if status != "indexed" and await asyncio.to_thread(collection.count) == 0:
+        if status != "indexed" and collection.count() == 0:
             try:
-                await asyncio.to_thread(
-                    chromadb_client.delete_collection, name=collection.name
-                )
+                chromadb_client.delete_collection(name=collection.name)
             except NotFoundError:
                 pass
             except Exception as cleanup_error:
@@ -588,6 +1101,13 @@ async def get_all_document():
             continue
         visible.append(collection)
     return visible
+
+
+async def get_all_document():
+    return await _run_chroma_io(
+        _get_all_document_sync,
+        operation_name="get_all_document",
+    )
 
 
 def _deleted_tombstone_metadata(document_id: str) -> dict:
@@ -658,7 +1178,10 @@ def _delete_document_sync(document_id: str) -> str:
 
 
 async def delete_document(document_id: str) -> str:
-    # Chroma is synchronous. Drain the complete deleting→empty→deleted
-    # transition before propagating cancellation so a retry always has a
-    # durable state from which it can finish.
-    return await _run_blocking_to_completion(_delete_document_sync, document_id)
+    # Chroma is synchronous. The complete deleting→empty→deleted transition
+    # stays on the serialized worker even if the HTTP request is cancelled.
+    return await _run_chroma_io(
+        _delete_document_sync,
+        document_id,
+        operation_name="delete_document",
+    )
