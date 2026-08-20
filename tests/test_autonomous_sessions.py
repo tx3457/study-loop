@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import sqlite3
 import sys
 import tempfile
@@ -11,7 +12,7 @@ import threading
 import unittest
 from contextlib import closing
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from services.autonomous_sessions import (
@@ -143,16 +144,16 @@ class TestAutonomousSessionStore(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await first.renew("conv-crash", old_claim.claim_token))
         self.assertFalse(await first.mark_progress("conv-crash", old_claim.claim_token))
         self.assertFalse(await first.cancel("conv-crash", old_claim.claim_token))
-        self.assertFalse(await first.finish(
-            "conv-crash", old_claim.claim_token, _response("late")
-        ))
-        self.assertFalse(await first.handoff(
-            "conv-crash",
-            old_claim.claim_token,
-            "conv-late-next",
-            _payload("late"),
-            _response("late", conversation_id="conv-late-next"),
-        ))
+        self.assertFalse(await first.finish("conv-crash", old_claim.claim_token, _response("late")))
+        self.assertFalse(
+            await first.handoff(
+                "conv-crash",
+                old_claim.claim_token,
+                "conv-late-next",
+                _payload("late"),
+                _response("late", conversation_id="conv-late-next"),
+            )
+        )
         self.assertFalse(await first.consume("conv-crash", old_claim.claim_token))
         self.assertTrue(await reopened.consume("conv-crash", new_claim.claim_token))
 
@@ -162,13 +163,9 @@ class TestAutonomousSessionStore(unittest.IsolatedAsyncioTestCase):
         first = await store.claim("conv-bound", _fingerprint("first"))
         self.now[0] += 11
 
-        mismatch = await self._store().claim(
-            "conv-bound", _fingerprint("changed")
-        )
+        mismatch = await self._store().claim("conv-bound", _fingerprint("changed"))
         inspected = await self._store().inspect("conv-bound")
-        mismatch_after_reap = await self._store().claim(
-            "conv-bound", _fingerprint("changed")
-        )
+        mismatch_after_reap = await self._store().claim("conv-bound", _fingerprint("changed"))
         replay = await self._store().claim("conv-bound", _fingerprint("first"))
 
         self.assertFalse(mismatch.claimed)
@@ -186,9 +183,7 @@ class TestAutonomousSessionStore(unittest.IsolatedAsyncioTestCase):
 
         # A mismatched retry is observational only: it cannot poison the row
         # before the exact original request performs the stale transition.
-        mismatch = await self._store().claim(
-            "conv-progress", _fingerprint("changed")
-        )
+        mismatch = await self._store().claim("conv-progress", _fingerprint("changed"))
         before_exact = await self._raw_state("conv-progress")
         retry = await self._store().claim("conv-progress", _fingerprint("reply"))
         inspection = await self._store().inspect("conv-progress")
@@ -204,9 +199,7 @@ class TestAutonomousSessionStore(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ambiguous_raw[0], "in_flight")
         self.assertIsNotNone(ambiguous_raw[1])
         self.assertEqual(reopened.reason, "ambiguous")
-        self.assertFalse(await store.finish(
-            "conv-progress", claim.claim_token, _response("late")
-        ))
+        self.assertFalse(await store.finish("conv-progress", claim.claim_token, _response("late")))
         self.assertFalse(await store.consume("conv-progress", claim.claim_token))
 
     async def test_renew_extends_live_lease_but_cannot_revive_expired_owner(self):
@@ -249,23 +242,15 @@ class TestAutonomousSessionStore(unittest.IsolatedAsyncioTestCase):
 
         await store.save("conv-done", _payload("done"))
         done = await store.claim("conv-done", _fingerprint("done"))
-        self.assertTrue(await store.finish(
-            "conv-done", done.claim_token, _response("finished")
-        ))
+        self.assertTrue(await store.finish("conv-done", done.claim_token, _response("finished")))
         completed = await store.discard_paused("conv-done")
 
         await store.save("conv-ambiguous", _payload("ambiguous"))
-        ambiguous_claim = await store.claim(
-            "conv-ambiguous", _fingerprint("ambiguous")
-        )
-        self.assertTrue(await store.mark_progress(
-            "conv-ambiguous", ambiguous_claim.claim_token
-        ))
+        ambiguous_claim = await store.claim("conv-ambiguous", _fingerprint("ambiguous"))
+        self.assertTrue(await store.mark_progress("conv-ambiguous", ambiguous_claim.claim_token))
         self.now[0] += 11
         self.assertEqual(
-            (await store.claim(
-                "conv-ambiguous", _fingerprint("ambiguous")
-            )).reason,
+            (await store.claim("conv-ambiguous", _fingerprint("ambiguous"))).reason,
             "ambiguous",
         )
         ambiguous = await store.discard_paused("conv-ambiguous")
@@ -285,9 +270,7 @@ class TestAutonomousSessionStore(unittest.IsolatedAsyncioTestCase):
 
         inspection = await self._store().inspect("conv-finish")
         replay = await self._store().claim("conv-finish", _fingerprint("reply"))
-        mismatch = await self._store().claim(
-            "conv-finish", _fingerprint("different")
-        )
+        mismatch = await self._store().claim("conv-finish", _fingerprint("different"))
 
         self.assertEqual(inspection.state, "completed")
         self.assertEqual(inspection.outcome, response)
@@ -298,15 +281,15 @@ class TestAutonomousSessionStore(unittest.IsolatedAsyncioTestCase):
         raw = await self._raw_state("conv-finish")
         self.assertEqual(raw[0], "in_flight")
         self.assertIsNotNone(raw[1])
-        self.assertFalse(await store.finish(
-            "conv-finish", claim.claim_token, _response("overwrite")
-        ))
+        self.assertFalse(
+            await store.finish("conv-finish", claim.claim_token, _response("overwrite"))
+        )
 
     async def test_schema_recheck_does_not_extend_outcome_tombstone_claim(self):
         store, claim = await self._save_and_claim("conv-finished-migration")
-        self.assertTrue(await store.finish(
-            "conv-finished-migration", claim.claim_token, _response("done")
-        ))
+        self.assertTrue(
+            await store.finish("conv-finished-migration", claim.claim_token, _response("done"))
+        )
 
         reopened = self._store()
         self.assertEqual(
@@ -332,13 +315,15 @@ class TestAutonomousSessionStore(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await store.mark_progress("conv-old", claim.claim_token))
         response = _response("next question", conversation_id="conv-next")
 
-        self.assertTrue(await store.handoff(
-            "conv-old",
-            claim.claim_token,
-            "conv-next",
-            _payload("next"),
-            response,
-        ))
+        self.assertTrue(
+            await store.handoff(
+                "conv-old",
+                claim.claim_token,
+                "conv-next",
+                _payload("next"),
+                response,
+            )
+        )
 
         reopened = self._store(max_count=1)
         old = await reopened.inspect("conv-old")
@@ -353,23 +338,21 @@ class TestAutonomousSessionStore(unittest.IsolatedAsyncioTestCase):
 
     async def test_outcome_tombstones_cannot_be_claimed_by_legacy_sql(self):
         store, finished_claim = await self._save_and_claim("conv-old-finished")
-        self.assertTrue(await store.finish(
-            "conv-old-finished",
-            finished_claim.claim_token,
-            _response("finished"),
-        ))
-
-        progressed_store, progressed_claim = await self._save_and_claim(
-            "conv-old-ambiguous"
+        self.assertTrue(
+            await store.finish(
+                "conv-old-finished",
+                finished_claim.claim_token,
+                _response("finished"),
+            )
         )
-        self.assertTrue(await progressed_store.mark_progress(
-            "conv-old-ambiguous", progressed_claim.claim_token
-        ))
+
+        progressed_store, progressed_claim = await self._save_and_claim("conv-old-ambiguous")
+        self.assertTrue(
+            await progressed_store.mark_progress("conv-old-ambiguous", progressed_claim.claim_token)
+        )
         self.now[0] += 11
         self.assertEqual(
-            (await progressed_store.claim(
-                "conv-old-ambiguous", _fingerprint("reply")
-            )).reason,
+            (await progressed_store.claim("conv-old-ambiguous", _fingerprint("reply"))).reason,
             "ambiguous",
         )
 
@@ -389,12 +372,8 @@ class TestAutonomousSessionStore(unittest.IsolatedAsyncioTestCase):
                 connection.commit()
                 return cursor.rowcount
 
-        self.assertEqual(await asyncio.to_thread(
-            legacy_claim, "conv-old-finished"
-        ), 0)
-        self.assertEqual(await asyncio.to_thread(
-            legacy_claim, "conv-old-ambiguous"
-        ), 0)
+        self.assertEqual(await asyncio.to_thread(legacy_claim, "conv-old-finished"), 0)
+        self.assertEqual(await asyncio.to_thread(legacy_claim, "conv-old-ambiguous"), 0)
 
     async def test_failed_handoff_rolls_back_the_predecessor_outcome(self):
         store = self._store(max_count=2)
@@ -402,13 +381,15 @@ class TestAutonomousSessionStore(unittest.IsolatedAsyncioTestCase):
         await store.save("conv-existing", _payload("existing"))
         claim = await store.claim("conv-old", _fingerprint("reply"))
 
-        self.assertFalse(await store.handoff(
-            "conv-old",
-            "wrong-token",
-            "conv-next",
-            _payload("next"),
-            _response("next", conversation_id="conv-next"),
-        ))
+        self.assertFalse(
+            await store.handoff(
+                "conv-old",
+                "wrong-token",
+                "conv-next",
+                _payload("next"),
+                _response("next", conversation_id="conv-next"),
+            )
+        )
         with self.assertRaises(SessionAlreadyExistsError):
             await store.handoff(
                 "conv-old",
@@ -419,13 +400,9 @@ class TestAutonomousSessionStore(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual((await store.inspect("conv-old")).state, "in_flight")
-        self.assertEqual(
-            (await store.inspect("conv-existing")).payload, _payload("existing")
-        )
+        self.assertEqual((await store.inspect("conv-existing")).payload, _payload("existing"))
         self.assertIsNone(await store.status("conv-next"))
-        self.assertTrue(await store.finish(
-            "conv-old", claim.claim_token, _response("done")
-        ))
+        self.assertTrue(await store.finish("conv-old", claim.claim_token, _response("done")))
 
     async def test_expiry_is_enforced_when_claiming(self):
         store = self._store(ttl_seconds=10)
@@ -442,9 +419,7 @@ class TestAutonomousSessionStore(unittest.IsolatedAsyncioTestCase):
         store = self._store(ttl_seconds=10, max_count=1)
         await store.save("conv-done", _payload("done"))
         claim = await store.claim("conv-done", _fingerprint("reply"))
-        self.assertTrue(await store.finish(
-            "conv-done", claim.claim_token, _response("done")
-        ))
+        self.assertTrue(await store.finish("conv-done", claim.claim_token, _response("done")))
         await store.save("conv-active", _payload("active"))
         self.assertEqual((await store.inspect("conv-active")).state, "paused")
 
@@ -472,9 +447,7 @@ class TestAutonomousSessionStore(unittest.IsolatedAsyncioTestCase):
         await store.save("conv-progress", _payload("progress"))
         clean = await store.claim("conv-clean", _fingerprint("clean"))
         progressed = await store.claim("conv-progress", _fingerprint("progress"))
-        self.assertTrue(await store.mark_progress(
-            "conv-progress", progressed.claim_token
-        ))
+        self.assertTrue(await store.mark_progress("conv-progress", progressed.claim_token))
         self.now[0] += 11
 
         await store.save("conv-new", _payload("new"))
@@ -493,18 +466,14 @@ class TestAutonomousSessionStore(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(TypeError):
             await store.save("conv-invalid", {"bad": object()})
         with self.assertRaises(SessionPayloadTooLargeError):
-            await self._store(max_payload_bytes=32).save(
-                "conv-large", {"text": "x" * 100}
-            )
+            await self._store(max_payload_bytes=32).save("conv-large", {"text": "x" * 100})
         with self.assertRaises(SessionPayloadTooLargeError):
             claim = await store.claim("conv-duplicate", _fingerprint("reply"))
             await self._store(max_payload_bytes=32).finish(
                 "conv-duplicate", claim.claim_token, {"text": "x" * 100}
             )
 
-        self.assertEqual(
-            (await store.inspect("conv-duplicate")).payload, _payload("original")
-        )
+        self.assertEqual((await store.inspect("conv-duplicate")).payload, _payload("original"))
         self.assertIsNone(await store.inspect("conv-large"))
 
     async def test_corrupt_json_can_only_be_claimed_for_fenced_cleanup(self):
@@ -539,18 +508,14 @@ class TestAutonomousSessionStore(unittest.IsolatedAsyncioTestCase):
             return decision
 
         with patch.object(store, "_claim_sync", side_effect=pause_after_commit):
-            task = asyncio.create_task(
-                store.claim("conv-cancelled", _fingerprint("reply"))
-            )
+            task = asyncio.create_task(store.claim("conv-cancelled", _fingerprint("reply")))
             self.assertTrue(await asyncio.to_thread(committed.wait, 5))
             task.cancel()
             release_worker.set()
             with self.assertRaises(asyncio.CancelledError):
                 await task
 
-        retry = await self._store().claim(
-            "conv-cancelled", _fingerprint("reply")
-        )
+        retry = await self._store().claim("conv-cancelled", _fingerprint("reply"))
         self.assertTrue(retry.claimed)
 
     async def test_cancelled_db_wait_is_bounded_and_finishes_in_background(self):
@@ -585,9 +550,7 @@ class TestAutonomousSessionStore(unittest.IsolatedAsyncioTestCase):
         blocker = sqlite3.connect(self.db_path, timeout=10)
         blocker.execute("BEGIN IMMEDIATE")
         try:
-            task = asyncio.create_task(
-                store.claim("conv-lock-clock", _fingerprint("reply"))
-            )
+            task = asyncio.create_task(store.claim("conv-lock-clock", _fingerprint("reply")))
             await asyncio.sleep(0.05)
             self.assertFalse(task.done())
             self.now[0] += 11
@@ -620,9 +583,7 @@ class TestAutonomousSessionStore(unittest.IsolatedAsyncioTestCase):
         )
         finish = await expire_while_blocked(
             "conv-lock-finish",
-            lambda store, token: store.finish(
-                "conv-lock-finish", token, _response("late")
-            ),
+            lambda store, token: store.finish("conv-lock-finish", token, _response("late")),
         )
         handoff = await expire_while_blocked(
             "conv-lock-handoff",
@@ -687,32 +648,38 @@ class TestAutonomousSessionStore(unittest.IsolatedAsyncioTestCase):
         with closing(sqlite3.connect(self.db_path)) as connection:
             columns = {
                 row[1]
-                for row in connection.execute(
-                    "PRAGMA table_info(studyloop_autonomous_sessions)"
-                )
+                for row in connection.execute("PRAGMA table_info(studyloop_autonomous_sessions)")
             }
-        self.assertTrue(
-            {"claim_expires_at", "continue_fingerprint", "outcome_json"}
-            <= columns
-        )
+        self.assertTrue({"claim_expires_at", "continue_fingerprint", "outcome_json"} <= columns)
 
     def test_postgres_connection_has_connect_lock_and_statement_timeouts(self):
         connect = MagicMock(return_value=SimpleNamespace())
-        fake_psycopg = SimpleNamespace(connect=connect)
+        fake_psycopg = ModuleType("psycopg")
+        fake_psycopg.connect = connect
+        fake_conninfo = ModuleType("psycopg.conninfo")
+        fake_conninfo.conninfo_to_dict = MagicMock(return_value={})
         store = AutonomousSessionStore(
             database_url="postgresql://example/studyloop",
             postgres_connect_timeout_seconds=7,
             postgres_lock_timeout_ms=8000,
             postgres_statement_timeout_ms=19000,
+            postgres_tcp_user_timeout_ms=23000,
         )
 
-        with patch.dict(sys.modules, {"psycopg": fake_psycopg}):
+        with (
+            patch.dict(
+                sys.modules,
+                {"psycopg": fake_psycopg, "psycopg.conninfo": fake_conninfo},
+            ),
+            patch.dict(os.environ, {}, clear=True),
+        ):
             connection = store._connect()
 
         self.assertIs(connection, connect.return_value)
         connect.assert_called_once_with(
             "postgresql://example/studyloop",
             connect_timeout=7,
+            tcp_user_timeout=23000,
             options="-c lock_timeout=8000ms -c statement_timeout=19000ms",
         )
 
