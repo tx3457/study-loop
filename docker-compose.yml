@@ -14,6 +14,7 @@ services:
       retries: 5
 
   backend:
+    image: study-loop-backend:local
     build: .
     ports:
       - "127.0.0.1:8001:8001"
@@ -26,13 +27,36 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      backend-volume-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health/live', timeout=2).read()",
+        ]
+      interval: 10s
+      timeout: 3s
+      start_period: 20s
+      retries: 5
+
+  backend-volume-init:
+    image: study-loop-backend:local
+    user: "0:0"
+    command: ["sh", "-c", "chown -R 10001:10001 /app/chroma_db"]
+    volumes:
+      - chromadata:/app/chroma_db
+    restart: "no"
 
   frontend:
     build: ./frontend
     ports:
       - "127.0.0.1:4001:80"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
 
 volumes:
   pgdata:

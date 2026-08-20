@@ -1,2 +1,8 @@
-node_modules
-dist
+node_modules/
+dist/
+output/
+e2e/
+*.log
+.env
+.env.*
+*.local

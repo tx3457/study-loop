@@ -31,7 +31,7 @@ Autonomous 选择文档后，Web 默认要求最终回复携带本轮检索得�
 ## 环境要求
 
 - Python 3.11
-- Node.js 20.19+ 或 22.12+
+- Node.js 22.12+（22.x）
 - Docker Compose v2（可选）
 - Poppler 与 Tesseract（本地解析扫描 PDF 或图片时需要）
 
@@ -42,7 +42,7 @@ Autonomous 选择文档后，Web 默认要求最终回复携带本轮检索得�
 ```bash
 cp .env.example .env
 # 编辑 .env，配置模型服务并设置非空 POSTGRES_PASSWORD
-docker compose up --build -d
+docker compose up --build -d --wait
 ```
 
 启动后访问：
@@ -51,6 +51,9 @@ docker compose up --build -d
 - API 文档：<http://localhost:8001/docs>
 
 默认 Compose 仅将 Web 与 API 绑定到本机回环地址，PostgreSQL 不发布宿主端口。
+启动命令会等待 PostgreSQL 与后端 `/health/live` 就绪；该检查不访问模型服务。
+后端以固定的非 root 用户运行；启动前的一次性初始化容器会修复旧 Chroma 卷的
+目录属主，因此从早期 root 镜像升级时无需删除已有索引卷。
 如需共享访问，应先在反向代理层增加认证与 TLS，不要直接将后端端口暴露到公网。
 
 停止服务：

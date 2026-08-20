@@ -29,7 +29,7 @@ def _compose(
     else:
         env["POSTGRES_PASSWORD"] = password
     return subprocess.run(
-        ["docker", "compose", "--env-file", "/dev/null", *args],
+        ["docker", "compose", "--env-file", os.devnull, *args],
         cwd=REPO_ROOT,
         env=env,
         text=True,
@@ -74,6 +74,7 @@ def _assert_safe_config(config: dict) -> None:
     services = config["services"]
     _assert_ports(services["postgres"], [])
     _assert_ports(services["backend"], [(8001, "8001", "127.0.0.1")])
+    _assert_ports(services["backend-volume-init"], [])
     _assert_ports(services["frontend"], [(80, "4001", "127.0.0.1")])
 
     backend_env = services["backend"].get("environment", {})
@@ -82,6 +83,26 @@ def _assert_safe_config(config: dict) -> None:
         raise ComposeSecurityError("DATABASE_URL contains the raw PostgreSQL password")
     if backend_env.get("PGPASSWORD") != SYNTHETIC_PASSWORD:
         raise ComposeSecurityError("backend PGPASSWORD does not preserve special characters")
+
+    health_test = services["backend"].get("healthcheck", {}).get("test", [])
+    if "/health/live" not in " ".join(str(part) for part in health_test):
+        raise ComposeSecurityError("backend healthcheck must use /health/live")
+
+    backend_dependency = services["frontend"].get("depends_on", {}).get("backend", {})
+    if backend_dependency.get("condition") != "service_healthy":
+        raise ComposeSecurityError("frontend must wait for a healthy backend")
+
+    volume_init = services["backend-volume-init"]
+    if str(volume_init.get("user")) not in {"0", "0:0"}:
+        raise ComposeSecurityError("backend volume init must run as root")
+    init_command = " ".join(str(part) for part in volume_init.get("command", []))
+    if "chown -R 10001:10001 /app/chroma_db" not in init_command:
+        raise ComposeSecurityError("backend volume init must repair Chroma ownership")
+    init_dependency = services["backend"].get("depends_on", {}).get(
+        "backend-volume-init", {}
+    )
+    if init_dependency.get("condition") != "service_completed_successfully":
+        raise ComposeSecurityError("backend must wait for Chroma ownership repair")
 
 
 def main() -> int:
