@@ -37,32 +37,46 @@ example configuration.
   non-idempotent tools do not. Autonomous, quiz-answer, adaptive-submit, and
   tool-chat clients may send an `Idempotency-Key`; completed responses are
   replayed from a persistent receipt, while a crash after a write starts remains
-  a non-retryable conflict. Quiz question indexes and adaptive turn numbers
+  non-retryable unless an exact durable session outcome can be independently
+  validated. Quiz question indexes and adaptive turn numbers
   reject stale submissions. The receipt provides at-most-once replay
   protection, not a transaction spanning the receipt and the affected state
   store.
-- Receipts currently have no automatic expiry. This preserves fail-closed retry
-  behavior, but operators must monitor storage and manually investigate stale
-  `pending` receipts; adding a simple TTL would weaken at-most-once protection.
+- New receipts use a bounded owner lease. A clean `pending_v2` receipt may be
+  taken over after its lease expires, but the operation and payload fingerprint
+  remain immutable and every mutation is fenced by the owner token. Once a
+  non-replayable handler starts, the receipt moves to `effect_started_v2` and is
+  never taken over to rerun that handler. An exact, separately validated
+  Autonomous session outcome may reconcile the receipt without rerunning the
+  handler; otherwise a crash remains an ambiguous, fail-closed conflict. Legacy
+  unleased `pending` rows are also never taken over during a rolling upgrade.
+- Receipt owner leases are execution fencing, not record retention. Completed,
+  ambiguous, and legacy receipt rows currently have no automatic retention TTL;
+  production deployments should monitor table growth and apply an audited
+  retention policy.
 - Autonomous HITL pause snapshots use versioned JSON in PostgreSQL when
   `DATABASE_URL` is set, or SQLite for local development. Resume uses an atomic
-  fencing-token claim, enforces expiry at claim time, and records progress
-  before any returned tool call can mutate messages or dispatch a handler.
-  An abandoned `in_flight` claim is deliberately never unlocked by timeout;
-  automatic takeover could run concurrently with the old worker and duplicate
-  a side effect. Operators must investigate stale claims and restart the user
-  flow.
+  leased fencing-token claim, enforces expiry at claim time, and records
+  progress before a business tool can dispatch. A clean abandoned claim may be
+  taken over after lease expiry; an abandoned claim that crossed the progress
+  barrier becomes an `ambiguous` tombstone and is never resumed. Pause handoff
+  and terminal completion store the exact public response as a durable outcome,
+  allowing a retry to repair an uncompleted outer receipt without rerunning the
+  Agent.
 - Pause snapshots may contain user messages, tool arguments and results, and
   retrieved evidence text. The default TTL is one hour and the default encoded
   payload limit is 2 MiB. Database files, backups, and logs must be protected
   according to the sensitivity of the uploaded learning material. Autonomous
   queries and replies are capped at 8,000 characters; user, document, and
   conversation identifiers also have bounded lengths before execution starts.
-- While an Autonomous HITL question is pending, the browser stores the minimal
-  recovery state in `sessionStorage`, including the bearer `conversation_id`,
-  the question, and the unsent draft reply. It is cleared on completion, reset,
-  or terminal failure, but remains available to scripts running in the same
-  origin and tab.
+- Before an Autonomous start or continue request is sent, the browser stores the
+  exact request body and idempotency key in `sessionStorage`. Ambiguous network,
+  server, rate-limit, and in-progress responses keep that request read-only for
+  exact replay; only a confirmed pre-execution rejection unlocks editing. HITL
+  recovery also stores the bearer `conversation_id`, question, and unsent draft.
+  A confirmed cancel deletes a still-paused server snapshot; canceling an
+  in-flight operation is rejected. This data remains available to scripts
+  running in the same origin and tab.
 - The standalone API currently has no trusted authentication subject. A
   `conversation_id` is therefore a high-entropy bearer capability, not an
   authorization boundary, and deployments must be treated as single-user or
@@ -76,10 +90,12 @@ example configuration.
 - Session transitions and idempotency receipts share the configured database by
   default; `QUIZ_SESSION_DB_PATH`, `ADAPTIVE_SESSION_DB_PATH`, and
   `AUTONOMOUS_SESSION_DB_PATH` may override their local SQLite files.
-  They are still separate transactions. This is fail-closed at-most-once
-  protection, not exactly-once execution: a process crash between transitions
-  can leave a pending receipt or an abandoned claim that requires operator
-  cleanup. `Idempotency-Key` also remains optional.
+  They are still separate transactions, so this is not a general exactly-once
+  protocol. Autonomous pause, handoff, and finish transitions mitigate the
+  cross-store crash window with a canonical session outcome that repairs the
+  receipt on retry. A crash after an external non-idempotent handler starts but
+  before its effect can be proven remains intentionally ambiguous and requires
+  investigation. `Idempotency-Key` also remains optional outside the Web flow.
 - Web Quiz and Adaptive sessions use versioned private aggregates in PostgreSQL
   when `DATABASE_URL` is set, or SQLite for local development. Lease claims,
   fencing tokens, revision checks, TTL checks, and payload bounds prevent stale

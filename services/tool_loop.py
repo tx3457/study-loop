@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Optional
 
 from services.llm import llm_chat
+from services.idempotency import IdempotencyConflictError
 from services.tool_registry import EffectMode, SideEffectAmbiguousError, tool_registry
 from services.tools import allowed_tool_names, dispatch_tool
 
@@ -59,10 +60,12 @@ async def run_tool_round(
     run_id: Optional[str] = None,
     user_id: Optional[str] = None,
     idempotency_key: Optional[str] = None,
+    idempotency_lease=None,
     tool_choice: Optional[str] = None,
     max_retries: int = 2,
     extra_call_messages: Optional[list] = None,
     on_before_tool_calls: Callable[[], Awaitable[None]] | None = None,
+    on_before_tool_dispatch: Callable[[], Awaitable[None]] | None = None,
     business_tool_guard: Callable[[str, dict], Optional[str]] | None = None,
     **llm_kwargs,
 ) -> ToolRoundResult:
@@ -82,7 +85,10 @@ async def run_tool_round(
         extra_call_messages: 仅用于本次 LLM 调用、不持久化进 messages 的临时消息
                        （如 autonomous 每轮注入的 [Current state] 摘要）。
         on_before_tool_calls: provider 返回工具调用后、修改消息或执行工具前的
-                        持久化屏障。用于 interrupt 续跑路径记录不可重放进展。
+                        ownership 续租/围栏；不会把调用标记为已开始副作用。
+        on_before_tool_dispatch: 参数校验成功后、每个实际 handler 调用前的
+                        ownership/progress 屏障；多工具批次和长轮次用它重新验证
+                        fencing token。无效参数不会跨过该边界。
         business_tool_guard: 可选的调用级范围检查。返回 reason 时，本轮工具调用
                         会在 dispatch 前被拒绝并把结构化错误回灌给模型。
         其余 llm_kwargs 透传给 llm_chat（temperature/max_tokens...）。
@@ -123,23 +129,6 @@ async def run_tool_round(
             assistant_message=msg, has_tool_calls=False, content=msg.content or "",
         )
 
-    if on_before_tool_calls is not None:
-        await on_before_tool_calls()
-
-    # 追加 assistant 消息（含 tool_calls），保证 OpenAI 协议完整
-    messages.append({
-        "role": "assistant",
-        "content": msg.content,
-        "tool_calls": [
-            {
-                "id": tc.id,
-                "type": "function",
-                "function": {"name": tc.function.name, "arguments": tc.function.arguments},
-            }
-            for tc in msg.tool_calls
-        ],
-    })
-
     parsed_calls = []
     for tc in msg.tool_calls:
         name = tc.function.name
@@ -157,18 +146,69 @@ async def run_tool_round(
             logger.warning("[tool_loop] non-object tool arguments blocked")
             args = {}
             args_error = True
-        parsed_calls.append((tc, name, args, args_error))
+        parsed_calls.append((tc, name, args, args_error, None))
 
     outcomes: list[ToolCallOutcome] = []
 
     # OpenAI 的同轮 tool_calls 是一个并行决策批次，数组顺序不表示执行依赖。
     # control 与任何其他调用混用时整批拒绝，避免把 [write, ask_user/finalize]
     # 误解为“先写后暂停/结束”，也避免最终回答声称未实际发生的副作用。
-    has_control = any(name in control_tools for _, name, _, _ in parsed_calls)
+    has_control = any(name in control_tools for _, name, _, _, _ in parsed_calls)
+    guarded_calls = []
+    for tc, name, args, args_error, _ in parsed_calls:
+        guard_reason = None
+        can_reach_guard = (
+            not (has_control and len(parsed_calls) > 1)
+            and not args_error
+            and name not in control_tools
+            and name in allowed
+            and business_tool_guard is not None
+        )
+        if can_reach_guard:
+            try:
+                guard_reason = business_tool_guard(name, args)
+            except Exception as exc:
+                logger.warning(
+                    "[tool_loop] business tool guard failed closed: "
+                    "tool=%s error_type=%s",
+                    name,
+                    type(exc).__name__,
+                )
+                guard_reason = "business_tool_guard_error"
+        guarded_calls.append((tc, name, args, args_error, guard_reason))
+    parsed_calls = guarded_calls
+    dispatch_may_start = (
+        not (has_control and len(parsed_calls) > 1)
+        and any(
+            not args_error
+            and name not in control_tools
+            and name in allowed
+            and guard_reason is None
+            for _, name, _, args_error, guard_reason in parsed_calls
+        )
+    )
+    if dispatch_may_start and on_before_tool_calls is not None:
+        await on_before_tool_calls()
+
+    # Only after the durable dispatch barrier has succeeded may the in-memory
+    # protocol advance to the assistant tool-call message.
+    messages.append({
+        "role": "assistant",
+        "content": msg.content,
+        "tool_calls": [
+            {
+                "id": tc.id,
+                "type": "function",
+                "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+            }
+            for tc in msg.tool_calls
+        ],
+    })
+
     if has_control and len(parsed_calls) > 1:
         reason = "mixed_control_batch_rejected"
         logger.warning("[tool_loop] rejected multi-call batch containing control tool")
-        for tc, name, args, _ in parsed_calls:
+        for tc, name, args, _, _ in parsed_calls:
             result = json.dumps({
                 "error": "控制工具必须单独调用，本轮所有工具均未执行",
                 "reason": reason,
@@ -190,7 +230,7 @@ async def run_tool_round(
             outcomes=outcomes,
         )
 
-    for tc, name, args, args_error in parsed_calls:
+    for tc, name, args, args_error, precomputed_guard_reason in parsed_calls:
         if args_error:
             reason = "invalid_tool_arguments"
             result = json.dumps({
@@ -233,16 +273,7 @@ async def run_tool_round(
         # 调用级范围约束必须发生在 dispatch 前，避免模型先看到越界工具输出，
         # 再由上层在响应阶段被动丢弃。
         if business_tool_guard is not None:
-            try:
-                guard_reason = business_tool_guard(name, args)
-            except Exception as exc:
-                logger.warning(
-                    "[tool_loop] business tool guard failed closed: "
-                    "tool=%s error_type=%s",
-                    name,
-                    type(exc).__name__,
-                )
-                guard_reason = "business_tool_guard_error"
+            guard_reason = precomputed_guard_reason
             if guard_reason:
                 result = json.dumps({
                     "error": "工具调用超出当前请求允许范围，本轮未执行",
@@ -292,7 +323,8 @@ async def run_tool_round(
                 ))
                 continue
 
-        # 业务工具：dispatch（自带超时/重试/audit）并回灌
+        # 业务工具：dispatch（自带参数校验/超时/重试/audit）并回灌。真正的
+        # progress 屏障由 registry 在参数与 handler 签名校验通过后调用。
         logger.info(
             "[tool_loop] dispatch tool=%s arg_count=%d",
             name,
@@ -305,8 +337,14 @@ async def run_tool_round(
                 run_id=run_id,
                 user_id=user_id,
                 idempotency_key=idempotency_key,
+                idempotency_lease=idempotency_lease,
+                on_before_handler=on_before_tool_dispatch,
             )
             blocked_reason = None
+        except IdempotencyConflictError:
+            # Ownership loss is a request-level fencing event, not a tool
+            # result that may be fed back to the model and ignored.
+            raise
         except SideEffectAmbiguousError:
             logger.warning(
                 "[tool_loop] side effect result ambiguous: tool=%s", name

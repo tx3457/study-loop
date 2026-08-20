@@ -11,7 +11,13 @@ from services.tools import get_tool_definitions
 from services.tool_loop import run_tool_round
 from services.tool_registry import SideEffectAmbiguousError, tool_registry
 from services.injection import check_injection, check_output_leak
-from services.idempotency import normalize_idempotency_key, request_idempotency
+from services.idempotency import (
+    IdempotencyConflictError,
+    ReceiptLease,
+    abort_idempotency_claim,
+    normalize_idempotency_key,
+    request_idempotency,
+)
 
 conversations: dict[str, list] = {}
 router = APIRouter()
@@ -76,7 +82,7 @@ async def _execute_chat_with_tools(
     req: ToolChatRequest,
     *,
     run_id: str,
-    idempotency_key: str | None,
+    idempotency_lease: ReceiptLease | None,
 ) -> ToolChatResponse:
     """Function Calling 聊天端点。
 
@@ -105,6 +111,10 @@ async def _execute_chat_with_tools(
 
     tools_called: list[str] = []
     for _ in range(MAX_TOOL_ROUNDS):
+        if idempotency_lease is not None:
+            renewed = await request_idempotency.renew(idempotency_lease)
+            if renewed is None:
+                raise IdempotencyConflictError("in_progress")
         # run_tool_round 负责单轮 LLM→tool_calls→dispatch→回灌。
         # 传 client=_client 保留测试注入；白名单从 registry 派生。
         round_result = await run_tool_round(
@@ -113,7 +123,10 @@ async def _execute_chat_with_tools(
             client=_client,
             run_id=run_id,
             user_id=req.user_id,
-            idempotency_key=idempotency_key,
+            idempotency_key=(
+                idempotency_lease.key if idempotency_lease is not None else None
+            ),
+            idempotency_lease=idempotency_lease,
         )
 
         # 无 tool_calls → LLM 直接回复，执行第 4 层输出检查后返回
@@ -148,25 +161,33 @@ async def chat_with_tools(
 ) -> ToolChatResponse:
     """Run tool chat with an optional durable replay receipt."""
     key = normalize_idempotency_key(idempotency_key)
+    receipt_lease = None
     if key:
         decision = await request_idempotency.begin(
             key, "chat.tools", req.model_dump(mode="json")
         )
         if decision.replayed:
             return ToolChatResponse.model_validate(decision.response)
+        receipt_lease = decision.lease
+        if receipt_lease is None:
+            raise RuntimeError("idempotency claim returned without ownership data")
 
     run_id = f"chat_tools_{uuid.uuid4().hex[:12]}"
     try:
         response = await _execute_chat_with_tools(
-            req, run_id=run_id, idempotency_key=key
+            req, run_id=run_id, idempotency_lease=receipt_lease
         )
-        if key:
+        if receipt_lease is not None:
             await request_idempotency.complete(
-                key, response.model_dump(mode="json")
+                receipt_lease, response.model_dump(mode="json")
             )
         return response
     except BaseException as exc:
-        durable_effect = await request_idempotency.abort(key) if key else False
+        durable_effect = (
+            await abort_idempotency_claim(request_idempotency, receipt_lease)
+            if receipt_lease is not None
+            else False
+        )
         effect_attempted = durable_effect or tool_registry.has_effect_attempt(run_id)
         if (
             isinstance(exc, Exception)

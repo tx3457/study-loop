@@ -27,7 +27,11 @@ from datetime import datetime
 from enum import Enum
 from typing import Awaitable, Callable, Optional
 
-from services.idempotency import IdempotencyConflictError, request_idempotency
+from services.idempotency import (
+    IdempotencyConflictError,
+    ReceiptLease,
+    request_idempotency,
+)
 from services.retry import RetryExhausted, with_retry
 
 logger = logging.getLogger(__name__)
@@ -168,6 +172,8 @@ class ToolRegistry:
         run_id: Optional[str] = None,
         user_id: Optional[str] = None,
         idempotency_key: Optional[str] = None,
+        idempotency_lease: ReceiptLease | None = None,
+        on_before_handler: Callable[[], Awaitable[None]] | None = None,
     ) -> str:
         """调用工具：带 per-tool timeout、retry、audit。
 
@@ -233,10 +239,22 @@ class ToolRegistry:
                 ensure_ascii=False,
             )
 
+        # The durable progress boundary belongs immediately before a validated
+        # handler invocation.  Putting it in the outer tool loop would mark
+        # schema/signature-invalid calls as having started a side effect even
+        # though no handler can run.
+        if on_before_handler is not None:
+            await on_before_handler()
+
         if idempotency_key and effect_mode in _NON_REPLAYABLE_EFFECTS:
             try:
+                if (
+                    idempotency_lease is None
+                    or idempotency_lease.key != idempotency_key
+                ):
+                    raise IdempotencyConflictError("receipt_owner_missing")
                 await request_idempotency.mark_effect_started(
-                    idempotency_key, name
+                    idempotency_lease, name
                 )
             except IdempotencyConflictError as exc:
                 self._record(ToolCallRecord(

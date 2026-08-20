@@ -120,7 +120,11 @@ Learning Path 生成结果也会保存为不可变资源，刷新时由资源 ID
 `DATABASE_URL` 时，重试 receipt、Learning Path、Web Quiz、Adaptive 与人工确认暂停快照保存在
 PostgreSQL；本地无数据库时默认使用 `IDEMPOTENCY_DB_PATH` 指定的 SQLite 文件，也可用
 功能专属路径覆盖。Autonomous 与 Adaptive 默认保留 1 小时，Web Quiz 默认保留 24 小时。
-相关容量和 TTL 配置见
+Autonomous 在请求发出前保存完整待对账请求与 key：刷新、断网或响应丢失后会原样重放，
+不会在结果不确定时解锁编辑并生成新 key；人工确认暂停可从页面执行服务端取消，正在执行
+或已发生副作用的操作不会被假装取消。清洁的崩溃租约可安全接管；跨过业务工具执行边界后，
+只有能由同一请求绑定的持久会话终态证明结果时才会自动对账，否则保持 fail-closed，需要
+重新开始或人工调查。相关容量和 TTL 配置见
 [`.env.example`](.env.example)。多 worker 首次初始化 PostgreSQL learner memory
 时，其他 worker 最多等待 `MEMORY_STORE_SETUP_LOCK_TIMEOUT_SECONDS`（默认 300
 秒）；初始化连接需直连 PostgreSQL 或使用 session pooling。未配置

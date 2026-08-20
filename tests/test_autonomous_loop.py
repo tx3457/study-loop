@@ -33,6 +33,7 @@ import services.tools as tool_module
 from routers.autonomous import AutonomousRequest, ContinueRequest
 from services.autonomous_sessions import AutonomousSessionStore
 from services.citations import EvidenceChunk
+from services.idempotency import IdempotencyConflictError
 from services.retry import RetryExhausted
 from services.tool_registry import tool_registry
 
@@ -1120,7 +1121,9 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
              patch.object(au, "check_injection", AsyncMock(return_value=(False, ""))):
             out = await au.continue_autonomous(ContinueRequest(conversation_id=cid, user_reply="doc123"))
         self.assertEqual(out.final_answer, "好的，用 doc123")
-        self.assertIsNone(await self._inspection(cid))  # session 用完销毁
+        inspection = await self._inspection(cid)
+        self.assertEqual(inspection.state, "completed")
+        self.assertEqual(inspection.outcome, out.model_dump(mode="json"))
 
     async def test_continue_can_pause_again_without_leaving_old_session(self):
         self.session_store = AutonomousSessionStore(
@@ -1161,7 +1164,12 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(second.awaiting_user_input)
         self.assertNotEqual(second.conversation_id, first.conversation_id)
-        self.assertIsNone(await self._inspection(first.conversation_id))
+        old_inspection = await self._inspection(first.conversation_id)
+        self.assertEqual(old_inspection.state, "completed")
+        self.assertEqual(
+            old_inspection.outcome,
+            second.model_dump(mode="json"),
+        )
         persisted = await self._session(second.conversation_id)
         self.assertEqual(
             [step.tool_name for step in persisted.steps],
@@ -1210,7 +1218,7 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
                 user_reply="继续",
             )))
             await entered.wait()
-            with self.assertRaises(HTTPException) as raised:
+            with self.assertRaises(IdempotencyConflictError) as raised:
                 await au.continue_autonomous(ContinueRequest(
                     conversation_id=first.conversation_id,
                     user_reply="并发继续",
@@ -1218,10 +1226,15 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
             finish.set()
             response = await owner
 
-        self.assertEqual(raised.exception.status_code, 409)
+        self.assertEqual(raised.exception.reason, "payload_mismatch")
         self.assertEqual(response.final_answer, "done")
         self.assertEqual(loop_calls, 1)
-        self.assertIsNone(await self._inspection(first.conversation_id))
+        inspection = await self._inspection(first.conversation_id)
+        self.assertEqual(inspection.state, "completed")
+        self.assertEqual(
+            inspection.outcome,
+            response.model_dump(mode="json"),
+        )
 
     async def test_continue_preserves_citation_evidence_registry(self):
         first_responses = [

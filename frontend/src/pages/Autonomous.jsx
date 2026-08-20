@@ -11,15 +11,28 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
+  cancelAutonomous,
   createIdempotencyKey,
   runAutonomous,
   continueAutonomous,
   getDocuments,
   isTerminalExecutionError,
 } from '../api/client'
+import {
+  autonomousRecoveryToken,
+  clearAutonomousRecovery,
+  createAutonomousAwaiting,
+  createPendingAutonomousContinue,
+  createPendingAutonomousStart,
+  readAutonomousRecovery,
+  releasePendingAutonomousContinue,
+  replaceAutonomousRecovery,
+  writeAutonomousRecovery,
+} from '../state/autonomousRecovery'
 import './Autonomous.css'
 
 const DEFAULT_USER_ID = 'default_user'
+const AUTONOMOUS_REQUEST_DEADLINE_MS = 120_000
 
 const initialState = {
   phase: 'idle',     // idle | running | awaiting | continuing | done | error
@@ -34,78 +47,52 @@ const initialState = {
   retryBlocked: false,
 }
 
-const AWAITING_STORAGE_KEY = 'study-loop.autonomous.awaiting.v1'
-const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+class RecoverySupersededError extends Error {}
 
-function clearAwaitingRecovery() {
-  try {
-    globalThis.sessionStorage?.removeItem(AWAITING_STORAGE_KEY)
-  } catch {
-    // Storage can be unavailable in hardened browser contexts.
+class InvalidAutonomousResponseError extends Error {
+  constructor(message) {
+    super(message)
+    this.terminal = true
   }
 }
 
-function readAwaitingRecovery() {
-  try {
-    const raw = globalThis.sessionStorage?.getItem(AWAITING_STORAGE_KEY)
-    if (!raw) return null
+function toFormRequest(request) {
+  return {
+    query: request?.query || '',
+    user_id: DEFAULT_USER_ID,
+    document_id: request?.document_id || '',
+    grounding_required: request?.grounding_required === true,
+  }
+}
 
-    const value = JSON.parse(raw)
-    const request = value?.request
-    const valid = value?.version === 1
-      && typeof value.conversation_id === 'string'
-      && /^[A-Za-z0-9_-]{1,256}$/.test(value.conversation_id)
-      && typeof value.user_question === 'string'
-      && value.user_question.trim().length > 0
-      && value.user_question.length <= 8000
-      && typeof value.draft === 'string'
-      && value.draft.length <= 8000
-      && request && typeof request === 'object'
-      && typeof request.query === 'string'
-      && request.query.trim().length > 0
-      && request.query.length <= 8000
-      && request.user_id === DEFAULT_USER_ID
-      && typeof request.document_id === 'string'
-      && request.document_id.length <= 1024
-      && (
-        request.grounding_required == null
-        || typeof request.grounding_required === 'boolean'
-      )
-      && (
-        value.continue_idempotency_key == null
-        || (
-          typeof value.continue_idempotency_key === 'string'
-          && UUID_V4_PATTERN.test(value.continue_idempotency_key)
-        )
-      )
-
-    if (!valid) throw new Error('invalid autonomous recovery payload')
-    return {
-      version: 1,
-      conversation_id: value.conversation_id,
-      user_question: value.user_question,
-      draft: value.draft,
-      request: {
-        query: request.query,
-        user_id: DEFAULT_USER_ID,
-        document_id: request.document_id,
-        // Older v1 recovery records did not include this additive field.
-        grounding_required: request.grounding_required === true,
-      },
-      continue_idempotency_key: value.continue_idempotency_key || null,
-    }
-  } catch {
-    clearAwaitingRecovery()
+function responseFromRecovery(recovery) {
+  if (!recovery || !['awaiting', 'pending_continue'].includes(recovery.kind)) {
     return null
   }
+  return {
+    awaiting_user_input: true,
+    conversation_id: recovery.conversation_id,
+    user_question: recovery.user_question,
+    rounds_used: 0,
+    steps: [],
+    tools_called: ['ask_user'],
+    truncated: false,
+    grounding_status: recovery.request.grounding_required
+      ? 'pending'
+      : 'not_requested',
+    grounding_required: recovery.request.grounding_required,
+    grounding_document_id: recovery.request.document_id,
+  }
 }
 
-function writeAwaitingRecovery(value) {
-  try {
-    globalThis.sessionStorage?.setItem(AWAITING_STORAGE_KEY, JSON.stringify(value))
-  } catch {
-    // The dialog remains usable even when storage is unavailable or full.
-  }
+function isPendingRecovery(recovery) {
+  return ['pending_start', 'pending_continue'].includes(recovery?.kind)
+}
+
+function isTerminalRecoveryError(error) {
+  return error?.terminal === true
+    || error?.status === 404
+    || isTerminalExecutionError(error)
 }
 
 function FormattedAnswer({ text }) {
@@ -121,45 +108,85 @@ function FormattedAnswer({ text }) {
 }
 
 export default function Autonomous() {
-  const [restoredAwaiting] = useState(() => readAwaitingRecovery())
-  const [state, setState] = useState(() => restoredAwaiting ? {
+  const [restoredRecovery] = useState(() => readAutonomousRecovery())
+  const [recovery, setRecovery] = useState(restoredRecovery)
+  const recoveryRef = useRef(restoredRecovery)
+  const [recoveryAttempt, setRecoveryAttempt] = useState(0)
+  const recoveryInFlight = useRef(false)
+  const recoveryEpoch = useRef(0)
+  const mountedRef = useRef(true)
+  const activeRequestControllers = useRef(new Set())
+  const [state, setState] = useState(() => restoredRecovery ? {
     ...initialState,
-    phase: 'awaiting',
-    request: restoredAwaiting.request,
-    response: {
-      awaiting_user_input: true,
-      conversation_id: restoredAwaiting.conversation_id,
-      user_question: restoredAwaiting.user_question,
-      rounds_used: 0,
-      steps: [],
-      tools_called: ['ask_user'],
-      truncated: false,
-      grounding_status: restoredAwaiting.request.grounding_required
-        ? 'pending'
-        : 'not_requested',
-      grounding_required: restoredAwaiting.request.grounding_required,
-      grounding_document_id: restoredAwaiting.request.document_id || null,
-    },
+    phase: restoredRecovery.kind === 'pending_start'
+      ? 'running'
+      : restoredRecovery.kind === 'pending_continue' ? 'continuing' : 'awaiting',
+    request: toFormRequest(restoredRecovery.request),
+    response: responseFromRecovery(restoredRecovery),
   } : initialState)
-  const [askReply, setAskReply] = useState(restoredAwaiting?.draft || '')
+  const [askReply, setAskReply] = useState(
+    restoredRecovery?.kind === 'pending_continue'
+      ? restoredRecovery.body.user_reply
+      : restoredRecovery?.draft || '',
+  )
   const [documents, setDocuments] = useState([])
   const [documentsLoading, setDocumentsLoading] = useState(false)
   const [documentsError, setDocumentsError] = useState(null)
   const documentsRequestId = useRef(0)
-  const lastConversationId = useRef(restoredAwaiting?.conversation_id || null)
-  const startIdempotencyKey = useRef(null)
-  const continueIdempotencyKey = useRef(
-    restoredAwaiting?.continue_idempotency_key || null
-  )
   const modalRef = useRef(null)
   const modalInputRef = useRef(null)
   const startButtonRef = useRef(null)
   const resetButtonRef = useRef(null)
   const previousFocusRef = useRef(null)
-  const dialogOpen = (
-    state.phase === 'awaiting' || state.phase === 'continuing'
-  ) && Boolean(state.response?.user_question)
-  const formLocked = ['running', 'awaiting', 'continuing'].includes(state.phase)
+  const pendingStart = recovery?.kind === 'pending_start'
+  const pendingContinue = recovery?.kind === 'pending_continue'
+  const dialogOpen = ['awaiting', 'pending_continue'].includes(recovery?.kind)
+    && Boolean(state.response?.user_question)
+  const operationBusy = ['running', 'continuing', 'canceling'].includes(state.phase)
+  const formLocked = operationBusy || Boolean(recovery)
+
+  const adoptRecovery = useCallback((next) => {
+    if (!mountedRef.current) return null
+    recoveryRef.current = next
+    setRecovery(next)
+    return next
+  }, [])
+
+  const assertCurrentRecovery = useCallback((epoch, expectedToken) => {
+    if (
+      !mountedRef.current
+      || epoch !== recoveryEpoch.current
+      || autonomousRecoveryToken(recoveryRef.current) !== expectedToken
+      || autonomousRecoveryToken(readAutonomousRecovery()) !== expectedToken
+    ) {
+      throw new RecoverySupersededError()
+    }
+  }, [])
+
+  const runWithDeadline = useCallback(async (requestFactory) => {
+    const controller = new AbortController()
+    activeRequestControllers.current.add(controller)
+    let timedOut = false
+    const timer = window.setTimeout(() => {
+      timedOut = true
+      controller.abort()
+    }, AUTONOMOUS_REQUEST_DEADLINE_MS)
+    try {
+      return await requestFactory(controller.signal)
+    } catch (err) {
+      if (timedOut) {
+        const timeoutError = new Error(
+          '等待服务端响应超时；请求可能仍在执行，请使用同一请求继续对账',
+        )
+        timeoutError.code = 'request_timeout'
+        throw timeoutError
+      }
+      throw err
+    } finally {
+      window.clearTimeout(timer)
+      activeRequestControllers.current.delete(controller)
+    }
+  }, [])
 
   const loadDocs = useCallback(async () => {
     const requestId = ++documentsRequestId.current
@@ -167,54 +194,35 @@ export default function Autonomous() {
     setDocumentsError(null)
     try {
       const data = await getDocuments()
-      if (requestId !== documentsRequestId.current) return
+      if (!mountedRef.current || requestId !== documentsRequestId.current) return
       setDocuments(data.documents || [])
     } catch (err) {
-      if (requestId !== documentsRequestId.current) return
+      if (!mountedRef.current || requestId !== documentsRequestId.current) return
       setDocumentsError(err.message)
     } finally {
-      if (requestId === documentsRequestId.current) setDocumentsLoading(false)
+      if (mountedRef.current && requestId === documentsRequestId.current) {
+        setDocumentsLoading(false)
+      }
     }
   }, [])
 
   useEffect(() => {
-    loadDocs()
+    const requestControllers = activeRequestControllers.current
+    mountedRef.current = true
+    void loadDocs()
     return () => {
+      mountedRef.current = false
       documentsRequestId.current += 1
+      queueMicrotask(() => {
+        if (!mountedRef.current) {
+          requestControllers.forEach(controller => controller.abort())
+          requestControllers.clear()
+          recoveryEpoch.current += 1
+          recoveryInFlight.current = false
+        }
+      })
     }
   }, [loadDocs])
-
-  function persistCurrentAwaiting(
-    draft = askReply,
-    idempotencyKey = continueIdempotencyKey.current
-  ) {
-    const conversationId = lastConversationId.current
-    const userQuestion = state.response?.user_question
-    if (!conversationId || !userQuestion) return
-    writeAwaitingRecovery({
-      version: 1,
-      conversation_id: conversationId,
-      user_question: userQuestion,
-      draft,
-      request: state.request,
-      continue_idempotency_key: idempotencyKey,
-    })
-  }
-
-  useEffect(() => {
-    if (!dialogOpen) return
-    const conversationId = lastConversationId.current
-    const userQuestion = state.response?.user_question
-    if (!conversationId || !userQuestion) return
-    writeAwaitingRecovery({
-      version: 1,
-      conversation_id: conversationId,
-      user_question: userQuestion,
-      draft: askReply,
-      request: state.request,
-      continue_idempotency_key: continueIdempotencyKey.current,
-    })
-  }, [askReply, dialogOpen, state.phase, state.request, state.response?.user_question])
 
   useEffect(() => {
     if (!dialogOpen) return undefined
@@ -277,128 +285,335 @@ export default function Autonomous() {
     return () => window.cancelAnimationFrame(focusFrame)
   }, [state.phase, state.retryBlocked])
 
-  /** 处理 agent 响应：分发到对应状态 */
-  function _handleResponse(resp) {
-    continueIdempotencyKey.current = null
+  const acceptPendingResponse = useCallback((resp, record, epoch, expectedToken) => {
+    assertCurrentRecovery(epoch, expectedToken)
+    if (!resp || typeof resp !== 'object') {
+      throw new InvalidAutonomousResponseError(
+        '服务端返回的 Autonomous 响应无效，请重新开始',
+      )
+    }
+
     if (resp.awaiting_user_input) {
-      lastConversationId.current = resp.conversation_id
-      writeAwaitingRecovery({
-        version: 1,
-        conversation_id: resp.conversation_id,
-        user_question: resp.user_question,
-        draft: '',
-        request: state.request,
-        continue_idempotency_key: null,
-      })
-      setState(s => ({
-        ...s,
-        phase: 'awaiting',
-        response: resp,
-        error: null,
-        retryBlocked: false,
-      }))
-      setAskReply('')
-    } else {
-      clearAwaitingRecovery()
-      lastConversationId.current = null
-      setState(s => ({
-        ...s,
-        phase: 'done',
-        response: resp,
-        error: null,
-        retryBlocked: false,
-      }))
-    }
-  }
-
-  /** 首次提交 */
-  async function handleStart(e) {
-    e.preventDefault()
-    if (!state.request.query.trim()) return
-    try {
-      const idempotencyKey = startIdempotencyKey.current || createIdempotencyKey()
-      startIdempotencyKey.current = idempotencyKey
-      clearAwaitingRecovery()
-      setState(s => ({
-        ...s,
-        phase: 'running',
-        response: null,
-        error: null,
-        retryBlocked: false,
-      }))
-      const resp = await runAutonomous({
-        query: state.request.query,
-        user_id: DEFAULT_USER_ID,
-        document_id: state.request.document_id || null,
-        grounding_required: state.request.grounding_required,
-        idempotency_key: idempotencyKey,
-      })
-      startIdempotencyKey.current = null
-      _handleResponse(resp)
-    } catch (err) {
-      const retryBlocked = isTerminalExecutionError(err)
-      if (retryBlocked) {
-        startIdempotencyKey.current = null
-        clearAwaitingRecovery()
+      const next = createAutonomousAwaiting(record.request, resp)
+      if (!next) {
+        throw new InvalidAutonomousResponseError(
+          '服务端返回的暂停会话无效，请重新开始',
+        )
       }
-      setState(s => ({
-        ...s,
-        phase: 'error',
-        error: err.message,
-        retryBlocked,
+      const stored = replaceAutonomousRecovery(expectedToken, next)
+      if (!stored) throw new RecoverySupersededError()
+      adoptRecovery(stored)
+      setAskReply('')
+      setState(current => ({
+        ...current,
+        phase: 'awaiting',
+        request: toFormRequest(stored.request),
+        response: resp,
+        error: null,
+        retryBlocked: false,
       }))
+      return
     }
-  }
 
-  /** 提交 ask_user 回答续跑 */
-  async function handleContinue() {
-    if (
-      state.phase === 'continuing'
-      || !askReply.trim()
-      || !lastConversationId.current
-    ) return
-    const conversationId = lastConversationId.current
-    const userReply = askReply.trim()
+    if (!clearAutonomousRecovery(expectedToken)) {
+      throw new RecoverySupersededError()
+    }
+    adoptRecovery(null)
+    setAskReply('')
+    setState(current => ({
+      ...current,
+      phase: 'done',
+      request: toFormRequest(record.request),
+      response: resp,
+      error: null,
+      retryBlocked: false,
+    }))
+  }, [adoptRecovery, assertCurrentRecovery])
+
+  const handlePendingError = useCallback((err, record, epoch, expectedToken) => {
+    if (err instanceof RecoverySupersededError) return
     try {
-      const idempotencyKey = continueIdempotencyKey.current || createIdempotencyKey()
-      continueIdempotencyKey.current = idempotencyKey
-      persistCurrentAwaiting(userReply, idempotencyKey)
-      setState(s => ({ ...s, phase: 'continuing', error: null }))
-      const resp = await continueAutonomous({
-        conversation_id: conversationId,
-        user_reply: userReply,
-        idempotency_key: idempotencyKey,
-      })
-      _handleResponse(resp)
-    } catch (err) {
-      if (err.status === 404 || isTerminalExecutionError(err)) {
-        clearAwaitingRecovery()
-        continueIdempotencyKey.current = null
-        lastConversationId.current = null
-        setState(s => ({
-          ...s,
-          phase: 'error',
-          error: `回答提交失败：${err.message}`,
-          retryBlocked: true,
-        }))
-      } else {
-        setState(s => ({
-          ...s,
+      assertCurrentRecovery(epoch, expectedToken)
+    } catch (superseded) {
+      if (superseded instanceof RecoverySupersededError) return
+      throw superseded
+    }
+
+    if ([413, 422].includes(err?.status)) {
+      if (record.kind === 'pending_continue') {
+        const awaiting = releasePendingAutonomousContinue(record)
+        const stored = awaiting
+          ? replaceAutonomousRecovery(expectedToken, awaiting)
+          : null
+        if (!stored) return
+        adoptRecovery(stored)
+        setAskReply(stored.draft)
+        setState(current => ({
+          ...current,
           phase: 'awaiting',
+          response: current.response || responseFromRecovery(stored),
           error: err.message,
           retryBlocked: false,
         }))
+        return
       }
+
+      if (!clearAutonomousRecovery(expectedToken)) return
+      adoptRecovery(null)
+      setState(current => ({
+        ...current,
+        phase: 'error',
+        error: err.message,
+        retryBlocked: false,
+      }))
+      return
+    }
+
+    if (isTerminalRecoveryError(err)) {
+      if (!clearAutonomousRecovery(expectedToken)) return
+      adoptRecovery(null)
+      setState(current => ({
+        ...current,
+        phase: 'error',
+        error: record.kind === 'pending_continue'
+          ? `回答提交失败：${err.message}`
+          : err.message,
+        retryBlocked: true,
+      }))
+      return
+    }
+
+    // An in-progress conflict, a transport failure, or a provider/proxy 5xx
+    // cannot prove that the server stopped. Keep the exact body/key bound and
+    // expose only an exact replay action.
+    setState(current => ({
+      ...current,
+      phase: record.kind === 'pending_continue' ? 'awaiting' : 'error',
+      response: current.response || responseFromRecovery(record),
+      error: err.message,
+      retryBlocked: false,
+    }))
+  }, [adoptRecovery, assertCurrentRecovery])
+
+  useEffect(() => {
+    void recoveryAttempt
+    const record = recoveryRef.current
+    if (!isPendingRecovery(record) || recoveryInFlight.current) return
+
+    const expectedToken = autonomousRecoveryToken(record)
+    const epoch = ++recoveryEpoch.current
+    recoveryInFlight.current = true
+    setState(current => ({
+      ...current,
+      phase: record.kind === 'pending_start' ? 'running' : 'continuing',
+      request: toFormRequest(record.request),
+      response: record.kind === 'pending_continue'
+        ? current.response || responseFromRecovery(record)
+        : null,
+      error: null,
+      retryBlocked: false,
+    }))
+
+    const pendingRequest = runWithDeadline(signal => (
+      record.kind === 'pending_start'
+        ? runAutonomous({
+            ...record.request,
+            idempotency_key: record.idempotency_key,
+            signal,
+          })
+        : continueAutonomous({
+            ...record.body,
+            idempotency_key: record.idempotency_key,
+            signal,
+          })
+    ))
+
+    void pendingRequest
+      .then(resp => acceptPendingResponse(resp, record, epoch, expectedToken))
+      .catch(err => handlePendingError(err, record, epoch, expectedToken))
+      .finally(() => {
+        if (epoch === recoveryEpoch.current) recoveryInFlight.current = false
+      })
+  }, [acceptPendingResponse, handlePendingError, recoveryAttempt, runWithDeadline])
+
+  function retryRecovery() {
+    const current = recoveryRef.current
+    if (!isPendingRecovery(current) || recoveryInFlight.current) return
+    setState(previous => ({
+      ...previous,
+      phase: current.kind === 'pending_start' ? 'running' : 'continuing',
+      error: null,
+    }))
+    setRecoveryAttempt(attempt => attempt + 1)
+  }
+
+  /** 首次提交：先同步保存 exact body/key，再由恢复 effect 发请求。 */
+  function handleStart(event) {
+    event.preventDefault()
+    if (pendingStart) {
+      retryRecovery()
+      return
+    }
+    if (recoveryRef.current || !state.request.query.trim()) return
+
+    const request = {
+      query: state.request.query.trim(),
+      user_id: DEFAULT_USER_ID,
+      document_id: state.request.document_id.trim() || null,
+      grounding_required: state.request.grounding_required,
+    }
+    let pending
+    try {
+      pending = createPendingAutonomousStart(request, createIdempotencyKey())
+    } catch (err) {
+      setState(current => ({ ...current, phase: 'error', error: err.message }))
+      return
+    }
+    const stored = pending && writeAutonomousRecovery(pending)
+    if (!stored) {
+      setState(current => ({
+        ...current,
+        phase: 'error',
+        error: '浏览器无法保存执行恢复信息，请检查存储权限后重试',
+        retryBlocked: false,
+      }))
+      return
+    }
+
+    adoptRecovery(stored)
+    setState(current => ({
+      ...current,
+      phase: 'running',
+      request: toFormRequest(stored.request),
+      response: null,
+      error: null,
+      retryBlocked: false,
+    }))
+    setRecoveryAttempt(attempt => attempt + 1)
+  }
+
+  /** 提交 ask_user 回答：同样先把不可变 body/key 落盘。 */
+  function handleContinue() {
+    if (pendingContinue) {
+      retryRecovery()
+      return
+    }
+    const awaiting = recoveryRef.current
+    if (
+      awaiting?.kind !== 'awaiting'
+      || recoveryInFlight.current
+      || !askReply.trim()
+    ) return
+
+    let pending
+    try {
+      pending = createPendingAutonomousContinue(
+        awaiting,
+        askReply.trim(),
+        createIdempotencyKey(),
+      )
+    } catch (err) {
+      setState(current => ({ ...current, error: err.message }))
+      return
+    }
+    const expectedToken = autonomousRecoveryToken(awaiting)
+    const stored = pending
+      ? replaceAutonomousRecovery(expectedToken, pending)
+      : null
+    if (!stored) {
+      setState(current => ({
+        ...current,
+        error: '浏览器无法保存待提交回答，请检查存储权限后重试',
+      }))
+      return
+    }
+
+    adoptRecovery(stored)
+    setAskReply(stored.body.user_reply)
+    setState(current => ({ ...current, phase: 'continuing', error: null }))
+    setRecoveryAttempt(attempt => attempt + 1)
+  }
+
+  function handleReplyChange(reply) {
+    const awaiting = recoveryRef.current
+    if (awaiting?.kind !== 'awaiting') return
+    setAskReply(reply)
+    const next = createAutonomousAwaiting(awaiting.request, awaiting, reply)
+    const stored = next && replaceAutonomousRecovery(
+      autonomousRecoveryToken(awaiting),
+      next,
+    )
+    if (stored) {
+      adoptRecovery(stored)
+    } else {
+      setState(current => ({
+        ...current,
+        error: '浏览器无法保存回答草稿，请检查存储权限后重试',
+      }))
+    }
+  }
+
+  async function handleCancel() {
+    const awaiting = recoveryRef.current
+    if (awaiting?.kind !== 'awaiting' || recoveryInFlight.current) return
+    const expectedToken = autonomousRecoveryToken(awaiting)
+    const epoch = ++recoveryEpoch.current
+    recoveryInFlight.current = true
+    setState(current => ({ ...current, phase: 'canceling', error: null }))
+
+    const finishConfirmedCancel = () => {
+      assertCurrentRecovery(epoch, expectedToken)
+      if (!clearAutonomousRecovery(expectedToken)) {
+        throw new RecoverySupersededError()
+      }
+      adoptRecovery(null)
+      setAskReply('')
+      setState(initialState)
+    }
+
+    try {
+      const result = await runWithDeadline(signal => cancelAutonomous(
+        awaiting.conversation_id,
+        { signal },
+      ))
+      assertCurrentRecovery(epoch, expectedToken)
+      if (!['canceled', 'missing'].includes(result?.status)) {
+        throw new Error('服务端未确认取消结果，请重试')
+      }
+      finishConfirmedCancel()
+    } catch (err) {
+      if (err instanceof RecoverySupersededError) return
+      if (err?.status === 404) {
+        try {
+          finishConfirmedCancel()
+        } catch (superseded) {
+          if (!(superseded instanceof RecoverySupersededError)) throw superseded
+        }
+        return
+      }
+      try {
+        assertCurrentRecovery(epoch, expectedToken)
+      } catch (superseded) {
+        if (superseded instanceof RecoverySupersededError) return
+        throw superseded
+      }
+      setState(current => ({
+        ...current,
+        phase: 'awaiting',
+        error: `取消失败：${err.message}`,
+      }))
+    } finally {
+      if (epoch === recoveryEpoch.current) recoveryInFlight.current = false
     }
   }
 
   function handleReset() {
-    clearAwaitingRecovery()
+    if (recoveryRef.current) return
+    recoveryEpoch.current += 1
+    recoveryInFlight.current = false
+    clearAutonomousRecovery()
     setState(initialState)
     setAskReply('')
-    lastConversationId.current = null
-    startIdempotencyKey.current = null
-    continueIdempotencyKey.current = null
   }
 
   const r = state.response
@@ -447,10 +662,10 @@ export default function Autonomous() {
             id="autonomous-goal"
             rows={3}
             value={state.request.query}
-            onChange={e => {
-              startIdempotencyKey.current = null
-              setState(s => ({ ...s, request: { ...s.request, query: e.target.value } }))
-            }}
+            onChange={e => setState(s => ({
+              ...s,
+              request: { ...s.request, query: e.target.value },
+            }))}
             placeholder="例如：帮我规划学习 RAG 的路径，然后出 3 道选择题"
             disabled={formLocked}
           />
@@ -475,7 +690,6 @@ export default function Autonomous() {
               list="doc-list"
               value={state.request.document_id}
               onChange={e => {
-                startIdempotencyKey.current = null
                 const documentId = e.target.value
                 setState(s => {
                   const hadDocument = Boolean(s.request.document_id.trim())
@@ -514,7 +728,6 @@ export default function Autonomous() {
               type="checkbox"
               checked={state.request.grounding_required}
               onChange={e => {
-                startIdempotencyKey.current = null
                 setState(s => ({
                   ...s,
                   request: {
@@ -541,14 +754,17 @@ export default function Autonomous() {
               ref={startButtonRef}
               type="submit"
               className="btn-primary"
-              disabled={formLocked || !state.request.query.trim()}
+              disabled={operationBusy || (
+                !pendingStart
+                && (Boolean(recovery) || !state.request.query.trim())
+              )}
             >
               {state.phase === 'running'
                 ? '执行中...'
                 : state.phase === 'error' ? '再次执行当前目标' : '开始执行'}
             </button>
           )}
-          {(state.phase === 'done' || state.phase === 'error') && (
+          {!recovery && (state.phase === 'done' || state.phase === 'error') && (
             <button
               ref={resetButtonRef}
               type="button"
@@ -706,7 +922,7 @@ export default function Autonomous() {
             className="modal-card"
             role="dialog"
             aria-modal="true"
-            aria-busy={state.phase === 'continuing'}
+            aria-busy={['continuing', 'canceling'].includes(state.phase)}
             aria-labelledby="autonomous-dialog-title"
             aria-describedby="autonomous-dialog-question"
           >
@@ -722,38 +938,35 @@ export default function Autonomous() {
               className="modal-input"
               rows={3}
               value={askReply}
-              onChange={e => {
-                continueIdempotencyKey.current = null
-                const reply = e.target.value
-                setAskReply(reply)
-                persistCurrentAwaiting(reply, null)
-              }}
+              onChange={e => handleReplyChange(e.target.value)}
               placeholder="输入你的回答..."
               aria-label="你的回答"
-              readOnly={state.phase === 'continuing'}
+              readOnly={pendingContinue || operationBusy}
               onKeyDown={e => {
                 if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) handleContinue()
               }}
             />
             {state.error && (
               <div className="modal-error" role="alert">
-                回答提交失败：{state.error}。你的回答已保留，可以重试。
+                {state.error.startsWith('取消失败：')
+                  ? `${state.error}。会话与草稿仍已保留。`
+                  : `回答提交失败：${state.error}。你的回答已保留，可以重试。`}
               </div>
             )}
             <div className="modal-actions">
               <button
                 type="button"
                 className="btn-ghost"
-                onClick={handleReset}
-                disabled={state.phase === 'continuing'}
+                onClick={handleCancel}
+                disabled={operationBusy || pendingContinue}
               >
-                取消整个执行
+                {state.phase === 'canceling' ? '取消中...' : '取消整个执行'}
               </button>
               <button
                 type="button"
                 className="btn-primary"
                 onClick={handleContinue}
-                disabled={state.phase === 'continuing' || !askReply.trim()}
+                disabled={operationBusy || !askReply.trim()}
               >
                 {state.phase === 'continuing'
                   ? '提交中...'
@@ -761,7 +974,7 @@ export default function Autonomous() {
               </button>
             </div>
             <div className="modal-meta">
-              conversation_id: <code>{lastConversationId.current?.slice(0, 16)}...</code>
+              conversation_id: <code>{recovery?.conversation_id?.slice(0, 16)}...</code>
             </div>
           </div>
         </div>

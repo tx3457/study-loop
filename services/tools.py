@@ -11,7 +11,7 @@ Function Calling 工具定义与分发
 """
 import json
 import logging
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from services.learning_path import generate_learning_path
 from services.memory import (
@@ -431,6 +431,8 @@ async def dispatch_tool(
     run_id: Optional[str] = None,
     user_id: Optional[str] = None,
     idempotency_key: Optional[str] = None,
+    idempotency_lease=None,
+    on_before_handler: Callable[[], Awaitable[None]] | None = None,
 ) -> str:
     """根据 tool_call 名字调用工具，返回 JSON 字符串。
 
@@ -448,4 +450,6 @@ async def dispatch_tool(
         run_id=run_id,
         user_id=user_id,
         idempotency_key=idempotency_key,
+        idempotency_lease=idempotency_lease,
+        on_before_handler=on_before_handler,
     )

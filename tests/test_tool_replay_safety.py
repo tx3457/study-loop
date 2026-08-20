@@ -109,7 +109,7 @@ class TestToolReplaySafety(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.outcomes[0].kind, "blocked")
         self.assertEqual(result.outcomes[0].blocked_reason, "not_in_whitelist")
 
-    async def test_progress_barrier_runs_before_message_mutation_or_dispatch(self):
+    async def test_ownership_barrier_runs_before_message_mutation_or_dispatch(self):
         tool_call = SimpleNamespace(
             id="search-barrier",
             function=SimpleNamespace(
@@ -141,6 +141,80 @@ class TestToolReplaySafety(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(messages, [])
         dispatch.assert_not_awaited()
+
+    async def test_invalid_arguments_never_cross_handler_progress_boundary(self):
+        tool = tool_registry.get("update_learning_profile")
+        self.assertIsNotNone(tool)
+        handler = AsyncMock(return_value='{"status":"unexpected"}')
+        ownership_barrier = AsyncMock()
+        progress_barrier = AsyncMock()
+        tool_call = SimpleNamespace(
+            id="invalid-write",
+            function=SimpleNamespace(
+                name="update_learning_profile",
+                # grade_result is required by both schema and handler.
+                arguments='{"user_id":"u","document_id":"d"}',
+            ),
+        )
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(return_value=SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(
+                content=None,
+                tool_calls=[tool_call],
+            ))]
+        ))
+
+        with patch.object(tool, "handler", new=handler):
+            result = await run_tool_round(
+                [],
+                tools=[tool.to_openai_schema()],
+                client=client,
+                on_before_tool_calls=ownership_barrier,
+                on_before_tool_dispatch=progress_barrier,
+            )
+
+        ownership_barrier.assert_awaited_once()
+        progress_barrier.assert_not_awaited()
+        handler.assert_not_awaited()
+        self.assertEqual(result.outcomes[0].kind, "dispatched")
+        self.assertIn("invalid_tool_arguments", result.outcomes[0].result)
+
+    async def test_valid_arguments_cross_progress_boundary_before_handler(self):
+        tool = tool_registry.get("search_document")
+        self.assertIsNotNone(tool)
+        order = []
+
+        async def progress_barrier():
+            order.append("progress")
+
+        async def handler(**_kwargs):
+            order.append("handler")
+            return '{"chunks":[]}'
+
+        tool_call = SimpleNamespace(
+            id="valid-read",
+            function=SimpleNamespace(
+                name="search_document",
+                arguments='{"document_id":"d","query":"q"}',
+            ),
+        )
+        client = MagicMock()
+        client.chat.completions.create = AsyncMock(return_value=SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(
+                content=None,
+                tool_calls=[tool_call],
+            ))]
+        ))
+
+        with patch.object(tool, "handler", new=handler):
+            await run_tool_round(
+                [],
+                tools=[tool.to_openai_schema()],
+                client=client,
+                on_before_tool_dispatch=progress_barrier,
+            )
+
+        self.assertEqual(order, ["progress", "handler"])
 
     def test_profile_read_with_legacy_migration_is_not_replay_safe(self):
         tool = tool_registry.get("get_user_profile")
