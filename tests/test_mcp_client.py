@@ -11,7 +11,6 @@
 跑法:
   python -m pytest tests/test_mcp_client.py -q
 """
-import asyncio
 import sys
 import unittest
 from pathlib import Path

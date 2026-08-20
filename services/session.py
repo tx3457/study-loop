@@ -170,13 +170,9 @@ async def apply_answer_to_session(
     if question_index is not None and question_index != current_index:
         raise SessionConflictError("Question index no longer matches session state")
 
-    question = session.questions[current_index]
     if before_commit is not None:
         await before_commit()
     session.user_answers.append(answer)
-
-    requires_semantic_grading = question.type == "short_answer"
-    correct = None if requires_semantic_grading else answers_match(question, answer)
 
     is_last = len(session.user_answers) == len(session.questions)
     if is_last:

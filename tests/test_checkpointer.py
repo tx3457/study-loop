@@ -9,7 +9,6 @@
 跑法:
   python -m pytest tests/test_checkpointer.py -q
 """
-import asyncio
 import os
 import sys
 import tempfile

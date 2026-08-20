@@ -18,7 +18,6 @@
 跑法:
   python -m pytest tests/test_planner_loop.py -q
 """
-import json
 import os
 import sys
 import unittest

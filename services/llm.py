@@ -6,7 +6,6 @@ from models.chat import ChatResponse, StructuredResponse
 
 from services.provider_config import (
     PROVIDER_REQUEST_DEADLINE_SECONDS,
-    PROVIDER_TIMEOUT,
     build_managed_async_openai,
     load_provider_configs,
     run_with_provider_deadline,

@@ -23,6 +23,7 @@ guided 模式闭环：
   - 入口/出口用轻量 tutor guard（不复用 orchestrator 的 input_guard/output_guard，
     后者按 quiz/grade/plan action 语义设计，会对 guided 流误报）。
 """
+import json
 import logging
 from typing import Literal
 

@@ -14,7 +14,6 @@ ask_user→interrupt→resume 续跑测试见 test_tutor_assist_interrupt.py（�
 
 运行：python -m pytest tests/test_assistant_agent.py -q
 """
-import os
 import sys
 import unittest
 from pathlib import Path

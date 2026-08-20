@@ -13,8 +13,6 @@
 跑法:
   python -m pytest tests/test_query_rewriter.py -q
 """
-import asyncio
-import os
 import sys
 import unittest
 from pathlib import Path

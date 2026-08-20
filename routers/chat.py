@@ -4,7 +4,7 @@ import uuid
 from fastapi import APIRouter, Header
 from fastapi.responses import StreamingResponse
 
-from models.chat import ChatRequest, ChatResponse, HistoryRequest, ToolChatRequest, ToolChatResponse
+from models.chat import ChatRequest, HistoryRequest, ToolChatRequest, ToolChatResponse
 from services.llm import _client as _client, chat, chat_structured, chat_stream, chat_history
 from services.compression import compress_chat_history, COMPRESS_THRESHOLD
 from services.tools import get_tool_definitions

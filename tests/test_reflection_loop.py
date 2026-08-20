@@ -12,7 +12,6 @@
 或
   python -m unittest test.test_reflection_loop
 """
-import asyncio
 import os
 import sys
 import unittest
