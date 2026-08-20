@@ -1,11 +1,10 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Path,Query,Depends,HTTPException,Request
-from fastapi.responses import HTMLResponse,JSONResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from openai import APIError, APITimeoutError, RateLimitError
-from pydantic import BaseModel, Field
 from agents.supervisor import supervisor_enabled
 from routers.chat import router as chat_router
 from routers.documents import router as document_router

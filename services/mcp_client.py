@@ -15,7 +15,6 @@ MCP(Model Context Protocol)客户端 + ToolRegistry 桥接
   把 MCP tool 接到 ToolRegistry 后,业务侧调用与原生工具完全一致
   (services/tools.py:dispatch_tool 一行),不需要每个调用点 if/else 分流。
 """
-import asyncio
 import logging
 from contextlib import AsyncExitStack
 from typing import Optional

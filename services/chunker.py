@@ -15,7 +15,6 @@ PDF 文件单独处理：用更保守的分隔符集（排除中文逗号），�
 """
 import logging
 import re
-from typing import Optional
 
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter

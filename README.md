@@ -158,8 +158,11 @@ python scripts/check_provider_capabilities.py
 ## 测试
 
 ```bash
-# 后端测试
-python -m pytest -q
+# 后端高信号静态检查（语法、未定义名称、未使用导入/变量）
+python -m ruff check .
+
+# 后端确定性测试与核心运行时代码分支覆盖率
+python -m pytest -q --cov --cov-config=pyproject.toml --cov-report=term-missing:skip-covered
 
 # 使用临时 PostgreSQL 时会额外执行 receipt、Web Quiz、暂停会话与 memory 冷启动测试
 TEST_DATABASE_URL=postgresql://user:password@127.0.0.1:5432/studyloop_test \
@@ -182,6 +185,11 @@ npm run build
 # 浏览器 E2E（首次运行先执行 npx playwright install chromium）
 npm run test:e2e
 ```
+
+CI 将核心 Python 运行时代码的分支覆盖率回归下限设为 75%。该数字不统计
+`tests/`、`scripts/`、`evaluation/`、浏览器 E2E 或容器 smoke，也不代表真实模型的
+回答正确率、RAG 事实性或 Agent 成功率。未配置 `TEST_DATABASE_URL` 时，本地会跳过
+PostgreSQL 专项用例；该变量只能指向可清空的临时测试库，不能使用开发或生产数据库。
 
 浏览器 E2E 使用本地 Vite 和 Mock API，不会调用真实模型服务。
 

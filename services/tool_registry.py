@@ -25,7 +25,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Awaitable, Callable, Optional
+from typing import Awaitable, Callable, Optional
 
 from services.idempotency import IdempotencyConflictError, request_idempotency
 from services.retry import RetryExhausted, with_retry

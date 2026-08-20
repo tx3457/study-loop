@@ -7,8 +7,6 @@ retrieve_with_rewrite 单测
 跑:
   python -m pytest tests/test_retrieve_with_rewrite.py -v
 """
-import asyncio
-import os
 import sys
 import unittest
 from pathlib import Path

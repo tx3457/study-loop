@@ -72,8 +72,11 @@ class TestChatToolLoop(unittest.IsolatedAsyncioTestCase):
 
     async def test_max_rounds_exhausted(self):
         # LLM 每轮都调工具，永不给纯文字 → 跑满 MAX_TOOL_ROUNDS
-        always_tool = lambda: _assistant_msg(
-            tool_calls=[_tool_call("c", "get_user_profile", '{"user_id": "u"}')])
+        def always_tool():
+            return _assistant_msg(
+                tool_calls=[_tool_call("c", "get_user_profile", '{"user_id": "u"}')]
+            )
+
         responses = [always_tool() for _ in range(chat.MAX_TOOL_ROUNDS + 2)]
         with patch.object(chat, "_client", _mock_client(responses)), \
              patch.object(chat, "check_injection", AsyncMock(return_value=(False, ""))), \

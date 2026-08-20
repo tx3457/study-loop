@@ -498,8 +498,7 @@ async def teaching_supervisor(state: dict) -> Command:
         decision = _normalize_decision(decision)
         return _oneshot_command(state, decision, handoffs)
 
-    # 掌握度达标兜底终止（与 adaptive_loop.should_terminate 的 mastery_reached 对齐）
-    mastery = state.get("difficulty_score")  # diagnostic 写回的画像难度（≈ mastery+0.15），此处仅作弱信号
+    # 最近成绩达标时兜底终止（与 adaptive_loop.should_terminate 的 mastery_reached 对齐）
     last_report = state.get("last_report") or {}
     report_score = last_report.get("score")
     if isinstance(report_score, (int, float)) and report_score >= MASTERY_TARGET and state.get("turn", 0) > 0:
