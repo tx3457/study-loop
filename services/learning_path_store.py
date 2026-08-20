@@ -12,6 +12,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import math
 import os
 import re
@@ -22,7 +23,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from dotenv import load_dotenv
 from pydantic import ValidationError
@@ -31,6 +32,7 @@ from models.learning_path import LearningPath
 
 
 load_dotenv(Path(__file__).parent.parent / ".env")
+logger = logging.getLogger(__name__)
 
 _TABLE = "studyloop_learning_paths"
 _SCHEMA_VERSION = 1
@@ -88,6 +90,9 @@ class LearningPathStore:
         postgres_connect_timeout_seconds: int = 5,
         postgres_lock_timeout_ms: int = 5_000,
         postgres_statement_timeout_ms: int = 15_000,
+        postgres_tcp_user_timeout_ms: int = 30_000,
+        schema_init_wait_timeout_seconds: float = 30,
+        cancel_drain_timeout_seconds: float = 20,
         clock: Callable[[], float] = time.time,
         path_id_factory: Callable[[], str] | None = None,
     ) -> None:
@@ -95,14 +100,26 @@ class LearningPathStore:
             raise ValueError("database_url and sqlite_path are mutually exclusive")
         if max_payload_bytes <= 0:
             raise ValueError("max_payload_bytes must be positive")
-        if sqlite_busy_timeout_ms <= 0:
+        if not math.isfinite(sqlite_busy_timeout_ms) or sqlite_busy_timeout_ms <= 0:
             raise ValueError("sqlite_busy_timeout_ms must be positive")
-        if postgres_connect_timeout_seconds <= 0:
+        if (
+            not math.isfinite(postgres_connect_timeout_seconds)
+            or postgres_connect_timeout_seconds <= 0
+        ):
             raise ValueError("postgres_connect_timeout_seconds must be positive")
-        if postgres_lock_timeout_ms <= 0:
+        if not math.isfinite(postgres_lock_timeout_ms) or postgres_lock_timeout_ms <= 0:
             raise ValueError("postgres_lock_timeout_ms must be positive")
-        if postgres_statement_timeout_ms <= 0:
+        if not math.isfinite(postgres_statement_timeout_ms) or postgres_statement_timeout_ms <= 0:
             raise ValueError("postgres_statement_timeout_ms must be positive")
+        if not math.isfinite(postgres_tcp_user_timeout_ms) or postgres_tcp_user_timeout_ms <= 0:
+            raise ValueError("postgres_tcp_user_timeout_ms must be positive")
+        if (
+            not math.isfinite(schema_init_wait_timeout_seconds)
+            or schema_init_wait_timeout_seconds <= 0
+        ):
+            raise ValueError("schema_init_wait_timeout_seconds must be positive")
+        if not math.isfinite(cancel_drain_timeout_seconds) or cancel_drain_timeout_seconds <= 0:
+            raise ValueError("cancel_drain_timeout_seconds must be positive")
         if not callable(clock):
             raise TypeError("clock must be callable")
         if path_id_factory is not None and not callable(path_id_factory):
@@ -119,10 +136,14 @@ class LearningPathStore:
         self._postgres_connect_timeout_seconds = postgres_connect_timeout_seconds
         self._postgres_lock_timeout_ms = postgres_lock_timeout_ms
         self._postgres_statement_timeout_ms = postgres_statement_timeout_ms
+        self._postgres_tcp_user_timeout_ms = postgres_tcp_user_timeout_ms
+        self._schema_init_wait_timeout_seconds = schema_init_wait_timeout_seconds
+        self._cancel_drain_timeout_seconds = cancel_drain_timeout_seconds
         self._clock = clock
         self._path_id_factory = path_id_factory or (lambda: f"lp_{uuid.uuid4().hex}")
         self._schema_ready = False
         self._schema_lock = threading.Lock()
+        self._background_workers: set[asyncio.Task] = set()
 
     @classmethod
     def from_environment(cls) -> "LearningPathStore":
@@ -136,6 +157,15 @@ class LearningPathStore:
             postgres_lock_timeout_ms=int(os.getenv("LEARNING_PATH_PG_LOCK_TIMEOUT_MS", "5000")),
             postgres_statement_timeout_ms=int(
                 os.getenv("LEARNING_PATH_PG_STATEMENT_TIMEOUT_MS", "15000")
+            ),
+            postgres_tcp_user_timeout_ms=int(
+                os.getenv("LEARNING_PATH_PG_TCP_USER_TIMEOUT_MS", "30000")
+            ),
+            schema_init_wait_timeout_seconds=float(
+                os.getenv("LEARNING_PATH_SCHEMA_INIT_WAIT_TIMEOUT_SECONDS", "30")
+            ),
+            cancel_drain_timeout_seconds=float(
+                os.getenv("LEARNING_PATH_CANCEL_DRAIN_TIMEOUT_SECONDS", "20")
             ),
         )
 
@@ -281,16 +311,59 @@ class LearningPathStore:
         try:
             return await asyncio.shield(worker)
         except asyncio.CancelledError as cancelled:
-            while not worker.done():
-                try:
-                    await asyncio.shield(worker)
-                except asyncio.CancelledError:
-                    continue
-            try:
-                worker.result()
-            except BaseException:
-                raise cancelled
+            await self._drain_cancelled_worker(worker)
             raise cancelled
+
+    async def _drain_cancelled_worker(
+        self,
+        worker: asyncio.Task,
+        *,
+        deadline: float | None = None,
+        track_on_timeout: bool = True,
+    ) -> tuple[bool, Any]:
+        """Drain a shielded database worker without extending its deadline."""
+        loop = asyncio.get_running_loop()
+        if deadline is None:
+            deadline = loop.time() + self._cancel_drain_timeout_seconds
+
+        while not worker.done():
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                if track_on_timeout:
+                    self._track_background_worker(worker)
+                return False, None
+            try:
+                await asyncio.wait_for(asyncio.shield(worker), timeout=remaining)
+            except asyncio.CancelledError:
+                continue
+            except TimeoutError:
+                continue
+            except BaseException:
+                break
+
+        try:
+            return True, worker.result()
+        except BaseException as exc:
+            logger.error(
+                "cancelled Learning Path store worker failed: error_type=%s",
+                type(exc).__name__,
+            )
+            return True, None
+
+    def _track_background_worker(self, worker: asyncio.Task) -> None:
+        self._background_workers.add(worker)
+
+        def on_done(completed: asyncio.Task) -> None:
+            self._background_workers.discard(completed)
+            try:
+                completed.result()
+            except BaseException as exc:
+                logger.error(
+                    "background Learning Path store worker failed: error_type=%s",
+                    type(exc).__name__,
+                )
+
+        worker.add_done_callback(on_done)
 
     def _storage_may_have_records(self) -> bool:
         return bool(self._database_url or self._schema_ready or Path(self._sqlite_path).exists())
@@ -438,14 +511,37 @@ class LearningPathStore:
     def _connect(self):
         if self._database_url:
             import psycopg
+            from psycopg.conninfo import conninfo_to_dict
+
+            try:
+                connection_parameters = conninfo_to_dict(self._database_url)
+            except Exception:
+                raise ValueError("PostgreSQL Learning Path DATABASE_URL is invalid") from None
+            explicit_options = connection_parameters.get("options")
+            environment_options = os.getenv("PGOPTIONS", "").strip()
+            service_configured = bool(
+                connection_parameters.get("service") or os.getenv("PGSERVICE")
+            )
+            if service_configured and explicit_options is None and not environment_options:
+                raise ValueError(
+                    "PostgreSQL service DSNs must expose connection options "
+                    "through DATABASE_URL or PGOPTIONS so Learning Path "
+                    "safety limits can be merged without silently discarding "
+                    "service-file options"
+                )
+            existing_options = (
+                str(explicit_options) if explicit_options is not None else environment_options
+            ).strip()
+            bounded_options = (
+                f"-c lock_timeout={self._postgres_lock_timeout_ms}ms "
+                f"-c statement_timeout={self._postgres_statement_timeout_ms}ms"
+            )
 
             return psycopg.connect(
                 self._database_url,
                 connect_timeout=self._postgres_connect_timeout_seconds,
-                options=(
-                    f"-c lock_timeout={self._postgres_lock_timeout_ms}ms "
-                    f"-c statement_timeout={self._postgres_statement_timeout_ms}ms"
-                ),
+                tcp_user_timeout=self._postgres_tcp_user_timeout_ms,
+                options=f"{existing_options} {bounded_options}".strip(),
             )
 
         path = Path(self._sqlite_path)
@@ -483,7 +579,10 @@ class LearningPathStore:
     def _ensure_schema(self) -> None:
         if self._schema_ready:
             return
-        with self._schema_lock:
+        acquired = self._schema_lock.acquire(timeout=self._schema_init_wait_timeout_seconds)
+        if not acquired:
+            raise TimeoutError("Learning Path schema initialization timed out")
+        try:
             if self._schema_ready:
                 return
             with self._transaction(write=True) as connection:
@@ -557,6 +656,8 @@ class LearningPathStore:
                     """
                 )
             self._schema_ready = True
+        finally:
+            self._schema_lock.release()
 
     def _create_sync(
         self,
