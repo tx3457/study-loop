@@ -238,12 +238,27 @@ export async function getAudit(runId) {
    ═══════════════════════════════════════════════════════════════════ */
 
 /** 开启自适应辅导会话（agent 决策开场 + 出第一轮题） */
-export async function startAdaptive({ user_id = 'default_user', document_id, goal }) {
+export async function startAdaptive({
+  user_id = 'default_user',
+  document_id,
+  goal,
+  idempotency_key,
+}) {
   return request('/agent/adaptive/start', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(idempotency_key ? { 'Idempotency-Key': idempotency_key } : {}),
+    },
     body: JSON.stringify({ user_id, document_id, goal }),
   })
+}
+
+/** 读取服务端持久化的 Adaptive 安全快照。 */
+export async function getAdaptiveSnapshot(adaptiveSessionId) {
+  return request(
+    `/agent/adaptive/${encodeURIComponent(adaptiveSessionId)}`,
+  )
 }
 
 /** 提交本轮作答，推进闭环（批改 → agent 决策下一步） */
@@ -251,6 +266,7 @@ export async function submitAdaptive({
   adaptive_session_id,
   answers,
   turn,
+  revision,
   idempotency_key,
 }) {
   return request('/agent/adaptive/submit', {
@@ -259,7 +275,7 @@ export async function submitAdaptive({
       'Content-Type': 'application/json',
       ...(idempotency_key ? { 'Idempotency-Key': idempotency_key } : {}),
     },
-    body: JSON.stringify({ adaptive_session_id, answers, turn }),
+    body: JSON.stringify({ adaptive_session_id, answers, turn, revision }),
   })
 }
 

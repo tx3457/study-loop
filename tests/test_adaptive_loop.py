@@ -11,6 +11,7 @@
 """
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -22,6 +23,7 @@ from models.grader import GradingReport, QuestionGrade
 from models.quiz import Question, QuizResponse
 import services.adaptive_loop as brain
 import routers.adaptive as rt
+from services.adaptive_sessions import AdaptiveSessionStore
 
 
 def _report(score: float, gaps: list[str] | None = None) -> GradingReport:
@@ -183,10 +185,15 @@ class TestBrain(unittest.IsolatedAsyncioTestCase):
 # ═══════════════════════════════════════════════════════════════════════════
 class TestAdaptiveRouterLoop(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        rt._sessions.clear()
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.store = AdaptiveSessionStore(
+            sqlite_path=str(Path(self.tempdir.name) / "adaptive.sqlite3")
+        )
+        self.store_patch = patch.object(rt, "adaptive_sessions", self.store)
+        self.store_patch.start()
 
-    def _patches(self, decision_side, grade_score=0.5, mastery_seq=None):
-        """统一打桩:出题/批改/画像/决策/注入全 mock。mastery_seq 控制每次 get_mastery 返回。"""
+    def _patches(self, decision_side, mastery_seq=None):
+        """统一打桩；mastery_seq 控制每次 get_mastery 返回。"""
         async def commit_memory(*args, after_write=None, on_core_written=None, **kwargs):
             if on_core_written is not None:
                 on_core_written()
@@ -197,9 +204,6 @@ class TestAdaptiveRouterLoop(unittest.IsolatedAsyncioTestCase):
             patch.object(rt, "ensure_document_available", AsyncMock()),
             patch.object(rt, "check_injection", AsyncMock(return_value=(False, ""))),
             patch.object(rt, "generate_question", AsyncMock(return_value=_quiz())),
-            patch.object(
-                rt, "grade_session", AsyncMock(return_value=_report(grade_score))
-            ),
             patch.object(rt, "commit_learning_memory", AsyncMock(side_effect=commit_memory)),
             patch.object(rt, "append_decision", AsyncMock()),
             patch.object(rt, "get_weak_points", AsyncMock(return_value=[])),
@@ -224,6 +228,8 @@ class TestAdaptiveRouterLoop(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         for p in getattr(self, "_p", []):
             p.stop()
+        self.store_patch.stop()
+        self.tempdir.cleanup()
 
     async def test_start_serves_first_quiz(self):
         self._patches(NextStepDecision(action="continue", topic="排序", reason="开场"))
@@ -234,15 +240,38 @@ class TestAdaptiveRouterLoop(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(resp.questions), 2)
         self.assertFalse(resp.done)
         self.assertEqual(len(resp.trajectory), 1)
-        self.assertIn(resp.adaptive_session_id, rt._sessions)
+        record = await self.store.inspect(resp.adaptive_session_id)
+        self.assertIsNotNone(record)
+        self.assertEqual(
+            record.aggregate.current_quiz.session_id,
+            f"adaptive:{resp.adaptive_session_id}:turn:1",
+        )
+
+    async def test_start_does_not_echo_injection_classifier_reason(self):
+        secret = "sk-do-not-echo-this-value"
+        with (
+            patch.object(rt, "ensure_document_available", AsyncMock()),
+            patch.object(
+                rt,
+                "check_injection",
+                AsyncMock(return_value=(True, f"matched input {secret}")),
+            ),
+            self.assertLogs(rt.logger, level="WARNING") as captured,
+            self.assertRaises(rt.HTTPException) as raised,
+        ):
+            await rt.adaptive_start(
+                rt.AdaptiveStartRequest(document_id="doc", goal="unsafe goal")
+            )
+
+        self.assertEqual(raised.exception.status_code, 400)
+        self.assertNotIn(secret, str(raised.exception.detail))
+        self.assertNotIn(secret, " ".join(captured.output))
 
     async def test_mastery_reached_terminates(self):
-        # get_mastery 调用序:start 1 次 + submit(_grade_and_update 1 次 + submit 本体 1 次)= 3 次
-        # 末次(submit 本体)= 0.9 → 达标终止
+        # start 读取一次 mastery，submit 在 durable memory checkpoint 后再读取一次。
         self._patches(
             NextStepDecision(action="continue", topic="排序", reason="continue"),
-            grade_score=0.9,
-            mastery_seq=[0.3, 0.9, 0.9, 0.9],
+            mastery_seq=[0.3, 0.9],
         )
         start = await rt.adaptive_start(
             rt.AdaptiveStartRequest(document_id="doc", goal="排序")
@@ -252,23 +281,26 @@ class TestAdaptiveRouterLoop(unittest.IsolatedAsyncioTestCase):
             rt.AdaptiveSubmitRequest(
                 adaptive_session_id=sid,
                 turn=start.turn,
+                revision=start.revision,
                 answers=["A", "B"],
             )
         )
         self.assertTrue(out.done)
         self.assertEqual(out.terminate_reason, "mastery_reached")
-        self.assertEqual(out.last_report_score, 0.9)
+        self.assertEqual(out.last_report_score, 1.0)
 
     async def test_switch_to_plan_returns_learning_path(self):
         fake_path = type(
             "P", (), {"model_dump": lambda self: {"stages": ["s1", "s2"]}}
         )()
         self._patches(
-            NextStepDecision(
-                action="switch_to_plan", topic="排序", reason="缺口系统性"
-            ),
-            grade_score=0.4,
-            mastery_seq=[0.3, 0.4, 0.4, 0.4],
+            [
+                NextStepDecision(action="continue", topic="排序", reason="开场"),
+                NextStepDecision(
+                    action="switch_to_plan", topic="排序", reason="缺口系统性"
+                ),
+            ],
+            mastery_seq=[0.3, 0.4],
         )
         with patch.object(
             rt, "generate_learning_path", AsyncMock(return_value=fake_path)
@@ -280,6 +312,7 @@ class TestAdaptiveRouterLoop(unittest.IsolatedAsyncioTestCase):
                 rt.AdaptiveSubmitRequest(
                     adaptive_session_id=start.adaptive_session_id,
                     turn=start.turn,
+                    revision=start.revision,
                     answers=["A", "B"],
                 )
             )
@@ -291,8 +324,7 @@ class TestAdaptiveRouterLoop(unittest.IsolatedAsyncioTestCase):
         # 低 mastery + continue 决策 → 不终止,turn 推进到 2,再出一轮题
         self._patches(
             NextStepDecision(action="continue", topic="排序", reason="巩固"),
-            grade_score=0.5,
-            mastery_seq=[0.3, 0.4, 0.4, 0.4],
+            mastery_seq=[0.3, 0.4],
         )
         start = await rt.adaptive_start(
             rt.AdaptiveStartRequest(document_id="doc", goal="排序")
@@ -301,6 +333,7 @@ class TestAdaptiveRouterLoop(unittest.IsolatedAsyncioTestCase):
             rt.AdaptiveSubmitRequest(
                 adaptive_session_id=start.adaptive_session_id,
                 turn=start.turn,
+                revision=start.revision,
                 answers=["A", "B"],
             )
         )
@@ -309,7 +342,7 @@ class TestAdaptiveRouterLoop(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out.turn_type, "quiz")
         self.assertEqual(len(out.questions), 2)
         self.assertEqual(len(out.trajectory), 2)
-        self.assertEqual(out.trajectory[0].score, 0.5)  # 第1轮得分已回填
+        self.assertEqual(out.trajectory[0].score, 1.0)  # 第1轮得分已回填
         self.assertEqual(
             len(out.last_report_feedback), 2
         )  # 逐题反馈已带出(grader 现成内容)
@@ -320,7 +353,7 @@ class TestAdaptiveRouterLoop(unittest.IsolatedAsyncioTestCase):
             NextStepDecision(action="teach", topic="递归", reason="没懂,先讲"),
             NextStepDecision(action="continue", topic="递归", reason="讲完出题验证"),
         ]
-        self._patches(decisions, grade_score=0.5, mastery_seq=[0.3, 0.3, 0.3, 0.3])
+        self._patches(decisions, mastery_seq=[0.3, 0.3])
         with patch.object(
             rt, "generate_lesson", AsyncMock(return_value="递归就是函数调用自己……")
         ):
@@ -335,6 +368,7 @@ class TestAdaptiveRouterLoop(unittest.IsolatedAsyncioTestCase):
                 rt.AdaptiveSubmitRequest(
                     adaptive_session_id=start.adaptive_session_id,
                     turn=start.turn,
+                    revision=start.revision,
                     answers=[],
                 )
             )
@@ -354,6 +388,7 @@ class TestAdaptiveRouterLoop(unittest.IsolatedAsyncioTestCase):
                 rt.AdaptiveSubmitRequest(
                     adaptive_session_id=start.adaptive_session_id,
                     turn=start.turn,
+                    revision=start.revision,
                     answers=["A"],
                 )
             )

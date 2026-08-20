@@ -259,14 +259,6 @@ class TestAdaptiveStartBoundary(unittest.TestCase):
     def setUpClass(cls):
         cls.client = TestClient(app, raise_server_exceptions=False)
 
-    def setUp(self):
-        adaptive_router._sessions.clear()
-        adaptive_router.sessions.clear()
-
-    def tearDown(self):
-        adaptive_router._sessions.clear()
-        adaptive_router.sessions.clear()
-
     @staticmethod
     def _payload() -> dict:
         return {
@@ -319,21 +311,7 @@ class TestAdaptiveStartBoundary(unittest.TestCase):
 
 
 class TestAdaptiveProviderBoundary(unittest.IsolatedAsyncioTestCase):
-    async def asyncSetUp(self):
-        adaptive_router.sessions.clear()
-
-    async def asyncTearDown(self):
-        adaptive_router.sessions.clear()
-
     async def test_empty_provider_quiz_is_not_persisted(self):
-        asess = adaptive_router.AdaptiveSession(
-            adaptive_session_id="adapt-empty",
-            user_id="user-1",
-            document_id="notes.md",
-            goal="学习 RAG",
-            turn=1,
-            history=[],
-        )
         decision = adaptive_router.NextStepDecision(
             action="continue",
             topic="RAG",
@@ -347,10 +325,13 @@ class TestAdaptiveProviderBoundary(unittest.IsolatedAsyncioTestCase):
             AsyncMock(return_value=QuizResponse(questions=[])),
         ):
             with self.assertRaises(session_service.InvalidQuizResponseError):
-                await adaptive_router._serve_turn(asess, decision, turn=1)
-
-        self.assertIsNone(asess.current_quiz_session_id)
-        self.assertFalse(adaptive_router.sessions)
+                await adaptive_router._generate_quiz(
+                    session_id="adapt-empty",
+                    user_id="user-1",
+                    document_id="notes.md",
+                    decision=decision,
+                    turn=1,
+                )
 
 
 class TestChoiceAnswerNormalization(unittest.IsolatedAsyncioTestCase):

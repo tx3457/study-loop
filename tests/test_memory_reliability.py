@@ -8,7 +8,7 @@ import threading
 import types
 import unittest
 import uuid
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from models.grader import GradingReport, QuestionGrade
 from models.quiz import Question
@@ -243,6 +243,31 @@ class TestSessionArchive(unittest.IsolatedAsyncioTestCase):
 
 
 class TestSnapshotCompleteness(unittest.IsolatedAsyncioTestCase):
+    async def test_snapshot_failure_does_not_publish_core_written_marker(self):
+        import services.memory as memory
+
+        marker_calls: list[str] = []
+        with (
+            patch.object(memory, "DATABASE_URL", None),
+            patch.object(memory, "write_episodic_memory", AsyncMock()),
+            patch.object(memory, "update_semantic_memory", AsyncMock()),
+            patch.object(memory, "maybe_archive_session_briefs", AsyncMock()),
+            patch.object(
+                memory,
+                "persist_memory_snapshot",
+                AsyncMock(return_value=False),
+            ),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "snapshot was not persisted"):
+                await memory.commit_learning_memory(
+                    "snapshot-failure-user",
+                    _report("snapshot-failure-session"),
+                    "snapshot.md",
+                    on_core_written=lambda: marker_calls.append("published"),
+                )
+
+        self.assertEqual(marker_calls, [])
+
     async def test_cancelled_request_waits_for_memory_commit_to_finish(self):
         import services.memory as memory
 
@@ -422,39 +447,29 @@ class TestSnapshotCompleteness(unittest.IsolatedAsyncioTestCase):
         import routers.adaptive as adaptive
         import services.memory as memory
         from models.adaptive import AdaptiveTurn, NextStepDecision
+        from models.adaptive_session import (
+            AdaptivePendingSubmit,
+            AdaptiveSessionAggregate,
+        )
+        from services.adaptive_sessions import AdaptiveSessionStore
 
         user_id = f"snapshot-adaptive-{uuid.uuid4()}"
-        quiz_session_id = f"adaptive-quiz-{uuid.uuid4()}"
+        adaptive_session_id = f"adapt_{uuid.uuid4().hex}"
+        quiz_session_id = f"adaptive:{adaptive_session_id}:turn:1"
         report = _report(quiz_session_id, score=1.0)
-        adaptive_session = adaptive.AdaptiveSession(
-            adaptive_session_id=f"adaptive-{uuid.uuid4()}",
-            user_id=user_id,
-            document_id="adaptive.md",
-            goal="验证持久化",
-            turn=1,
-            history=[
-                AdaptiveTurn(
-                    turn=1,
-                    action="continue",
-                    topic="持久化",
-                    difficulty_score=0.5,
-                )
-            ],
-            current_quiz_session_id=quiz_session_id,
-            current_decision=NextStepDecision(
-                action="continue",
-                topic="持久化",
-                count=1,
-                reason="继续练习",
-            ),
+        decision = NextStepDecision(
+            action="continue",
+            topic="持久化",
+            count=1,
+            reason="继续练习",
         )
-        adaptive.sessions[quiz_session_id] = QuizSession(
+        quiz = QuizSession(
             session_id=quiz_session_id,
             document_id="adaptive.md",
             user_id=user_id,
             questions=[
                 Question(
-                    question="答案是什么？",
+                    question="测试题",
                     options=["错误", "正确"],
                     answer="正确",
                     explanation="选择正确。",
@@ -462,27 +477,69 @@ class TestSnapshotCompleteness(unittest.IsolatedAsyncioTestCase):
                     type="choice",
                 )
             ],
-            user_answers=[],
-            status="active",
+            user_answers=["正确"],
+            status="completed",
+            question_grades={0: report.grades[0]},
+            grading_report=report,
         )
-
-        async def grade(_session_id):
-            return report
+        artifact = adaptive._artifact(
+            session_id=adaptive_session_id,
+            turn=1,
+            decision=decision,
+            trajectory=[
+                AdaptiveTurn(
+                    turn=1,
+                    action="continue",
+                    topic="持久化",
+                    difficulty_score=0.5,
+                )
+            ],
+            mastery=0.2,
+            report=report,
+            quiz=quiz,
+        )
+        aggregate = AdaptiveSessionAggregate(
+            adaptive_session_id=adaptive_session_id,
+            user_id=user_id,
+            document_id="adaptive.md",
+            goal="验证持久化",
+            current_quiz=quiz,
+            last_report=report,
+            current_artifact=artifact,
+            pending=AdaptivePendingSubmit(
+                request_hash="0" * 64,
+                turn=1,
+                revision=1,
+                answers=["正确"],
+            ),
+        )
 
         try:
             with tempfile.TemporaryDirectory() as directory:
                 path = os.path.join(directory, "adaptive-memory.json")
+                store = AdaptiveSessionStore(
+                    sqlite_path=os.path.join(directory, "adaptive.sqlite3")
+                )
                 with (
                     patch.dict(
                         os.environ,
                         {"DATABASE_URL": "", "MEMORY_SNAPSHOT_PATH": path},
                     ),
-                    patch.object(adaptive, "grade_session", new=grade),
+                    patch.object(adaptive, "adaptive_sessions", store),
                 ):
-                    await adaptive._grade_and_update(
-                        adaptive_session,
-                        ["正确"],
+                    await store.create(aggregate)
+                    claim = await store.claim(
+                        adaptive_session_id,
+                        "memory-snapshot-test",
                     )
+                    self.assertTrue(claim.claimed)
+                    record = await adaptive._write_checkpointed_memory(
+                        claim.record.aggregate,
+                        claim.record,
+                        claim.token,
+                        report,
+                    )
+                    await store.release(adaptive_session_id, claim.token)
 
                 with open(path, encoding="utf-8") as handle:
                     payload = json.load(handle)
@@ -495,9 +552,8 @@ class TestSnapshotCompleteness(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(
                 {"session_briefs", "mastery", "decision_log"}.issubset(banks)
             )
-            self.assertTrue(adaptive.sessions[quiz_session_id].profile_written)
+            self.assertTrue(record.aggregate.current_quiz.profile_written)
         finally:
-            adaptive.sessions.pop(quiz_session_id, None)
             _clear_user(memory, user_id)
 
 
