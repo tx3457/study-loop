@@ -279,23 +279,171 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
                 for item in client.list_collections()
             ))
 
-    async def test_delete_invalidates_cache_only_after_storage_success(self):
+    async def test_delete_is_retryable_from_a_hidden_tombstone(self):
         client = MagicMock()
-        client.get_collection.return_value = SimpleNamespace(
-            name="notes.md",
-            metadata={"source_document_id": "notes.md"},
-        )
+        collection = MagicMock()
+        collection.name = "notes.md"
+        collection.metadata = {
+            "source_document_id": "notes.md",
+            "source_filename": "notes.md",
+            "ingest_status": "indexed",
+        }
+        collection.get.return_value = {"ids": ["notes.md_chunk_0"]}
+        collection.count.return_value = 0
+
+        def update_metadata(*, metadata):
+            collection.metadata = metadata
+
+        collection.modify.side_effect = update_metadata
+        client.get_collection.return_value = collection
         vectorstore._bm25_cache["notes.md"] = {"cached": True}
 
         with patch.object(vectorstore, "chromadb_client", client):
-            client.delete_collection.side_effect = RuntimeError("storage down")
+            collection.delete.side_effect = RuntimeError("storage down")
             with self.assertRaises(RuntimeError):
                 await vectorstore.delete_document("notes.md")
+            self.assertNotIn("notes.md", vectorstore._bm25_cache)
+            self.assertEqual(collection.metadata["ingest_status"], "deleting")
+
+            collection.delete.side_effect = None
+            client.list_collections.return_value = [collection]
+            visible = await vectorstore.get_all_document()
+            replay = await vectorstore.delete_document("notes.md")
+
+        self.assertEqual(visible, [])
+        self.assertEqual(replay, "material_deleted")
+        self.assertEqual(collection.metadata["ingest_status"], "deleted")
+        collection.delete.assert_called_with(ids=["notes.md_chunk_0"])
+
+    async def test_delete_missing_document_creates_a_permanent_tombstone(self):
+        client = MagicMock()
+        tombstone = MagicMock()
+        tombstone.name = "legacy.md"
+        tombstone.metadata = {
+            "source_document_id": "legacy.md",
+            "source_filename": "legacy.md",
+            "ingest_status": "deleted",
+        }
+        tombstone.count.return_value = 0
+        lookups = 0
+
+        def get_collection(*, name):
+            nonlocal lookups
+            lookups += 1
+            if lookups == 1:
+                raise NotFoundError("missing")
+            return tombstone
+
+        client.get_collection.side_effect = get_collection
+
+        with patch.object(vectorstore, "chromadb_client", client):
+            status = await vectorstore.delete_document("legacy.md")
+            replay = await vectorstore.delete_document("legacy.md")
+            with self.assertRaises(vectorstore.DocumentAlreadyExistsError):
+                await vectorstore.deal_document(
+                    "legacy.md",
+                    "legacy.md",
+                    ["不能继承旧学习历史"],
+                )
+
+        self.assertEqual(status, "material_deleted")
+        self.assertEqual(replay, "material_deleted")
+        client.create_collection.assert_called_once()
+        metadata = client.create_collection.call_args.kwargs["metadata"]
+        self.assertEqual(metadata["ingest_status"], "deleted")
+        self.assertEqual(metadata["source_document_id"], "legacy.md")
+
+    async def test_delete_fences_an_inflight_bm25_cache_builder(self):
+        client = MagicMock()
+        collection = MagicMock()
+        collection.name = "notes.md"
+        collection.metadata = {
+            "source_document_id": "notes.md",
+            "source_filename": "notes.md",
+            "ingest_status": "indexed",
+        }
+        build_started = threading.Event()
+        release_build = threading.Event()
+
+        def get_chunks(*, include):
+            if include == ["documents"]:
+                build_started.set()
+                release_build.wait(timeout=5)
+                return {"ids": ["notes.md_chunk_0"], "documents": ["secret text"]}
+            return {"ids": ["notes.md_chunk_0"]}
+
+        def update_metadata(*, metadata):
+            collection.metadata = metadata
+
+        collection.get.side_effect = get_chunks
+        collection.modify.side_effect = update_metadata
+        collection.count.return_value = 0
+        client.get_collection.return_value = collection
+
+        with patch.object(vectorstore, "chromadb_client", client):
+            build_task = asyncio.create_task(
+                vectorstore._get_bm25_index(collection, "notes.md")
+            )
+            self.assertTrue(await asyncio.to_thread(build_started.wait, 2))
+            await vectorstore.delete_document("notes.md")
+            release_build.set()
+            with self.assertRaises(NotFoundError):
+                await build_task
+
+        self.assertNotIn("notes.md", vectorstore._bm25_cache)
+
+    async def test_delete_fences_a_builder_started_after_initial_invalidation(self):
+        client = MagicMock()
+        collection = MagicMock()
+        collection.name = "notes.md"
+        collection.metadata = {
+            "source_document_id": "notes.md",
+            "source_filename": "notes.md",
+            "ingest_status": "indexed",
+        }
+
+        def get_chunks(*, include):
+            if include == ["documents"]:
+                return {"ids": ["notes.md_chunk_0"], "documents": ["secret text"]}
+            return {"ids": ["notes.md_chunk_0"]}
+
+        def update_metadata(*, metadata):
+            collection.metadata = metadata
+
+        collection.get.side_effect = get_chunks
+        collection.modify.side_effect = update_metadata
+        collection.count.return_value = 0
+        client.get_collection.return_value = collection
+
+        first_invalidation = threading.Event()
+        release_delete = threading.Event()
+        original_invalidate = vectorstore._invalidate_bm25_cache
+        invalidation_calls = 0
+
+        def gated_invalidate(document_id):
+            nonlocal invalidation_calls
+            original_invalidate(document_id)
+            invalidation_calls += 1
+            if invalidation_calls == 1:
+                first_invalidation.set()
+                release_delete.wait(timeout=5)
+
+        with patch.object(vectorstore, "chromadb_client", client), patch.object(
+            vectorstore,
+            "_invalidate_bm25_cache",
+            gated_invalidate,
+        ):
+            delete_task = asyncio.create_task(vectorstore.delete_document("notes.md"))
+            self.assertTrue(await asyncio.to_thread(first_invalidation.wait, 2))
+
+            await vectorstore._get_bm25_index(collection, "notes.md")
             self.assertIn("notes.md", vectorstore._bm25_cache)
 
-            client.delete_collection.side_effect = None
-            await vectorstore.delete_document("notes.md")
-            self.assertNotIn("notes.md", vectorstore._bm25_cache)
+            release_delete.set()
+            self.assertEqual(await delete_task, "material_deleted")
+
+        self.assertGreaterEqual(invalidation_calls, 2)
+        self.assertNotIn("notes.md", vectorstore._bm25_cache)
 
 
 if __name__ == "__main__":

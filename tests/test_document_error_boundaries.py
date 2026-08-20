@@ -198,8 +198,22 @@ class TestUnicodeDocumentStorage(unittest.IsolatedAsyncioTestCase):
                 # Rejecting the internal alias must not affect the public id.
                 await vectorstore.ensure_document_available(filename)
 
-                await vectorstore.delete_document(filename)
+                status = await vectorstore.delete_document(filename)
+                replay = await vectorstore.delete_document(filename)
                 self.assertEqual(await vectorstore.get_all_document(), [])
+                tombstone = client.get_collection(internal_id)
+                self.assertEqual(status, "material_deleted")
+                self.assertEqual(replay, "material_deleted")
+                self.assertEqual(tombstone.count(), 0)
+                self.assertEqual(tombstone.metadata["ingest_status"], "deleted")
+                with self.assertRaises(NotFoundError):
+                    await vectorstore.ensure_document_available(filename)
+                with self.assertRaises(vectorstore.DocumentAlreadyExistsError):
+                    await vectorstore.deal_document(
+                        filename,
+                        filename,
+                        ["不能复用同名材料"],
+                    )
 
 
 if __name__ == "__main__":

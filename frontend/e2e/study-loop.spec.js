@@ -1724,13 +1724,14 @@ test('quiz returns to setup instead of retrying a terminal answer conflict', asy
 
 test('document upload ignores click and drop while the current upload is in progress', async ({ page }) => {
   let uploadRequests = 0
+  let uploaded = false
   let releaseUpload
   let markUploadStarted
   const uploadGate = new Promise(resolve => { releaseUpload = resolve })
   const uploadStarted = new Promise(resolve => { markUploadStarted = resolve })
   const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
     if (request.method() === 'GET' && path === '/documents') {
-      return { body: { documents: [] } }
+      return { body: { documents: uploaded ? ['first.md'] : [] } }
     }
     if (request.method() === 'POST' && path === '/documents/upload') {
       uploadRequests += 1
@@ -1738,6 +1739,7 @@ test('document upload ignores click and drop while the current upload is in prog
         markUploadStarted()
         await uploadGate
       }
+      uploaded = true
       return { body: { document_id: 'first.md', chunks: 1 } }
     }
     return null
@@ -2231,6 +2233,214 @@ test('document delete control keeps a mobile-sized touch target', async ({ page 
 
   expect(box.width).toBeGreaterThanOrEqual(44)
   expect(box.height).toBeGreaterThanOrEqual(44)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('document deletion requires an explicit material-only confirmation', async ({ page }) => {
+  let deleted = false
+  let deleteRequests = 0
+  let releaseDelete
+  const deleteGate = new Promise(resolve => { releaseDelete = resolve })
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: deleted ? [] : ['notes.md'] } }
+    }
+    if (request.method() === 'DELETE' && path === '/documents/notes.md') {
+      deleteRequests += 1
+      deleted = true
+      await deleteGate
+      return {
+        body: {
+          status: 'material_deleted',
+          document_id: 'notes.md',
+          scope: 'material_only',
+          learning_data_retained: true,
+          document_id_reusable: false,
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/documents')
+  const deleteButton = page.getByRole('button', { name: '删除文档 notes.md' })
+  await deleteButton.click()
+
+  const dialog = page.getByRole('alertdialog', { name: '确认删除“notes.md”？' })
+  await expect(dialog).toBeVisible()
+  await expect(page.locator('.documents-content')).toHaveAttribute('aria-hidden', 'true')
+  await expect(page.locator('.documents-content')).toHaveJSProperty('inert', true)
+  await expect(dialog).toContainText('这不是隐私数据彻底清除')
+  await expect(dialog).toContainText('之后如需重新上传，请先重命名文件')
+  expect(deleteRequests).toBe(0)
+
+  await page.keyboard.press('Escape')
+  await expect(dialog).toHaveCount(0)
+  await expect(page.locator('.documents-content')).not.toHaveAttribute('aria-hidden')
+  await expect(page.locator('.documents-content')).toHaveJSProperty('inert', false)
+  await expect(deleteButton).toBeFocused()
+  expect(deleteRequests).toBe(0)
+
+  await deleteButton.click()
+  await page.getByRole('button', { name: '确认仅删除材料' }).click()
+  await expect(dialog).toHaveAttribute('aria-busy', 'true')
+  await expect(dialog.getByRole('button', { name: '取消' })).toBeDisabled()
+  await expect(dialog.getByRole('button', { name: '正在删除材料…' })).toBeDisabled()
+  await page.keyboard.press('Tab')
+  await expect(dialog).toBeFocused()
+  releaseDelete()
+  await expect(page.getByRole('heading', { name: '确认删除“notes.md”？' })).toHaveCount(0)
+  await expect(page.getByText('notes.md', { exact: true })).toHaveCount(0)
+  await expect(page.locator('.documents-status')).toContainText('学习记录仍保留')
+  expect(deleteRequests).toBe(1)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('document deletion reconciles a lost success response with the durable tombstone', async ({ page }) => {
+  let deleted = false
+  let deleteRequests = 0
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: deleted ? [] : ['notes.md'] } }
+    }
+    if (request.method() === 'DELETE' && path === '/documents/notes.md') {
+      deleteRequests += 1
+      deleted = true
+      if (deleteRequests === 1) {
+        return { status: 503, body: { detail: '响应在提交后丢失' } }
+      }
+      return {
+        body: {
+          status: 'material_deleted',
+          document_id: 'notes.md',
+          scope: 'material_only',
+          learning_data_retained: true,
+          document_id_reusable: false,
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/documents')
+  await page.getByRole('button', { name: '删除文档 notes.md' }).click()
+  await page.getByRole('button', { name: '确认仅删除材料' }).click()
+
+  await expect(page.getByText('notes.md', { exact: true })).toHaveCount(0)
+  await expect(page.locator('.documents-status')).toContainText('学习记录仍保留')
+  expect(deleteRequests).toBe(2)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('document deletion never leaves a hidden tombstone displayed as indexed', async ({ page }) => {
+  let hidden = false
+  let deleteRequests = 0
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: hidden ? [] : ['notes.md'] } }
+    }
+    if (request.method() === 'DELETE' && path === '/documents/notes.md') {
+      hidden = true
+      deleteRequests += 1
+      return { status: 503, body: { detail: '删除收尾暂时失败' } }
+    }
+    return null
+  })
+
+  await page.goto('/documents')
+  await page.getByRole('button', { name: '删除文档 notes.md' }).click()
+  await page.getByRole('button', { name: '确认仅删除材料' }).click()
+
+  const dialog = page.getByRole('alertdialog', { name: '确认删除“notes.md”？' })
+  await expect(dialog.getByRole('alert')).toContainText('删除状态尚未确认')
+  await expect(page.getByRole('heading', { name: 'notes.md', level: 3 })).toHaveCount(0)
+  await expect(page.locator('.documents-status')).toContainText('删除收尾尚未确认')
+  expect(deleteRequests).toBe(2)
+
+  await dialog.getByRole('button', { name: '取消' }).click()
+  await expect(dialog).toHaveCount(0)
+  await expect(page.getByRole('heading', { name: 'notes.md', level: 3 })).toHaveCount(0)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('document upload reconciles a lost response while a StrictMode list request finishes late', async ({ page }) => {
+  let uploaded = false
+  let getRequests = 0
+  let releaseOldList
+  const oldList = new Promise(resolve => { releaseOldList = resolve })
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      getRequests += 1
+      if (getRequests === 1) {
+        await oldList
+        return { body: { documents: [] } }
+      }
+      return { body: { documents: uploaded ? ['notes.md'] : [] } }
+    }
+    if (request.method() === 'POST' && path === '/documents/upload') {
+      uploaded = true
+      return { status: 503, body: { detail: '响应在提交后丢失' } }
+    }
+    return null
+  })
+
+  await page.goto('/documents')
+  const fileInput = page.locator('input[type="file"]')
+  // StrictMode's first mount request is intentionally held open; the second
+  // authoritative request makes the page safe to use before upload starts.
+  await expect(fileInput).toBeEnabled()
+  await fileInput.setInputFiles({
+    name: 'notes.md',
+    mimeType: 'text/markdown',
+    buffer: Buffer.from('# notes'),
+  })
+
+  await expect(page.getByText('完成，已从文档列表同步确认')).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'notes.md' })).toBeVisible()
+  releaseOldList()
+  await expect.poll(() => getRequests).toBeGreaterThanOrEqual(2)
+  await expect(page.getByRole('heading', { name: 'notes.md' })).toBeVisible()
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('document upload waits for the authoritative list and never treats a 409 as success', async ({ page }) => {
+  let releaseList
+  let uploadRequests = 0
+  const initialList = new Promise(resolve => { releaseList = resolve })
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      await initialList
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (request.method() === 'POST' && path === '/documents/upload') {
+      uploadRequests += 1
+      return { status: 409, body: { detail: '文档已存在，请重命名后上传' } }
+    }
+    return null
+  })
+
+  await page.goto('/documents')
+  const fileInput = page.locator('input[type="file"]')
+  await expect(fileInput).toBeDisabled()
+  await expect(page.getByRole('button', { name: '选择要上传的学习材料' })).toHaveAttribute(
+    'aria-disabled',
+    'true',
+  )
+  expect(uploadRequests).toBe(0)
+
+  releaseList()
+  await expect(page.getByRole('heading', { name: 'notes.md' })).toBeVisible()
+  await expect(fileInput).toBeEnabled()
+  await fileInput.setInputFiles({
+    name: 'notes.md',
+    mimeType: 'text/markdown',
+    buffer: Buffer.from('# different notes'),
+  })
+
+  await expect(page.getByRole('alert')).toContainText('文档已存在，请重命名后上传')
+  await expect(page.getByText('完成，已从文档列表同步确认')).toHaveCount(0)
+  await expect(page.getByRole('heading', { name: 'notes.md' })).toBeVisible()
+  expect(uploadRequests).toBe(1)
   expect(unexpectedRequests).toEqual([])
 })
 

@@ -3,6 +3,7 @@ import hashlib
 import logging
 import os
 import re
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -53,6 +54,10 @@ class DocumentAlreadyExistsError(Exception):
     """A published collection already owns this document id."""
 
 
+class DocumentOwnerMismatchError(NotFoundError):
+    """A storage collection exists, but not for the requested public id."""
+
+
 def _storage_document_id(document_id: str) -> str:
     """Map a public filename to a deterministic Chroma-safe collection name.
 
@@ -75,16 +80,27 @@ def _require_public_document_owner(collection, document_id: str):
         or collection.name
     )
     if public_id != document_id:
-        raise NotFoundError(f"Document {document_id!r} not found")
+        raise DocumentOwnerMismatchError(f"Document {document_id!r} not found")
     return collection
 
 
-async def _get_public_document_collection(document_id: str):
+async def _get_public_document_collection(
+    document_id: str,
+    *,
+    include_tombstone: bool = False,
+):
     collection = await asyncio.to_thread(
         chromadb_client.get_collection,
         name=_storage_document_id(document_id),
     )
-    return _require_public_document_owner(collection, document_id)
+    collection = _require_public_document_owner(collection, document_id)
+    metadata = collection.metadata if isinstance(collection.metadata, dict) else {}
+    if (
+        not include_tombstone
+        and metadata.get("ingest_status") in {"deleting", "deleted"}
+    ):
+        raise NotFoundError(f"Document {document_id!r} not found")
+    return collection
 
 
 async def ensure_document_available(document_id: str) -> None:
@@ -138,6 +154,10 @@ async def _ensure_document_slot_available(document_id: str) -> None:
 
     metadata = existing.metadata if isinstance(existing.metadata, dict) else {}
     status = metadata.get("ingest_status")
+    if status in {"deleting", "deleted"}:
+        raise DocumentAlreadyExistsError(
+            f"文档 '{document_id}' 已关联保留的学习历史，不能同名重传，请先重命名文件"
+        )
     count = await asyncio.to_thread(existing.count)
     removable = (status == "indexing" and _staging_is_stale(metadata)) or (
         status != "indexed" and count == 0
@@ -253,12 +273,24 @@ async def deal_document(document_id: str, filename: str, chunks: list[str]):
     finally:
         _active_staging_names.discard(staging_name)
 
-    _bm25_cache.pop(document_id, None)  # 文档内容已变,BM25 缓存失效
+    _invalidate_bm25_cache(document_id)  # 文档内容已变,BM25 缓存失效
     return len(chunks)
 
 
 # ── BM25 索引缓存(按 document_id),避免每次查询全量 collection.get + 重建索引 ──────
 _bm25_cache: dict[str, dict] = {}
+_bm25_cache_lock = threading.Lock()
+_bm25_cache_epoch = 0
+_bm25_document_versions: dict[str, int] = {}
+
+
+def _invalidate_bm25_cache(document_id: str) -> None:
+    """Fence in-flight builders, then remove every cached copy for a document."""
+    with _bm25_cache_lock:
+        _bm25_document_versions[document_id] = (
+            _bm25_document_versions.get(document_id, 0) + 1
+        )
+        _bm25_cache.pop(document_id, None)
 
 
 async def _get_bm25_index(collection, document_id: str) -> dict:
@@ -267,9 +299,12 @@ async def _get_bm25_index(collection, document_id: str) -> dict:
     缓存在 deal_document / delete_document 时按 document_id 失效。
     分词由 services.tokenization 统一提供，确保索引和查询使用同一规则。
     """
-    cached = _bm25_cache.get(document_id)
-    if cached is not None:
-        return cached
+    with _bm25_cache_lock:
+        cached = _bm25_cache.get(document_id)
+        cache_epoch = _bm25_cache_epoch
+        document_version = _bm25_document_versions.get(document_id, 0)
+        if cached is not None:
+            return cached
     all_results = await asyncio.to_thread(collection.get, include=["documents"])
     all_docs = all_results["documents"]
     all_ids = all_results["ids"]
@@ -280,13 +315,27 @@ async def _get_bm25_index(collection, document_id: str) -> dict:
         "all_ids": all_ids,
         "tokenizer_id": BM25_TOKENIZER_ID,
     }
-    _bm25_cache[document_id] = entry
+    # A delete can run while collection.get/build_bm25_index is in flight. The
+    # public collection check prevents a deleting/deleted collection from being
+    # published back into process memory; the lifecycle version closes the
+    # final validate→cache race with delete_document.
+    await _get_public_document_collection(document_id)
+    with _bm25_cache_lock:
+        if (
+            cache_epoch != _bm25_cache_epoch
+            or document_version != _bm25_document_versions.get(document_id, 0)
+        ):
+            raise NotFoundError(f"Document {document_id!r} not found")
+        _bm25_cache[document_id] = entry
     return entry
 
 
 def clear_bm25_cache() -> None:
     """清空 BM25 缓存（测试用 / 手动失效）。"""
-    _bm25_cache.clear()
+    global _bm25_cache_epoch
+    with _bm25_cache_lock:
+        _bm25_cache_epoch += 1
+        _bm25_cache.clear()
 
 
 async def query_document(document_id: str, query: str):
@@ -478,6 +527,23 @@ async def get_all_document():
     for collection in collections:
         metadata = collection.metadata if isinstance(collection.metadata, dict) else {}
         status = metadata.get("ingest_status")
+        if status == "deleting":
+            public_id = (
+                metadata.get("source_document_id")
+                or metadata.get("source_filename")
+                or collection.name
+            )
+            try:
+                await delete_document(public_id)
+            except Exception as cleanup_error:
+                logger.warning(
+                    "[vectorstore] deleting tombstone cleanup deferred for %s: %s",
+                    public_id,
+                    type(cleanup_error).__name__,
+                )
+            continue
+        if status == "deleted":
+            continue
         if status == "indexing":
             if collection.name not in _active_staging_names and _staging_is_stale(
                 metadata, now
@@ -515,10 +581,75 @@ async def get_all_document():
     return visible
 
 
-async def delete_document(document_id: str):
-    collection = await _get_public_document_collection(document_id)
-    await asyncio.to_thread(
-        chromadb_client.delete_collection,
-        name=collection.name,
+def _deleted_tombstone_metadata(document_id: str) -> dict:
+    return {
+        "ingest_status": "deleted",
+        "source_document_id": document_id,
+        "source_filename": document_id,
+        "deleted_at": int(time.time()),
+    }
+
+
+def _delete_document_sync(document_id: str) -> str:
+    storage_id = _storage_document_id(document_id)
+    _invalidate_bm25_cache(document_id)
+    try:
+        collection = chromadb_client.get_collection(name=storage_id)
+    except NotFoundError:
+        # Old releases physically removed collections. Reserve the public id
+        # even when only retained learning history remains, so a later upload
+        # cannot silently inherit that history. A concurrent create/upload is
+        # resolved by re-reading and deleting the one canonical collection.
+        try:
+            chromadb_client.create_collection(
+                name=storage_id,
+                metadata=_deleted_tombstone_metadata(document_id),
+            )
+            return "material_deleted"
+        except Exception as create_error:
+            try:
+                collection = chromadb_client.get_collection(name=storage_id)
+            except NotFoundError:
+                raise create_error
+
+    collection = _require_public_document_owner(collection, document_id)
+    metadata = collection.metadata if isinstance(collection.metadata, dict) else {}
+    if metadata.get("ingest_status") == "deleted" and collection.count() == 0:
+        return "material_deleted"
+
+    # Keep a durable tombstone because retained learner history is keyed by the
+    # public document id. Reusing the same filename for different content would
+    # silently attach old mastery, errors and durable sessions to the new file.
+    deleting_metadata = {
+        **metadata,
+        "ingest_status": "deleting",
+        "source_document_id": document_id,
+        "source_filename": metadata.get("source_filename") or document_id,
+    }
+    collection.modify(metadata=deleting_metadata)
+    # Close the invalidate→metadata transition window: a builder that started
+    # after the first fence could still validate the formerly indexed
+    # collection and publish old text before this modify completed.
+    _invalidate_bm25_cache(document_id)
+
+    ids = list((collection.get(include=[]).get("ids") or []))
+    for start in range(0, len(ids), 1000):
+        collection.delete(ids=ids[start : start + 1000])
+    if collection.count() != 0:
+        raise RuntimeError("document tombstone still contains indexed chunks")
+
+    collection.modify(
+        metadata={
+            **deleting_metadata,
+            "ingest_status": "deleted",
+            "deleted_at": int(time.time()),
+        }
     )
-    _bm25_cache.pop(document_id, None)  # 仅在存储删除成功后失效
+    return "material_deleted"
+
+
+async def delete_document(document_id: str) -> str:
+    # Chroma is synchronous. Drain the complete deleting→empty→deleted
+    # transition before propagating cancellation so a retry always has a
+    # durable state from which it can finish.
+    return await _run_blocking_to_completion(_delete_document_sync, document_id)

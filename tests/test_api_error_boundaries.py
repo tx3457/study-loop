@@ -712,7 +712,7 @@ class TestApiErrorBoundaries(unittest.TestCase):
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json(), {"detail": "文档已存在"})
 
-    def test_delete_reports_missing_and_storage_failure(self):
+    def test_delete_reports_owner_mismatch_and_storage_failure(self):
         with patch.object(
             documents_router,
             "delete_document",
@@ -721,6 +721,24 @@ class TestApiErrorBoundaries(unittest.TestCase):
             response = self.client.delete("/documents/missing.md")
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json(), {"detail": "文档不存在"})
+
+        with patch.object(
+            documents_router,
+            "delete_document",
+            AsyncMock(return_value="material_deleted"),
+        ):
+            response = self.client.delete("/documents/notes.md")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {
+                "status": "material_deleted",
+                "document_id": "notes.md",
+                "scope": "material_only",
+                "learning_data_retained": True,
+                "document_id_reusable": False,
+            },
+        )
 
         with patch.object(
             documents_router,
