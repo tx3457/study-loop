@@ -44,6 +44,7 @@ def _live_server_configs() -> list[StdioMCPServerConfig]:
             server_name="ddg",
             command=uvx,
             args=["duckduckgo-mcp-server"],
+            read_only_tools=frozenset({"search", "fetch_content"}),
         ),
     ]
 
@@ -69,9 +70,18 @@ async def connect_and_register_all() -> list[str]:
             names = await register_mcp_tools_to_registry(client)
             _clients.append(client)
             registered.extend(names)
-            logger.info(f"[mcp_servers] live server '{cfg.server_name}' 接入 → {names}")
+            logger.info(
+                "[mcp_servers] live server connected: server=%s tool_count=%d",
+                cfg.server_name,
+                len(names),
+            )
         except Exception as e:
-            logger.warning(f"[mcp_servers] 连接 '{cfg.server_name}' 失败（降级，无联网）: {e}")
+            logger.warning(
+                "[mcp_servers] 连接失败（降级，无联网）: "
+                "server=%s error_type=%s",
+                cfg.server_name,
+                type(e).__name__,
+            )
             try:
                 await client.cleanup()
             except Exception:
@@ -85,5 +95,8 @@ async def cleanup_all() -> None:
         try:
             await client.cleanup()
         except Exception as e:
-            logger.debug(f"[mcp_servers] cleanup 忽略: {e}")
+            logger.debug(
+                "[mcp_servers] cleanup 忽略: error_type=%s",
+                type(e).__name__,
+            )
     _clients.clear()

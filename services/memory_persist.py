@@ -98,7 +98,10 @@ def _save_snapshot_unlocked(path: str | None = None) -> bool:
             ensure_ascii=False,
         )
     except Exception as e:
-        logger.warning(f"[memory_persist] dump store failed: {e}")
+        logger.warning(
+            "[memory_persist] dump store failed: error_type=%s",
+            type(e).__name__,
+        )
         return False
 
     try:
@@ -116,7 +119,10 @@ def _save_snapshot_unlocked(path: str | None = None) -> bool:
         logger.info(f"[memory_persist] saved {len(items)} items → {path}")
         return True
     except Exception as e:
-        logger.warning(f"[memory_persist] save_snapshot failed: {e}")
+        logger.warning(
+            "[memory_persist] save_snapshot failed: error_type=%s",
+            type(e).__name__,
+        )
         return False
 
 
@@ -138,7 +144,10 @@ def load_snapshot(path: str | None = None) -> int:
         with open(path, encoding="utf-8") as f:
             payload = json.load(f)
     except Exception as e:
-        logger.warning(f"[memory_persist] load_snapshot read failed: {e}")
+        logger.warning(
+            "[memory_persist] load_snapshot read failed: error_type=%s",
+            type(e).__name__,
+        )
         return 0
 
     items = payload.get("items", []) if isinstance(payload, dict) else []
@@ -149,6 +158,9 @@ def load_snapshot(path: str | None = None) -> int:
                 store.put(tuple(rec["ns"]), rec["key"], rec["value"])
                 n += 1
             except Exception as e:
-                logger.warning(f"[memory_persist] put failed for {rec.get('ns')}: {e}")
+                logger.warning(
+                    "[memory_persist] put failed: error_type=%s",
+                    type(e).__name__,
+                )
     logger.info(f"[memory_persist] loaded {n} items ← {path}")
     return n

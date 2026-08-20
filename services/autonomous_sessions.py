@@ -310,8 +310,11 @@ class AutonomousSessionStore:
                 await self.cancel(conversation_id, claim_token)
         except asyncio.CancelledError:
             raise
-        except Exception:
-            logger.exception("late Autonomous claim cleanup failed")
+        except Exception as exc:
+            logger.error(
+                "late Autonomous claim cleanup failed: error_type=%s",
+                type(exc).__name__,
+            )
 
     async def _drain_cancelled_worker(
         self, worker: asyncio.Task, *, track_on_timeout: bool = True
@@ -342,8 +345,11 @@ class AutonomousSessionStore:
                 completed.result()
             except asyncio.CancelledError:
                 logger.warning("background Autonomous store worker was cancelled")
-            except Exception:
-                logger.exception("background Autonomous store worker failed")
+            except Exception as exc:
+                logger.error(
+                    "background Autonomous store worker failed: error_type=%s",
+                    type(exc).__name__,
+                )
 
         worker.add_done_callback(on_done)
 

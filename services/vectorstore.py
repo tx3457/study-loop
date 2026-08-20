@@ -264,10 +264,8 @@ async def deal_document(document_id: str, filename: str, chunks: list[str]):
                 chromadb_client.delete_collection(name=cleanup_name)
             except Exception as cleanup_error:
                 logger.error(
-                    "[vectorstore] staging cleanup failure for %s: %s",
-                    cleanup_name,
-                    cleanup_error,
-                    exc_info=True,
+                    "[vectorstore] staging cleanup failure: error_type=%s",
+                    type(cleanup_error).__name__,
                 )
         raise
     finally:
@@ -421,7 +419,10 @@ async def hybrid_query_document(
             top_ids = [r[2] for r in reranked]
             return {"documents": [top_docs], "ids": [top_ids]}
         except RerankerUnavailable as e:
-            logger.warning(f"[hybrid] reranker unavailable, fallback to RRF-only: {e}")
+            logger.warning(
+                "[hybrid] reranker unavailable; fallback to RRF-only: error_type=%s",
+                type(e).__name__,
+            )
             # 降级:用 RRF top n_results
 
     # 5. 不精排 / 精排失败 → 用 RRF top n_results
@@ -482,7 +483,8 @@ async def retrieve_with_rewrite(
     for r in results:
         if isinstance(r, Exception):
             logger.warning(
-                f"[retrieve_with_rewrite] one sub-query failed, skipped: {r}"
+                "[retrieve_with_rewrite] one sub-query failed; skipped: error_type=%s",
+                type(r).__name__,
             )
             continue
         docs = r.get("documents", [[]])[0] or []
@@ -556,9 +558,8 @@ async def get_all_document():
                     pass
                 except Exception as cleanup_error:
                     logger.error(
-                        "[vectorstore] stale staging cleanup failure for %s: %s",
-                        collection.name,
-                        cleanup_error,
+                        "[vectorstore] stale staging cleanup failure: error_type=%s",
+                        type(cleanup_error).__name__,
                     )
             continue
 
@@ -572,9 +573,8 @@ async def get_all_document():
                 pass
             except Exception as cleanup_error:
                 logger.error(
-                    "[vectorstore] legacy ghost cleanup failure for %s: %s",
-                    collection.name,
-                    cleanup_error,
+                    "[vectorstore] legacy ghost cleanup failure: error_type=%s",
+                    type(cleanup_error).__name__,
                 )
             continue
         visible.append(collection)

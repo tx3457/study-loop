@@ -77,6 +77,7 @@ async function mockApi(page, handler) {
       await route.fulfill({
         status: response.status || 200,
         contentType: 'application/json',
+        headers: response.headers,
         body: JSON.stringify(response.body),
       })
     }
@@ -2837,6 +2838,27 @@ test('document load failure is recoverable and never shown as an empty library',
   await expect(page.getByText('还没有文档')).toBeVisible()
   await expect(page.getByRole('alert')).toHaveCount(0)
   expect(documentRequests).toBeGreaterThanOrEqual(2)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('API errors show the safe request number for support correlation', async ({ page }) => {
+  const requestId = `req_${'7'.repeat(32)}`
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return {
+        status: 503,
+        headers: { 'X-Request-ID': requestId },
+        body: { detail: '文档服务暂时不可用' },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/documents')
+
+  const alert = page.getByRole('alert')
+  await expect(alert).toContainText('文档服务暂时不可用')
+  await expect(alert).toContainText(`请求编号：${requestId}`)
   expect(unexpectedRequests).toEqual([])
 })
 

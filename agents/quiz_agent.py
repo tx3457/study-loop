@@ -49,8 +49,10 @@ async def sufficiency_check(state: QuizAgentState) -> dict:
     weak_points = state.get("weak_points", []) or []
     passed, reason = check_sufficiency(chunks, weak_points)
     logger.info(
-        f"[quiz_agent] sufficiency: passed={passed}, reason={reason}, "
-        f"chunks={len(chunks)}, weak_points={len(weak_points)}"
+        "[quiz_agent] sufficiency: passed=%s chunks=%d weak_points=%d",
+        passed,
+        len(chunks),
+        len(weak_points),
     )
     return {"sufficiency_passed": passed, "sufficiency_reason": reason}
 
@@ -163,7 +165,7 @@ async def review(state: QuizAgentState) -> dict:
     qtype = state.get("type", "choice")
     passed, reason = _validate_quiz_format(questions, qtype)
     if not passed:
-        logger.warning(f"[quiz_agent] format check failed: {reason}")
+        logger.warning("[quiz_agent] format check failed")
     return {"review_passed": passed}
 
 

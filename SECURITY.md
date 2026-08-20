@@ -24,6 +24,15 @@ content when enabled. Review the provider's data policy before uploading
 sensitive material. Tracing and live MCP integrations are disabled in the
 example configuration.
 
+Public HTTP and SSE failures use fixed error codes and do not serialize raw
+provider, parser, MCP, or storage exception text. Every HTTP response carries a
+strictly validated `X-Request-ID` for correlation; runtime exception logs retain
+the request or component context and exception type, but not the exception
+message or traceback. Application logs can still contain ordinary operational
+metadata and must remain access-controlled.
+The bundled Uvicorn process and Nginx `/api/` proxy disable their raw-URL access
+logs; the application instead records a route-template, status, and request ID.
+
 ## Known boundaries
 
 - Tool schemas constrain what the model is asked to emit. Required arguments,

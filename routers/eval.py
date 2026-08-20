@@ -36,5 +36,5 @@ async def ab_experiment(config: ABConfig):
     流程：检索 → 并发生成两组题目 → 并发 LLM-as-Judge → 聚合对比。
     调用依赖外部 LLM，前端应显示 loading 状态。
     """
-    logger.info(f"[eval] A/B experiment: {config.experiment}, doc={config.document_id}")
+    logger.info("[eval] A/B experiment started: experiment=%s", config.experiment)
     return await run_ab_experiment(config)

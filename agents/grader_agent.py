@@ -7,7 +7,7 @@ GraderAgent 的职责是将批改结果写入共享状态（grading_report），
 
 失败处理：
   Transient error → with_retry 指数退避重试（最多 3 次）
-  RetryExhausted  → 抛出 ValueError，由 main.py 的 handler 返回 503
+  RetryExhausted  → 保留原异常，由 main.py 的 handler 返回 503
 """
 import logging
 from langgraph.graph import StateGraph, START, END
@@ -25,8 +25,8 @@ async def _grade(state: OrchestratorState) -> dict:
     try:
         report = await with_retry(lambda: grade_session(state["session_id"]))
     except RetryExhausted:
-        logger.error("[grader_agent] grade retries exhausted for session %s", state["session_id"])
-        raise ValueError("AI 批改服务暂时不可用，请稍后重试")
+        logger.error("[grader_agent] grade retries exhausted")
+        raise
     return {"grading_report": report.model_dump()}
 
 

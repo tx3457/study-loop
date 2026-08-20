@@ -6,6 +6,29 @@
  */
 
 const BASE_URL = import.meta.env.VITE_API_URL || '/api'
+const REQUEST_ID_PATTERN = /^req_[0-9a-f]{32}$/
+
+function responseRequestId(response, body = null) {
+  const headerValue = response?.headers?.get?.('X-Request-ID')
+  const bodyValue = body && typeof body === 'object' ? body.request_id : null
+  return [headerValue, bodyValue].find(
+    value => typeof value === 'string' && REQUEST_ID_PATTERN.test(value),
+  ) || null
+}
+
+function apiError(response, body, fallback) {
+  const rawMessage = body?.detail || body?.error || fallback
+  const message = typeof rawMessage === 'string' ? rawMessage : fallback
+  const requestId = responseRequestId(response, body)
+  const error = new Error(
+    requestId ? `${message}（请求编号：${requestId}）` : message,
+  )
+  error.status = response?.status
+  error.code = body?.code
+  error.reason = body?.reason
+  error.requestId = requestId
+  return error
+}
 
 export function createIdempotencyKey() {
   const cryptoApi = globalThis.crypto
@@ -46,11 +69,7 @@ async function request(path, options = {}) {
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
-    const error = new Error(body.detail || body.error || `请求失败 (${res.status})`)
-    error.status = res.status
-    error.code = body.code
-    error.reason = body.reason
-    throw error
+    throw apiError(res, body, `请求失败 (${res.status})`)
   }
 
   return res.json()
@@ -348,9 +367,10 @@ export async function streamAgent(params, onEvent) {
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
-    throw new Error(body.detail || `Stream 请求失败 (${res.status})`)
+    throw apiError(res, body, `Stream 请求失败 (${res.status})`)
   }
 
+  const responseRequestIdValue = responseRequestId(res)
   const reader = res.body.getReader()
   const decoder = new TextDecoder()
   let buffer = ''
@@ -365,12 +385,27 @@ export async function streamAgent(params, onEvent) {
 
     for (const line of lines) {
       if (line.startsWith('data: ')) {
+        let event
         try {
-          const event = JSON.parse(line.slice(6))
-          onEvent(event)
-          if (event.type === 'error') throw new Error(event.detail)
-        } catch (e) {
-          if (e.message !== line.slice(6)) throw e // JSON parse error 忽略，业务 error 抛出
+          event = JSON.parse(line.slice(6))
+        } catch {
+          continue
+        }
+        onEvent(event)
+        if (event.type === 'error') {
+          const requestId = (
+            typeof event.request_id === 'string'
+            && REQUEST_ID_PATTERN.test(event.request_id)
+          ) ? event.request_id : responseRequestIdValue
+          const message = typeof event.detail === 'string'
+            ? event.detail
+            : 'Agent 流式执行失败'
+          const error = new Error(
+            requestId ? `${message}（请求编号：${requestId}）` : message,
+          )
+          error.code = event.code
+          error.requestId = requestId
+          throw error
         }
       }
     }

@@ -486,7 +486,7 @@ async def teaching_supervisor(state: dict) -> Command:
     decision: SupervisorDecision
     if state.get("mode") == "oneshot":
         decision = _oneshot_next(state)
-        logger.info(f"[supervisor] oneshot → {decision.next_agent} | {decision.reason[:50]}")
+        logger.info("[supervisor] oneshot: next_agent=%s", decision.next_agent)
         decision = _normalize_decision(decision)
         return _oneshot_command(state, decision, handoffs)
 
@@ -494,7 +494,7 @@ async def teaching_supervisor(state: dict) -> Command:
     #     assistant 内部用 interrupt 处理 ask_user（HITL）；assistant_done 置位 → 收尾。
     if state.get("mode") == "assist":
         decision = _assist_next(state)
-        logger.info(f"[supervisor] assist → {decision.next_agent} | {decision.reason[:50]}")
+        logger.info("[supervisor] assist: next_agent=%s", decision.next_agent)
         decision = _normalize_decision(decision)
         return _oneshot_command(state, decision, handoffs)
 
@@ -508,7 +508,11 @@ async def teaching_supervisor(state: dict) -> Command:
     # ②③ 决策：rule 模式 / llm 模式（失败回退 rule）
     if supervisor_mode() == "rule":
         decision = _rule_fallback_next(state)
-        logger.info(f"[supervisor] rule mode → {decision.next_agent} | {decision.action} | {decision.reason[:50]}")
+        logger.info(
+            "[supervisor] rule mode: next_agent=%s action=%s",
+            decision.next_agent,
+            decision.action,
+        )
     else:
         try:
             client = state.get("_client")  # 测试可经 state 注入 mock client（默认 None 用模块级）
@@ -529,11 +533,16 @@ async def teaching_supervisor(state: dict) -> Command:
                 raise ValueError("parsed supervisor decision is None")
             decision = _normalize_decision(parsed)
             logger.info(
-                f"[supervisor] llm → {decision.next_agent} | {decision.action} | "
-                f"diff={decision.difficulty_score:.2f} | {decision.reason[:50]}"
+                "[supervisor] llm: next_agent=%s action=%s difficulty=%.2f",
+                decision.next_agent,
+                decision.action,
+                decision.difficulty_score,
             )
         except Exception as e:
-            logger.warning(f"[supervisor] llm_parse failed, rule fallback: {e}")
+            logger.warning(
+                "[supervisor] llm_parse failed; rule fallback: error_type=%s",
+                type(e).__name__,
+            )
             decision = _rule_fallback_next(state)
 
     decision = _normalize_decision(decision)

@@ -223,7 +223,10 @@ async def submit_answer(
                 await _write_back_profile(session, session_id)
                 session.profile_written = True
             except Exception as e:
-                logger.warning(f"[session] 画像写回失败（不影响答题结果）: {e}")
+                logger.warning(
+                    "[session] 画像写回失败（不影响答题结果）: error_type=%s",
+                    type(e).__name__,
+                )
 
     return response
 

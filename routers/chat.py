@@ -18,6 +18,7 @@ from services.idempotency import (
     normalize_idempotency_key,
     request_idempotency,
 )
+from services.request_context import current_request_id, safe_sse_error
 
 conversations: dict[str, list] = {}
 router = APIRouter()
@@ -35,7 +36,23 @@ async def llm_service_structured(request:ChatRequest):
 @router.post("/chat/stream")
 async def llm_service_stream(request:ChatRequest):
     stream = await chat_stream(request.message)
-    return StreamingResponse(stream, media_type="text/event-stream")
+
+    async def _safe_stream():
+        try:
+            async for event in stream:
+                yield event
+        except Exception as exc:
+            logger.error(
+                "[chat/stream] execution failed request_id=%s error_type=%s",
+                current_request_id(),
+                type(exc).__name__,
+            )
+            yield safe_sse_error(
+                detail="模型流式响应失败，请稍后重试",
+                code="chat_stream_failed",
+            )
+
+    return StreamingResponse(_safe_stream(), media_type="text/event-stream")
 
 @router.post("/chat/history")
 async def llm_service_history(request:HistoryRequest):
@@ -95,9 +112,12 @@ async def _execute_chat_with_tools(
       → 执行工具 → LLM 生成包含题目的自然语言回复
     """
     # ── 第 1+2 层：Prompt Injection 检测 ──
-    is_injection, reason = await check_injection(req.message)
+    is_injection, _ = await check_injection(req.message)
     if is_injection:
-        return ToolChatResponse(response=f"输入安全检查未通过：{reason}", tools_called=[])
+        return ToolChatResponse(
+            response="输入安全检查未通过，请调整请求后重试。",
+            tools_called=[],
+        )
 
     # 构建 context：注入 user_id 和 document_id 供 LLM 填充 tool 参数
     context_hint = f"\n当前用户 ID: {req.user_id}"
@@ -132,9 +152,9 @@ async def _execute_chat_with_tools(
         # 无 tool_calls → LLM 直接回复，执行第 4 层输出检查后返回
         if not round_result.has_tool_calls:
             content = round_result.content or ""
-            is_leak, leak_reason = check_output_leak(content)
+            is_leak, _ = check_output_leak(content)
             if is_leak:
-                logger.warning(f"[chat/tools] output leak blocked: {leak_reason}")
+                logger.warning("[chat/tools] output leak blocked")
                 content = "回复内容包含敏感信息，已拦截。请重新提问。"
             return ToolChatResponse(response=content, tools_called=tools_called)
 
@@ -149,6 +169,10 @@ async def _execute_chat_with_tools(
          if isinstance(m, dict) and m.get("role") == "assistant" and m.get("content")),
         "处理轮次超限，请简化请求后重试。",
     )
+    is_leak, _ = check_output_leak(last_content)
+    if is_leak:
+        logger.warning("[chat/tools] truncated output leak blocked")
+        last_content = "回复内容包含敏感信息，已拦截。请重新提问。"
     return ToolChatResponse(response=last_content, tools_called=tools_called)
 
 

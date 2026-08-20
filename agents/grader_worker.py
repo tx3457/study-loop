@@ -92,7 +92,11 @@ async def grader_worker(state: TutorState) -> dict:
             try:
                 await adapt_writer.ainvoke(writer_state)
             except Exception as e:
-                logger.warning(f"[grader_worker] adapt_writer 画像写回失败（不中断闭环）: {e}")
+                logger.warning(
+                    "[grader_worker] adapt_writer 画像写回失败（不中断闭环）: "
+                    "error_type=%s",
+                    type(e).__name__,
+                )
 
         # ③ 轨迹回填：本轮压成一条 AdaptiveTurn dict 追加进 history
         gaps = [g.knowledge_gap for g in report.grades if not g.is_correct and g.knowledge_gap]
@@ -126,7 +130,11 @@ async def grader_worker(state: TutorState) -> dict:
                 )
                 session.extras_written = True
             except Exception as e:
-                logger.warning(f"[grader_worker] consolidate_session_extras 失败（不中断闭环）: {e}")
+                logger.warning(
+                    "[grader_worker] consolidate_session_extras 失败（不中断闭环）: "
+                    "error_type=%s",
+                    type(e).__name__,
+                )
 
         # ⑤ SRS 调度按会话幂等；身份错配时不采用调用方携带的旧复习点。
         if not session.review_schedule_written:
@@ -144,7 +152,10 @@ async def grader_worker(state: TutorState) -> dict:
                 )
                 session.review_schedule_written = True
             except Exception as e:
-                logger.warning(f"[grader_worker] SRS 调度更新失败（不中断闭环）: {e}")
+                logger.warning(
+                    "[grader_worker] SRS 调度更新失败（不中断闭环）: error_type=%s",
+                    type(e).__name__,
+                )
 
     return {
         "grading_report": report_dict,

@@ -16,6 +16,7 @@ MCP(Model Context Protocol)客户端 + ToolRegistry 桥接
   (services/tools.py:dispatch_tool 一行),不需要每个调用点 if/else 分流。
 """
 import logging
+import re
 from contextlib import AsyncExitStack
 from typing import Optional
 
@@ -24,14 +25,34 @@ from pydantic import BaseModel, Field
 from services.tool_registry import EffectMode, Tool, ToolMetadata, tool_registry
 
 logger = logging.getLogger(__name__)
+_FUNCTION_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+class MCPToolExecutionError(RuntimeError):
+    """Stable, public-safe failure raised for any remote MCP tool error."""
+
+    code = "mcp_tool_execution_failed"
+
+    def __init__(self):
+        super().__init__(self.code)
 
 
 class StdioMCPServerConfig(BaseModel):
     """MCP server 启动配置(stdio transport)"""
-    server_name: str = Field(..., description="server 唯一名,用作 tool name 前缀")
+    server_name: str = Field(
+        ...,
+        min_length=1,
+        max_length=32,
+        pattern=r"^[A-Za-z0-9_-]+$",
+        description="server 唯一名,用作 tool name 前缀",
+    )
     command: str = Field(..., description="启动命令,如 'uvx' / 'npx' / 'python'")
     args: list[str] = Field(default_factory=list, description="启动参数")
     env: Optional[dict[str, str]] = Field(None, description="环境变量")
+    read_only_tools: frozenset[str] = Field(
+        default_factory=frozenset,
+        description="由本地配置确认无副作用、可安全失败降级的工具名",
+    )
 
 
 class MCPClient:
@@ -79,9 +100,19 @@ class MCPClient:
         self._check_initialized()
         try:
             result = await self._session.call_tool(tool_name, args)
-        except Exception as e:
-            logger.warning(f"[mcp_client] call_tool '{tool_name}' failed: {type(e).__name__}: {e}")
-            raise
+        except Exception as exc:
+            logger.warning(
+                "[mcp_client] call_tool failed: error_type=%s",
+                type(exc).__name__,
+            )
+            raise MCPToolExecutionError() from None
+
+        # MCP error results often carry a human-readable remote exception in
+        # TextContent.  Treating that content as a normal tool result would feed
+        # an error (and potentially secrets) back into the model and audit path.
+        if getattr(result, "isError", False):
+            logger.warning("[mcp_client] call_tool failed: error_type=remote_error_result")
+            raise MCPToolExecutionError()
 
         # 拼接 TextContent 片段
         parts: list[str] = []
@@ -98,8 +129,11 @@ class MCPClient:
         self._registered_tools.clear()
         try:
             await self._exit_stack.aclose()
-        except Exception as e:
-            logger.debug(f"[mcp_client] cleanup error suppressed: {type(e).__name__}: {e}")
+        except Exception as exc:
+            logger.debug(
+                "[mcp_client] cleanup error suppressed: error_type=%s",
+                type(exc).__name__,
+            )
         self._initialized = False
         self._session = None
 
@@ -114,7 +148,8 @@ async def register_mcp_tools_to_registry(
 
     Tool name 规则:`mcp_{server_name}_{tool_name}`,避免与原生工具撞名。
     MCP annotations 只是非可信提示，无法证明远端副作用可安全重放；因此默认
-    effect_mode=unknown 且不自动重试。
+    effect_mode=unknown 且不自动重试。只有部署者在本地配置中明确列出的工具
+    才标为 read_only，远端 server 不能自行提升权限。
 
     Returns:
         注册成功的 tool name 列表
@@ -123,15 +158,34 @@ async def register_mcp_tools_to_registry(
     server_name = client.config.server_name
     registered: list[str] = []
 
+    # Validate every remote name before registering the first tool. Apart from
+    # matching the downstream function-calling contract, this prevents a
+    # remote server from injecting control characters into registry logs.
+    validated_tools: list[tuple[object, str, str]] = []
     for mt in mcp_tools:
+        remote_name = getattr(mt, "name", None)
+        full_name = f"mcp_{server_name}_{remote_name}"
+        if (
+            not isinstance(remote_name, str)
+            or not _FUNCTION_NAME_PATTERN.fullmatch(remote_name)
+            or not _FUNCTION_NAME_PATTERN.fullmatch(full_name)
+        ):
+            raise ValueError("invalid MCP tool definition")
+        validated_tools.append((mt, remote_name, full_name))
+
+    for mt, remote_name, full_name in validated_tools:
         # 闭包陷阱:用 default arg 固定每轮的 mt
-        async def _handler(_tool_name=mt.name, _client=client, **kwargs):
+        async def _handler(_tool_name=remote_name, _client=client, **kwargs):
             return await _client.call_tool(_tool_name, kwargs)
 
         # 复用 MCP 工具的 inputSchema 作为 OpenAI Function Calling parameters
         params_schema = getattr(mt, "inputSchema", None) or {"type": "object", "properties": {}}
 
-        full_name = f"mcp_{server_name}_{mt.name}"
+        effect_mode = (
+            EffectMode.READ_ONLY
+            if remote_name in client.config.read_only_tools
+            else EffectMode.UNKNOWN
+        )
         tool = Tool(
             name=full_name,
             description=getattr(mt, "description", "") or f"MCP tool {mt.name} from {server_name}",
@@ -140,12 +194,16 @@ async def register_mcp_tools_to_registry(
             metadata=ToolMetadata(
                 timeout_sec=timeout_sec,
                 max_retries=max_retries,
-                effect_mode=EffectMode.UNKNOWN,
+                effect_mode=effect_mode,
             ),
         )
         client._registered_tools[full_name] = tool
         tool_registry.register(tool)
         registered.append(full_name)
 
-    logger.info(f"[mcp_client] registered {len(registered)} MCP tools from '{server_name}'")
+    logger.info(
+        "[mcp_client] registered tools: server=%s count=%d",
+        server_name,
+        len(registered),
+    )
     return registered

@@ -111,7 +111,10 @@ async def create_learning_path(document_id: str):
             detail="模型返回的学习路径格式无效",
         ) from exc
     except ChromaError as exc:
-        logger.exception("learning path document lookup failed")
+        logger.error(
+            "learning path document lookup failed: error_type=%s",
+            type(exc).__name__,
+        )
         raise HTTPException(status_code=503, detail="文档存储暂时不可用") from exc
 
 
@@ -124,7 +127,7 @@ async def create_learning_path_resource(
     try:
         key = normalize_idempotency_key(idempotency_key)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail="Idempotency-Key 格式无效") from exc
     if key is None:
         raise HTTPException(status_code=400, detail="缺少 Idempotency-Key")
 
@@ -186,7 +189,10 @@ async def create_learning_path_resource(
         replay = await _find_created_path(key, request, fingerprint)
         if replay is not None:
             return _resource(replay)
-        logger.exception("learning path document lookup failed")
+        logger.error(
+            "learning path document lookup failed: error_type=%s",
+            type(exc).__name__,
+        )
         raise HTTPException(status_code=503, detail="文档存储暂时不可用") from exc
     except Exception:
         # The provider may fail after another request has already committed the

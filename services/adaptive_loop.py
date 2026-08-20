@@ -164,11 +164,17 @@ async def decide_next_step(
         decision = resp.choices[0].message.parsed
         if decision is None:
             raise ValueError("parsed decision is None")
-        logger.info(f"[adaptive] decide: {decision.action} | {decision.topic} | "
-                    f"diff={decision.difficulty_score:.2f} | {decision.reason[:50]}")
+        logger.info(
+            "[adaptive] decide: action=%s difficulty=%.2f",
+            decision.action,
+            decision.difficulty_score,
+        )
         return _normalize(decision, goal, allow_teach)
     except Exception as e:
-        logger.warning(f"[adaptive] decide LLM failed, rule fallback: {e}")
+        logger.warning(
+            "[adaptive] decide LLM failed; rule fallback: error_type=%s",
+            type(e).__name__,
+        )
         return _rule_fallback(last_report, goal, weak_points)
 
 
@@ -208,7 +214,10 @@ async def generate_lesson(
         result = await retrieve_with_rewrite(document_id, topic, n_results=4)
         chunks = result.get("documents", [[]])[0] or []
     except Exception as e:
-        logger.warning(f"[adaptive] lesson retrieval failed: {e}")
+        logger.warning(
+            "[adaptive] lesson retrieval failed: error_type=%s",
+            type(e).__name__,
+        )
         chunks = []
     material = "\n\n".join(chunks[:4]) if chunks else "(未检索到资料,凭通用知识讲解)"
 
@@ -235,5 +244,8 @@ async def generate_lesson(
         text = (resp.choices[0].message.content or "").strip()
         return text or f"关于「{gaps}」的讲解生成为空,请重试。"
     except Exception as e:
-        logger.warning(f"[adaptive] lesson generation failed: {e}")
+        logger.warning(
+            "[adaptive] lesson generation failed: error_type=%s",
+            type(e).__name__,
+        )
         return f"关于「{gaps}」的讲解暂时不可用(LLM 调用失败)。"

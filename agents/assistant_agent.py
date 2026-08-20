@@ -103,11 +103,17 @@ async def assistant_agent(state: TutorState) -> dict:
             block = build_memory_context_block(await build_profile_card(state.get("user_id", "")))
             if block:
                 messages.insert(1, {"role": "system", "content": block})
-        except SideEffectAmbiguousError:
-            logger.exception("[assistant_agent] side-effect result is ambiguous")
+        except SideEffectAmbiguousError as exc:
+            logger.error(
+                "[assistant_agent] side-effect result is ambiguous: error_type=%s",
+                type(exc).__name__,
+            )
             raise
-        except Exception as e:
-            logger.warning(f"[assistant_agent] 注入画像卡失败（忽略）: {e}")
+        except Exception as exc:
+            logger.warning(
+                "[assistant_agent] 注入画像卡失败（忽略）: error_type=%s",
+                type(exc).__name__,
+            )
 
     tools_called: list[str] = list(state.get("tools_called") or [])
     client = _client_of(state)
@@ -131,23 +137,26 @@ async def assistant_agent(state: TutorState) -> dict:
                 tool_choice="auto",
                 extra_call_messages=state_msg,
             )
-        except SideEffectAmbiguousError:
-            logger.exception("[assistant_agent] side-effect result is ambiguous")
+        except SideEffectAmbiguousError as exc:
+            logger.error(
+                "[assistant_agent] side-effect result is ambiguous: error_type=%s",
+                type(exc).__name__,
+            )
             raise
-        except Exception as e:
-            logger.exception(f"[assistant_agent] LLM call failed round {round_idx}: {e}")
-            return {
-                "final_answer": f"助理调用失败：{e}",
-                "messages": messages, "tools_called": list(dict.fromkeys(tools_called)),
-                "assistant_done": True,
-            }
+        except Exception as exc:
+            logger.warning(
+                "[assistant_agent] LLM call failed: round=%s error_type=%s",
+                round_idx,
+                type(exc).__name__,
+            )
+            raise
 
         # 无 tool_calls：LLM 直接给文字（隐式 finalize）
         if not rr.has_tool_calls:
             final_answer = rr.content or "（助理未给出回复且未调用工具，结束）"
-            is_leak, reason = check_output_leak(final_answer)
+            is_leak, _ = check_output_leak(final_answer)
             if is_leak:
-                logger.warning(f"[assistant_agent] output leak blocked: {reason}")
+                logger.warning("[assistant_agent] output leak blocked")
                 final_answer = "输出包含敏感信息已拦截。"
             return {
                 "final_answer": final_answer, "messages": messages,
@@ -161,13 +170,13 @@ async def assistant_agent(state: TutorState) -> dict:
             # 控制工具：finalize → 写 final_answer 回 state，收尾
             if oc.kind == "control" and fn_name == "finalize":
                 final_answer = fn_args.get("final_answer", "")
-                is_leak, reason = check_output_leak(final_answer)
+                is_leak, _ = check_output_leak(final_answer)
                 if is_leak:
-                    logger.warning(f"[assistant_agent] output leak in finalize: {reason}")
+                    logger.warning("[assistant_agent] output leak in finalize")
                     final_answer = "输出包含敏感信息已拦截。"
                 # 补 tool message 让 OpenAI 协议完整（每个 tool_call 都要有 response）
                 messages.append({"role": "tool", "tool_call_id": oc.call_id, "content": "Acknowledged."})
-                logger.info(f"[assistant_agent] finalize: {fn_args.get('reason', '')[:50]}")
+                logger.info("[assistant_agent] finalized")
                 return {
                     "final_answer": final_answer, "messages": messages,
                     "tools_called": list(dict.fromkeys(tools_called)), "assistant_done": True,
@@ -176,7 +185,11 @@ async def assistant_agent(state: TutorState) -> dict:
             # 控制工具：ask_user → interrupt 暂停，resume 注入 user_reply 续跑
             if oc.kind == "control" and fn_name == "ask_user":
                 question = fn_args.get("question", "请提供更多信息。")
-                logger.info(f"[assistant_agent] ask_user interrupt: {question[:50]}")
+                is_leak, _ = check_output_leak(question)
+                if is_leak:
+                    logger.warning("[assistant_agent] output leak in ask_user")
+                    question = "请补充与当前学习目标相关的信息。"
+                logger.info("[assistant_agent] ask_user interrupt")
                 # interrupt 暂停：把问题暴露给前端；resume 时返回 Command(resume=user_reply)
                 user_reply = interrupt({"question": question, "kind": "ask_user"})
                 # 恢复后：把 user_reply 作为 ask_user 的 tool response 回灌，续跑下一轮
@@ -208,12 +221,22 @@ async def assistant_agent(state: TutorState) -> dict:
             run_id=run_id,
         )
         final_answer = rr.content or "执行被截断。"
-    except SideEffectAmbiguousError:
-        logger.exception("[assistant_agent] truncated finish has ambiguous side effect")
+        is_leak, _ = check_output_leak(final_answer)
+        if is_leak:
+            logger.warning("[assistant_agent] output leak in truncated finish")
+            final_answer = "输出包含敏感信息已拦截。"
+    except SideEffectAmbiguousError as exc:
+        logger.error(
+            "[assistant_agent] truncated finish has ambiguous side effect: error_type=%s",
+            type(exc).__name__,
+        )
         raise
-    except Exception as e:
-        logger.exception(f"[assistant_agent] finish call failed: {e}")
-        final_answer = f"执行被截断（{MAX_ASSIST_ROUNDS} 轮）"
+    except Exception as exc:
+        logger.warning(
+            "[assistant_agent] finish call failed: error_type=%s",
+            type(exc).__name__,
+        )
+        raise
     return {
         "final_answer": final_answer, "messages": messages,
         "tools_called": list(dict.fromkeys(tools_called)), "assistant_done": True,

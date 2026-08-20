@@ -105,7 +105,10 @@ async def upload_document(file: UploadFile = File(...)):
     except DocumentAlreadyExistsError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
     except ChromaError as e:
-        logger.exception("文档索引写入失败: %s", filename)
+        logger.error(
+            "文档索引写入失败: error_type=%s",
+            type(e).__name__,
+        )
         raise HTTPException(status_code=503, detail="文档存储暂时不可用") from e
     return Quiz(
         document_id=filename,
@@ -120,7 +123,10 @@ async def get_documents():
     try:
         collections = await get_all_document()
     except ChromaError as e:
-        logger.exception("文档列表读取失败")
+        logger.error(
+            "文档列表读取失败: error_type=%s",
+            type(e).__name__,
+        )
         raise HTTPException(status_code=503, detail="文档存储暂时不可用") from e
     document_ids = []
     for collection in collections:
@@ -142,7 +148,10 @@ async def delete_document_by_id(document_id: str):
         # collection alias rather than the public filename.
         raise HTTPException(status_code=404, detail="文档不存在") from e
     except (ChromaError, RuntimeError) as e:
-        logger.exception("文档删除失败: %s", document_id)
+        logger.error(
+            "文档删除失败: error_type=%s",
+            type(e).__name__,
+        )
         raise HTTPException(status_code=503, detail="文档存储暂时不可用") from e
     return {
         "status": status,

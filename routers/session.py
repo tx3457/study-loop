@@ -842,7 +842,7 @@ async def answer(
             raise QuizSessionApiError(
                 409,
                 "quiz_session_stale",
-                str(exc),
+                "答题会话状态已变化，请刷新后重试",
                 reason="stale",
             ) from exc
         raise
@@ -898,7 +898,7 @@ async def grade(session_id: str):
         raise QuizSessionApiError(
             409,
             "quiz_session_stale",
-            str(exc),
+            "答题会话状态已变化，请刷新后重试",
             reason="stale",
         ) from exc
     except BaseException:
@@ -938,7 +938,7 @@ async def report(session_id: str):
         raise QuizSessionApiError(
             409,
             "quiz_session_stale",
-            str(exc),
+            "答题会话状态已变化，请刷新后重试",
             reason="stale",
         ) from exc
     except BaseException:

@@ -105,7 +105,10 @@ async def reviser_agent(state: OrchestratorState) -> dict:
             f"(round {state.get('revision_count', 0)})"
         )
     except Exception as e:
-        logger.warning(f"[reviser] LLM call failed: {e}, return original quiz unchanged")
+        logger.warning(
+            "[reviser] LLM call failed; return original quiz unchanged: error_type=%s",
+            type(e).__name__,
+        )
         new_quiz_dict = quiz  # 失败降级:保持原题不变,让 critic 决定是否退出
 
     return {

@@ -85,7 +85,10 @@ async def build_returning_context(user_id: str, document_id: str) -> dict:
     try:
         sessions = await get_user_sessions(user_id)
     except Exception as e:
-        logger.warning(f"[memory_context] get_user_sessions failed: {e}")
+        logger.warning(
+            "[memory_context] get_user_sessions failed: error_type=%s",
+            type(e).__name__,
+        )
         sessions = []
     # 过滤归档条目（type=="archive" 是聚合摘要，无单次 brief 语义）
     briefs = [s for s in sessions if isinstance(s, dict) and s.get("type") != "archive"]
@@ -134,7 +137,10 @@ async def build_profile_card(user_id: str) -> str:
         mastery_all = await get_mastery(user_id, None) or {}
         weak = await get_prioritized_weak_points(user_id, None)
     except Exception as e:
-        logger.warning(f"[memory_context] build_profile_card read failed: {e}")
+        logger.warning(
+            "[memory_context] build_profile_card read failed: error_type=%s",
+            type(e).__name__,
+        )
         return ""
 
     lines: list[str] = []

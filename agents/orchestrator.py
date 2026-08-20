@@ -132,7 +132,10 @@ async def _critic_adapter(state: OrchestratorState) -> dict:
             )
             chunks = json.loads(result_json).get("chunks", [])
         except Exception as e:
-            logger.warning(f"[critic_adapter] pre-fetch chunks failed: {e}")
+            logger.warning(
+                "[critic_adapter] pre-fetch chunks failed: error_type=%s",
+                type(e).__name__,
+            )
 
     critic_input = {
         "quiz": state.get("quiz", {}),
@@ -149,7 +152,10 @@ async def _critic_adapter(state: OrchestratorState) -> dict:
         result = await critic_agent.ainvoke(critic_input)
         critique = result.get("critique", {})
     except Exception as e:
-        logger.exception(f"[critic_adapter] critic_agent invoke failed: {e}")
+        logger.error(
+            "[critic_adapter] critic_agent invoke failed: error_type=%s",
+            type(e).__name__,
+        )
         critique = {}
 
     history = list(state.get("critique_history", []))

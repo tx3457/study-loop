@@ -117,6 +117,20 @@ class TestAssistantReAct(unittest.IsolatedAsyncioTestCase):
             aa.replay_safe_tool_names(),
         )
 
+    async def test_ask_user_question_is_checked_for_leaks(self):
+        secret = "sk-abcdefghijklmnopqrstuvwxyz123456"
+        with patch.object(
+            aa,
+            "run_tool_round",
+            AsyncMock(side_effect=[_round_ask_user(secret), _round_finalize()]),
+        ), patch.object(aa, "interrupt", return_value="补充说明") as pause:
+            out = await assistant_agent({"goal": "x", "user_id": "u1"})
+
+        exposed = pause.call_args.args[0]["question"]
+        self.assertEqual(exposed, "请补充与当前学习目标相关的信息。")
+        self.assertNotIn(secret, exposed)
+        self.assertTrue(out["assistant_done"])
+
     async def test_implicit_finalize_no_tool_calls(self):
         with patch.object(aa, "run_tool_round", AsyncMock(return_value=_round_text("直接回答"))):
             out = await assistant_agent({"goal": "什么是向量检索", "user_id": "u1"})
@@ -130,11 +144,48 @@ class TestAssistantReAct(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(out["assistant_done"])
         self.assertTrue(out["final_answer"])
 
-    async def test_llm_failure_returns_done(self):
-        with patch.object(aa, "run_tool_round", AsyncMock(side_effect=RuntimeError("LLM down"))):
+    async def test_truncated_finish_output_is_checked_for_leaks(self):
+        secret = "sk-abcdefghijklmnopqrstuvwxyz123456"
+        rounds = [_round_tool() for _ in range(aa.MAX_ASSIST_ROUNDS)] + [
+            _round_text(secret)
+        ]
+        with patch.object(
+            aa,
+            "run_tool_round",
+            AsyncMock(side_effect=rounds),
+        ):
             out = await assistant_agent({"goal": "x", "user_id": "u1"})
-        self.assertTrue(out["assistant_done"])
-        self.assertIn("失败", out["final_answer"])
+
+        self.assertEqual(out["final_answer"], "输出包含敏感信息已拦截。")
+        self.assertNotIn(secret, out["final_answer"])
+
+    async def test_llm_failure_is_not_persisted_as_success(self):
+        secret = "SENSITIVE_ASSISTANT_SENTINEL_61ac"
+        with self.assertLogs(aa.logger, level="WARNING") as captured, patch.object(
+            aa,
+            "run_tool_round",
+            AsyncMock(side_effect=RuntimeError(f"LLM down: {secret}")),
+        ):
+            with self.assertRaises(RuntimeError):
+                await assistant_agent({"goal": "x", "user_id": "u1"})
+        self.assertNotIn(secret, "\n".join(captured.output))
+        self.assertIn("error_type=RuntimeError", "\n".join(captured.output))
+
+    async def test_truncated_finish_failure_is_not_marked_done(self):
+        secret = "SENSITIVE_ASSISTANT_FINISH_SENTINEL_382e"
+        rounds = [_round_tool() for _ in range(aa.MAX_ASSIST_ROUNDS)] + [
+            RuntimeError(f"finish failed: {secret}")
+        ]
+        with self.assertLogs(aa.logger, level="WARNING") as captured, patch.object(
+            aa,
+            "run_tool_round",
+            AsyncMock(side_effect=rounds),
+        ):
+            with self.assertRaises(RuntimeError):
+                await assistant_agent({"goal": "x", "user_id": "u1"})
+
+        self.assertNotIn(secret, "\n".join(captured.output))
+        self.assertIn("error_type=RuntimeError", "\n".join(captured.output))
 
     async def test_ambiguous_side_effect_is_never_downgraded_to_done(self):
         with patch.object(

@@ -68,7 +68,7 @@ async def tutor_input_guard(state: TutorState) -> dict:
     if goal:
         is_injection, reason = await check_injection(goal)
         if is_injection:
-            logger.warning(f"[tutor_input_guard] injection detected in goal: {reason}")
+            logger.warning("[tutor_input_guard] injection detected in goal")
             raise TutorGuardError(f"输入安全检查未通过：{reason}")
     return {}
 
@@ -81,7 +81,11 @@ async def tutor_output_guard(state: TutorState) -> dict:
             for field in ("question", "answer", "explanation"):
                 is_leak, reason = check_output_leak(q.get(field, "") or "")
                 if is_leak:
-                    logger.warning(f"[tutor_output_guard] output leak in Q{i+1}.{field}: {reason}")
+                    logger.warning(
+                        "[tutor_output_guard] output leak in question: index=%d field=%s",
+                        i + 1,
+                        field,
+                    )
                     raise TutorGuardError(f"输出安全检查未通过：第 {i+1} 题 {field} {reason}")
     return {}
 
@@ -117,7 +121,10 @@ async def _critic_node(state: TutorState) -> dict:
             )
             chunks = json.loads(result_json).get("chunks", [])
         except Exception as e:
-            logger.warning(f"[tutor_graph._critic_node] pre-fetch chunks failed: {e}")
+            logger.warning(
+                "[tutor_graph._critic_node] pre-fetch chunks failed: error_type=%s",
+                type(e).__name__,
+            )
 
     critic_input = {
         "quiz": state.get("quiz", {}),
@@ -132,7 +139,10 @@ async def _critic_node(state: TutorState) -> dict:
         result = await critic_agent.ainvoke(critic_input)
         critique = result.get("critique", {})
     except Exception as e:
-        logger.exception(f"[tutor_graph._critic_node] critic_agent invoke failed: {e}")
+        logger.error(
+            "[tutor_graph._critic_node] critic_agent invoke failed: error_type=%s",
+            type(e).__name__,
+        )
         critique = {}
 
     history = list(state.get("critique_history", []))
