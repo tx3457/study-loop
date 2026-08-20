@@ -2,7 +2,8 @@ import { expect, test } from '@playwright/test'
 
 const API_PREFIX = '/api'
 const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-const AUTONOMOUS_SESSION_KEY = 'study-loop.autonomous.awaiting.v1'
+const AUTONOMOUS_SESSION_KEY = 'study-loop.autonomous.recovery.v2'
+const LEGACY_AUTONOMOUS_SESSION_KEY = 'study-loop.autonomous.awaiting.v1'
 const QUIZ_RECOVERY_KEY = 'study-loop.quiz.recovery.v1'
 const ADAPTIVE_RECOVERY_KEY = 'study-loop.adaptive.recovery.v1'
 const LEARNING_PATH_RECOVERY_KEY = 'study-loop.learning-path.recovery.v1'
@@ -3598,7 +3599,8 @@ test('Autonomous restores a pending HITL question and draft after reload', async
   await dialog.getByRole('textbox', { name: '你的回答' }).fill('保留这个回答草稿')
   const stored = await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), AUTONOMOUS_SESSION_KEY)
   expect(stored).toMatchObject({
-    version: 1,
+    schema_version: 2,
+    kind: 'awaiting',
     conversation_id: 'playwright-hitl-reload',
     user_question: '刷新后仍需回答的问题？',
     draft: '保留这个回答草稿',
@@ -3682,9 +3684,7 @@ test('Autonomous keeps a failed continuation key when recovery crosses a reload'
   await expect(dialog.getByRole('alert')).toContainText('续跑服务暂时不可用')
 
   await page.reload()
-  await expect(dialog).toBeVisible()
-  await expect(reply).toHaveValue('沿用这份回答')
-  await dialog.getByRole('button', { name: /回答/ }).click()
+  await expect(dialog).toBeHidden()
   await expect(page.getByText('沿用原请求标识后完成。')).toBeVisible()
 
   expect(continueAttempts.map(attempt => attempt.body)).toEqual([
@@ -3696,7 +3696,7 @@ test('Autonomous keeps a failed continuation key when recovery crosses a reload'
   expect(unexpectedRequests).toEqual([])
 })
 
-test('Autonomous reset clears recovery state and corrupt storage fails closed', async ({ page }) => {
+test('Autonomous reset clears recovery, corrupt storage fails closed, and valid v1 awaiting state migrates', async ({ page }) => {
   const problems = trackBrowserProblems(page)
   const unexpectedRequests = await mockApi(page, ({ path, request }) => {
     if (request.method() === 'POST' && path === '/agent/autonomous') {
@@ -3712,6 +3712,12 @@ test('Autonomous reset clears recovery state and corrupt storage fails closed', 
         },
       }
     }
+    if (
+      request.method() === 'DELETE'
+      && path === '/agent/autonomous/playwright-hitl-reset'
+    ) {
+      return { body: { status: 'canceled' } }
+    }
     return null
   })
 
@@ -3722,7 +3728,9 @@ test('Autonomous reset clears recovery state and corrupt storage fails closed', 
 
   await page.getByRole('dialog', { name: 'Agent 想问你' })
     .getByRole('button', { name: '取消整个执行' }).click()
-  expect(await page.evaluate(key => sessionStorage.getItem(key), AUTONOMOUS_SESSION_KEY)).toBeNull()
+  await expect.poll(
+    () => page.evaluate(key => sessionStorage.getItem(key), AUTONOMOUS_SESSION_KEY),
+  ).toBeNull()
 
   await page.evaluate(key => sessionStorage.setItem(key, '{not-json'), AUTONOMOUS_SESSION_KEY)
   await page.reload()
@@ -3742,11 +3750,44 @@ test('Autonomous reset clears recovery state and corrupt storage fails closed', 
       grounding_required: false,
     },
     continue_idempotency_key: null,
-  })), AUTONOMOUS_SESSION_KEY)
+  })), LEGACY_AUTONOMOUS_SESSION_KEY)
   await page.reload()
   await expect(page.getByRole('dialog', { name: 'Agent 想问你' })).toHaveCount(0)
   await expect(page.getByLabel('你的学习目标')).toHaveValue('')
   expect(await page.evaluate(key => sessionStorage.getItem(key), AUTONOMOUS_SESSION_KEY)).toBeNull()
+
+  await page.evaluate(key => sessionStorage.setItem(key, JSON.stringify({
+    version: 1,
+    conversation_id: 'legacy-valid-awaiting',
+    user_question: '旧版暂停问题仍需回答？',
+    draft: '迁移后的草稿',
+    request: {
+      query: '迁移旧版 Autonomous 会话',
+      user_id: 'default_user',
+      document_id: '',
+      grounding_required: false,
+    },
+    continue_idempotency_key: null,
+  })), LEGACY_AUTONOMOUS_SESSION_KEY)
+  await page.reload()
+  const migratedDialog = page.getByRole('dialog', { name: 'Agent 想问你' })
+  await expect(migratedDialog).toContainText('旧版暂停问题仍需回答？')
+  await expect(migratedDialog.getByRole('textbox', { name: '你的回答' }))
+    .toHaveValue('迁移后的草稿')
+  const migrated = await page.evaluate(
+    key => JSON.parse(sessionStorage.getItem(key)),
+    AUTONOMOUS_SESSION_KEY,
+  )
+  expect(migrated).toMatchObject({
+    schema_version: 2,
+    kind: 'awaiting',
+    conversation_id: 'legacy-valid-awaiting',
+    draft: '迁移后的草稿',
+  })
+  expect(await page.evaluate(
+    key => sessionStorage.getItem(key),
+    LEGACY_AUTONOMOUS_SESSION_KEY,
+  )).toBeNull()
   expect(unexpectedRequests).toEqual([])
   expect(problems).toEqual([])
 })
@@ -3784,6 +3825,15 @@ test('Autonomous preserves the initial goal and focus when starting fails', asyn
 
   await expect(page.getByRole('alert')).toContainText('模型服务暂时不可用')
   await expect(goal).toHaveValue('帮我复习向量检索')
+  await expect(goal).toBeDisabled()
+  const pendingStart = await page.evaluate(
+    key => JSON.parse(sessionStorage.getItem(key)),
+    AUTONOMOUS_SESSION_KEY,
+  )
+  expect(pendingStart).toMatchObject({
+    kind: 'pending_start',
+    idempotency_key: startKeys[0],
+  })
   const retry = page.getByRole('button', { name: '再次执行当前目标' })
   await expect(retry).toBeFocused()
   await retry.click()
@@ -3808,7 +3858,7 @@ test('Autonomous preserves the initial goal and focus when starting fails', asyn
   expect(unexpectedRequests).toEqual([])
 })
 
-test('Autonomous rotates a failed start key after edits or reset', async ({ page }) => {
+test('Autonomous rotates an explicitly rejected start key after edits or reset', async ({ page }) => {
   const attempts = []
   const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
     if (request.method() === 'POST' && path === '/agent/autonomous') {
@@ -3817,7 +3867,7 @@ test('Autonomous rotates a failed start key after edits or reset', async ({ page
         key: await request.headerValue('idempotency-key'),
       })
       if (attempts.length % 2 === 1) {
-        return { status: 503, body: { detail: '模型服务暂时不可用' } }
+        return { status: 422, body: { detail: '请求内容需修改' } }
       }
       return {
         body: {
@@ -3858,7 +3908,7 @@ test('Autonomous rotates a failed start key after edits or reset', async ({ page
       await page.getByLabel('你的学习目标').fill('原始目标')
       const offset = attempts.length
       await page.getByRole('button', { name: '开始执行' }).click()
-      await expect(page.getByRole('alert')).toContainText('模型服务暂时不可用')
+      await expect(page.getByRole('alert')).toContainText('请求内容需修改')
 
       await scenario.mutate()
       await page.getByRole('button', { name: /执行/ }).click()
@@ -3938,6 +3988,8 @@ test('Autonomous preserves a HITL reply and retries after a continuation failure
   await expect(dialog.getByRole('alert')).toContainText('模型服务暂时不可用')
   await expect(dialog.getByRole('alert')).toContainText('你的回答已保留')
   await expect(reply).toHaveValue('重点学习第三章')
+  await expect(reply).toHaveJSProperty('readOnly', true)
+  await expect(dialog.getByRole('button', { name: '取消整个执行' })).toBeDisabled()
   await expect(reply).toBeFocused()
   await expect(page.locator('.autonomous-content')).toHaveJSProperty('inert', true)
 
@@ -4126,6 +4178,274 @@ test('Autonomous generates a request key without crypto.randomUUID', async ({ pa
   expect(requestKey).toMatch(UUID_V4_PATTERN)
   expect(unexpectedRequests).toEqual([])
   expect(problems).toEqual([])
+})
+
+test('Autonomous replays a lost start response after reload with the exact body and key', async ({ page }) => {
+  const attempts = []
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'POST' && path === '/agent/autonomous') {
+      attempts.push({
+        body: await request.postDataJSON(),
+        key: await request.headerValue('idempotency-key'),
+      })
+      if (attempts.length === 1) return { abort: 'failed' }
+      return {
+        body: {
+          awaiting_user_input: false,
+          final_answer: '刷新后已从原请求回执恢复。',
+          finalize_reason: 'receipt_replayed',
+          rounds_used: 1,
+          steps: [],
+          tools_called: ['finalize'],
+          truncated: false,
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/autonomous')
+  await page.getByLabel('文档 ID（可选）').fill('start-reload.md')
+  await page.getByLabel('你的学习目标').fill('刷新也只能执行一次')
+  await page.getByRole('button', { name: '开始执行' }).click()
+
+  await expect(page.getByRole('alert')).toContainText('Failed to fetch')
+  const pending = await page.evaluate(
+    key => JSON.parse(sessionStorage.getItem(key)),
+    AUTONOMOUS_SESSION_KEY,
+  )
+  expect(pending).toMatchObject({
+    schema_version: 2,
+    kind: 'pending_start',
+    request: {
+      query: '刷新也只能执行一次',
+      user_id: 'default_user',
+      document_id: 'start-reload.md',
+      grounding_required: true,
+    },
+  })
+  expect(pending.idempotency_key).toMatch(UUID_V4_PATTERN)
+  await expect(page.getByLabel('你的学习目标')).toBeDisabled()
+
+  await page.reload()
+  await expect(page.getByText('刷新后已从原请求回执恢复。')).toBeVisible()
+  expect(attempts).toHaveLength(2)
+  expect(attempts[1]).toEqual(attempts[0])
+  expect(await page.evaluate(
+    key => sessionStorage.getItem(key),
+    AUTONOMOUS_SESSION_KEY,
+  )).toBeNull()
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('Autonomous keeps an in-progress continuation locked and reloads into the next pause with the same key', async ({ page }) => {
+  const continueAttempts = []
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'POST' && path === '/agent/autonomous') {
+      return {
+        body: {
+          awaiting_user_input: true,
+          conversation_id: 'continue-in-progress-old',
+          user_question: '第一轮确认内容？',
+          rounds_used: 1,
+          steps: [],
+          tools_called: ['ask_user'],
+          truncated: false,
+        },
+      }
+    }
+    if (request.method() === 'POST' && path === '/agent/autonomous/continue') {
+      continueAttempts.push({
+        body: await request.postDataJSON(),
+        key: await request.headerValue('idempotency-key'),
+      })
+      if (continueAttempts.length === 1) {
+        return {
+          status: 409,
+          body: {
+            detail: '相同请求正在处理中，请勿并发重复提交',
+            code: 'idempotency_conflict',
+            reason: 'in_progress',
+          },
+        }
+      }
+      return {
+        body: {
+          awaiting_user_input: true,
+          conversation_id: 'continue-in-progress-next',
+          user_question: '第二轮仍需确认什么？',
+          rounds_used: 2,
+          steps: [],
+          tools_called: ['ask_user'],
+          truncated: false,
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/autonomous')
+  await page.getByLabel('你的学习目标').fill('测试续跑中的恢复锁')
+  await page.getByRole('button', { name: '开始执行' }).click()
+  const dialog = page.getByRole('dialog', { name: 'Agent 想问你' })
+  const reply = dialog.getByRole('textbox', { name: '你的回答' })
+  await reply.fill('沿用这个不可变回答')
+  await dialog.getByRole('button', { name: /回答/ }).click()
+
+  await expect(dialog.getByRole('alert')).toContainText('相同请求正在处理中')
+  await expect(reply).toHaveJSProperty('readOnly', true)
+  await expect(dialog.getByRole('button', { name: '取消整个执行' })).toBeDisabled()
+  const pending = await page.evaluate(
+    key => JSON.parse(sessionStorage.getItem(key)),
+    AUTONOMOUS_SESSION_KEY,
+  )
+  expect(pending).toMatchObject({
+    kind: 'pending_continue',
+    body: {
+      conversation_id: 'continue-in-progress-old',
+      user_reply: '沿用这个不可变回答',
+    },
+  })
+
+  await page.reload()
+  await expect(dialog).toContainText('第二轮仍需确认什么？')
+  await expect(reply).toHaveValue('')
+  expect(continueAttempts).toHaveLength(2)
+  expect(continueAttempts[1]).toEqual(continueAttempts[0])
+  const nextPause = await page.evaluate(
+    key => JSON.parse(sessionStorage.getItem(key)),
+    AUTONOMOUS_SESSION_KEY,
+  )
+  expect(nextPause).toMatchObject({
+    kind: 'awaiting',
+    conversation_id: 'continue-in-progress-next',
+    user_question: '第二轮仍需确认什么？',
+    draft: '',
+  })
+  expect(nextPause).not.toHaveProperty('idempotency_key')
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('Autonomous ignores a late response after navigation and lets the mounted page reconcile the durable start', async ({ page }) => {
+  let releaseFirst
+  let markFirstStarted
+  const firstGate = new Promise(resolve => { releaseFirst = resolve })
+  const firstStarted = new Promise(resolve => { markFirstStarted = resolve })
+  const attempts = []
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'POST' && path === '/agent/autonomous') {
+      attempts.push({
+        body: await request.postDataJSON(),
+        key: await request.headerValue('idempotency-key'),
+      })
+      if (attempts.length === 1) {
+        markFirstStarted()
+        await firstGate
+        return {
+          body: {
+            awaiting_user_input: true,
+            conversation_id: 'late-unmounted-pause',
+            user_question: '这个迟到问题不应覆盖恢复指针？',
+            rounds_used: 1,
+            steps: [],
+            tools_called: ['ask_user'],
+            truncated: false,
+          },
+        }
+      }
+      return {
+        body: {
+          awaiting_user_input: false,
+          final_answer: '已由当前页面完成权威对账。',
+          finalize_reason: 'current_mount_replay',
+          rounds_used: 1,
+          steps: [],
+          tools_called: ['finalize'],
+          truncated: false,
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/autonomous')
+  await page.getByLabel('你的学习目标').fill('验证卸载后的晚响应隔离')
+  await page.getByRole('button', { name: '开始执行' }).click()
+  await firstStarted
+  await page.getByRole('link', { name: '文档管理' }).click()
+  releaseFirst()
+  await page.waitForTimeout(100)
+
+  const stillPending = await page.evaluate(
+    key => JSON.parse(sessionStorage.getItem(key)),
+    AUTONOMOUS_SESSION_KEY,
+  )
+  expect(stillPending.kind).toBe('pending_start')
+  expect(stillPending.idempotency_key).toBe(attempts[0].key)
+
+  await page.getByRole('link', { name: '自主 Agent' }).click()
+  await expect(page.getByText('已由当前页面完成权威对账。')).toBeVisible()
+  expect(attempts).toHaveLength(2)
+  expect(attempts[1]).toEqual(attempts[0])
+  await expect(page.getByText('这个迟到问题不应覆盖恢复指针？')).toHaveCount(0)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('Autonomous retains a paused recovery when cancel fails and clears it only after confirmed missing', async ({ page }) => {
+  let cancelAttempts = 0
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'POST' && path === '/agent/autonomous') {
+      return {
+        body: {
+          awaiting_user_input: true,
+          conversation_id: 'cancel-retry-session',
+          user_question: '是否真的放弃这次执行？',
+          rounds_used: 1,
+          steps: [],
+          tools_called: ['ask_user'],
+          truncated: false,
+        },
+      }
+    }
+    if (
+      request.method() === 'DELETE'
+      && path === '/agent/autonomous/cancel-retry-session'
+    ) {
+      cancelAttempts += 1
+      return cancelAttempts === 1
+        ? { status: 503, body: { detail: '取消服务暂时不可用' } }
+        : { body: { status: 'missing' } }
+    }
+    return null
+  })
+
+  await page.goto('/autonomous')
+  await page.getByLabel('你的学习目标').fill('测试可靠取消')
+  await page.getByRole('button', { name: '开始执行' }).click()
+  const dialog = page.getByRole('dialog', { name: 'Agent 想问你' })
+  const cancel = dialog.getByRole('button', { name: '取消整个执行' })
+  await cancel.click()
+
+  await expect(dialog.getByRole('alert')).toContainText('取消服务暂时不可用')
+  await expect(dialog).toBeVisible()
+  const retained = await page.evaluate(
+    key => JSON.parse(sessionStorage.getItem(key)),
+    AUTONOMOUS_SESSION_KEY,
+  )
+  expect(retained).toMatchObject({
+    kind: 'awaiting',
+    conversation_id: 'cancel-retry-session',
+  })
+
+  await cancel.click()
+  await expect(dialog).toBeHidden()
+  await expect(page.getByLabel('你的学习目标')).toHaveValue('')
+  expect(cancelAttempts).toBe(2)
+  expect(await page.evaluate(
+    key => sessionStorage.getItem(key),
+    AUTONOMOUS_SESSION_KEY,
+  )).toBeNull()
+  expect(unexpectedRequests).toEqual([])
 })
 
 test('short answers stay pending until one canonical AI grading completes', async ({ page }) => {

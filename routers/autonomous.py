@@ -16,13 +16,16 @@ Autonomous Agent 端点：ReAct + HITL
           → 携带 conversation_id + user_reply → 后端恢复 messages 继续 ReAct loop
 
 """
+import asyncio
+import hashlib
+import json
 import logging
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Literal, Optional
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Path as ApiPath
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from models.citation import CitationView, GroundingStatus
@@ -39,7 +42,13 @@ from services.autonomous_sessions import (
     SessionPayloadTooLargeError,
 )
 from services.injection import check_injection, check_output_leak
-from services.idempotency import normalize_idempotency_key, request_idempotency
+from services.idempotency import (
+    IdempotencyConflictError,
+    ReceiptLease,
+    abort_idempotency_claim,
+    normalize_idempotency_key,
+    request_idempotency,
+)
 from services.llm import _client as _client, llm_chat
 from services.react_controls import (
     CONTROL_TOOL_NAMES,
@@ -823,8 +832,112 @@ async def _validate_replayed_response(response_payload: dict) -> AutonomousRespo
     return response
 
 
-async def _abort_receipt(key: Optional[str]) -> bool:
-    return await request_idempotency.abort(key) if key else False
+def _request_fingerprint(operation: str, payload: dict) -> str:
+    canonical = json.dumps(
+        {"operation": operation, "payload": payload},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _initial_conversation_id_for_recovery_token(recovery_token: str) -> str:
+    digest = hashlib.sha256(
+        f"agent.autonomous:{recovery_token}".encode("utf-8")
+    ).hexdigest()
+    return f"conv_{digest}"
+
+
+def _initial_conversation_id(receipt_lease: ReceiptLease | None) -> str | None:
+    """Use a stable pause ID so an ACK-lost start can find its first snapshot."""
+    if receipt_lease is None:
+        return None
+    return _initial_conversation_id_for_recovery_token(
+        receipt_lease.recovery_token
+    )
+
+
+async def _abort_receipt(receipt_lease: ReceiptLease | None) -> bool:
+    if receipt_lease is None:
+        return False
+    return await abort_idempotency_claim(request_idempotency, receipt_lease)
+
+
+async def _recover_initial_pause_from_session(
+    key: str,
+    req: AutonomousRequest,
+    *,
+    recovery_token: str | None = None,
+) -> AutonomousResponse | None:
+    """Repair an ACK-lost start receipt from its deterministic pause snapshot."""
+    payload = req.model_dump(mode="json")
+    if recovery_token is None:
+        recovery_token = await request_idempotency.recovery_token(
+            key,
+            "agent.autonomous",
+            payload,
+        )
+    if recovery_token is None:
+        return None
+    conversation_id = _initial_conversation_id_for_recovery_token(
+        recovery_token
+    )
+    inspection = await autonomous_sessions.inspect(conversation_id)
+    if inspection is None or inspection.state != "paused":
+        return None
+    try:
+        session = _session_from_payload(conversation_id, inspection.payload)
+    except (TypeError, ValueError, ValidationError) as exc:
+        logger.error(
+            "[autonomous] invalid initial pause during recovery: "
+            "cid_prefix=%s error_type=%s",
+            conversation_id[:13],
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=410,
+            detail="暂停会话数据无效；请重新开始",
+        ) from exc
+    response = await _validate_replayed_response(
+        _paused_response(session).model_dump(mode="json")
+    )
+    await request_idempotency.reconcile_completed(
+        key,
+        "agent.autonomous",
+        payload,
+        response.model_dump(mode="json"),
+    )
+    return response
+
+
+async def _recover_continue_outcome_from_session(
+    key: str,
+    req: ContinueRequest,
+) -> AutonomousResponse | None:
+    """Repair an ACK-lost continue receipt from its completed session outcome."""
+    payload = req.model_dump(mode="json")
+    expected_fingerprint = _request_fingerprint(
+        "agent.autonomous.continue", payload
+    )
+    inspection = await autonomous_sessions.inspect(req.conversation_id)
+    if (
+        inspection is None
+        or inspection.state != "completed"
+        or inspection.outcome is None
+        or inspection.continue_fingerprint != expected_fingerprint
+    ):
+        return None
+    response = await _validate_replayed_response(inspection.outcome)
+    await request_idempotency.reconcile_completed(
+        key,
+        "agent.autonomous.continue",
+        payload,
+        response.model_dump(mode="json"),
+        allow_effect_started=True,
+    )
+    return response
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -911,9 +1024,15 @@ async def _run_react_loop(
     run_id: str,
     evidence_registry: EvidenceRegistry,
     grounding_required: bool,
-    idempotency_key: Optional[str] = None,
+    receipt_lease: ReceiptLease | None = None,
+    on_before_round: Callable[[], Awaitable[None]] | None = None,
     on_before_tool_calls: Callable[[], Awaitable[None]] | None = None,
-    pause_session_saver: Callable[[AutonomousSession], Awaitable[None]] | None = None,
+    on_before_tool_dispatch: Callable[[], Awaitable[None]] | None = None,
+    pause_session_saver: Callable[
+        [AutonomousSession, AutonomousResponse],
+        Awaitable[AutonomousResponse | None],
+    ] | None = None,
+    initial_conversation_id: str | None = None,
 ) -> AutonomousResponse:
     """从 starting_round 开始跑 ReAct 循环。命中 finalize / ask_user / max_rounds 时返回。"""
     truncated = False
@@ -935,6 +1054,8 @@ async def _run_react_loop(
         return None
 
     for round_idx in range(starting_round, MAX_AUTONOMOUS_ROUNDS):
+        if on_before_round is not None:
+            await on_before_round()
         # ── 注入 [Current state] 让 LLM 不健忘（仅本次调用，不持久化）──
         state_summary = _build_state_summary(
             steps, tools_called, plan, round_idx, evidence_registry
@@ -951,10 +1072,12 @@ async def _run_react_loop(
             control_tools=CONTROL_TOOL_NAMES,
             run_id=run_id,
             user_id=user_id,
-            idempotency_key=idempotency_key,
+            idempotency_key=(receipt_lease.key if receipt_lease is not None else None),
+            idempotency_lease=receipt_lease,
             tool_choice="auto",
             extra_call_messages=state_msg,
             on_before_tool_calls=on_before_tool_calls,
+            on_before_tool_dispatch=on_before_tool_dispatch,
             business_tool_guard=guard_business_tool,
         )
 
@@ -1071,7 +1194,7 @@ async def _run_react_loop(
                         abstained=True,
                     )
 
-                conversation_id = f"conv_{uuid.uuid4().hex}"
+                conversation_id = initial_conversation_id or f"conv_{uuid.uuid4().hex}"
                 # 注意：messages 已含 assistant message（含 ask_user 的 tool_call）
                 # 续跑时 user_reply 会作为该 tool_call 的 tool response 填回去
                 steps.append(StepRecord(
@@ -1091,13 +1214,32 @@ async def _run_react_loop(
                     grounding_required=grounding_required,
                     pending_ask_call_id=oc.call_id,
                 )
+                response = AutonomousResponse(
+                    plan=_public_plan(plan),
+                    steps=_public_steps(steps),
+                    tools_called=list(dict.fromkeys(tools_called)),
+                    rounds_used=round_idx + 1,
+                    truncated=False,
+                    awaiting_user_input=True,
+                    user_question=question,
+                    conversation_id=conversation_id,
+                    grounding_status=(
+                        GroundingStatus.PENDING
+                        if grounding_required
+                        else GroundingStatus.NOT_REQUESTED
+                    ),
+                    grounding_required=grounding_required,
+                    grounding_document_id=document_id,
+                )
                 try:
                     if pause_session_saver is None:
                         await autonomous_sessions.save(
                             conversation_id, _session_to_payload(session)
                         )
                     else:
-                        await pause_session_saver(session)
+                        canonical = await pause_session_saver(session, response)
+                        if canonical is not None:
+                            response = canonical
                 except SessionCapacityError as exc:
                     raise HTTPException(
                         status_code=503,
@@ -1112,21 +1254,7 @@ async def _run_react_loop(
                     "[autonomous] ask_user paused: cid_prefix=%s",
                     conversation_id[:13],
                 )
-                return AutonomousResponse(
-                    plan=_public_plan(plan),
-                    steps=_public_steps(steps),
-                    tools_called=list(dict.fromkeys(tools_called)),
-                    rounds_used=round_idx + 1, truncated=False,
-                    awaiting_user_input=True, user_question=question,
-                    conversation_id=conversation_id,
-                    grounding_status=(
-                        GroundingStatus.PENDING
-                        if grounding_required
-                        else GroundingStatus.NOT_REQUESTED
-                    ),
-                    grounding_required=grounding_required,
-                    grounding_document_id=document_id,
-                )
+                return response
 
             # ── 业务工具被白名单拦截（run_tool_round 已回灌错误 message）──
             if oc.kind == "blocked":
@@ -1161,6 +1289,8 @@ async def _run_react_loop(
         "role": "user",
         "content": "已达到最大执行轮次。请基于已有 observation 给出最终回答（直接文字，无需调工具）。",
     })
+    if on_before_round is not None:
+        await on_before_round()
     try:
         finish_resp = await llm_chat(messages, client=_client)
         final_answer = finish_resp.choices[0].message.content or "执行被截断"
@@ -1263,6 +1393,31 @@ def _build_response(
     )
 
 
+def _paused_response(session: AutonomousSession) -> AutonomousResponse:
+    question = _pending_ask_question(
+        session.messages, session.pending_ask_call_id
+    )
+    if not question:
+        raise ValueError("persisted pause is missing its ask_user question")
+    return AutonomousResponse(
+        plan=_public_plan(session.plan),
+        steps=_public_steps(session.steps),
+        tools_called=list(dict.fromkeys(session.tools_called)),
+        rounds_used=session.rounds_used,
+        truncated=False,
+        awaiting_user_input=True,
+        user_question=question,
+        conversation_id=session.conversation_id,
+        grounding_status=(
+            GroundingStatus.PENDING
+            if session.grounding_required
+            else GroundingStatus.NOT_REQUESTED
+        ),
+        grounding_required=session.grounding_required,
+        grounding_document_id=session.document_id,
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # 主入口
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1270,7 +1425,7 @@ async def _execute_autonomous(
     req: AutonomousRequest,
     *,
     run_id: str,
-    idempotency_key: Optional[str],
+    receipt_lease: ReceiptLease | None,
 ) -> AutonomousResponse:
     """Autonomous ReAct Agent 端点。
 
@@ -1323,12 +1478,89 @@ async def _execute_autonomous(
             "content": f"参考 plan（hint，非强制）：\n{plan_summary}",
         })
 
+    async def renew_receipt() -> None:
+        if receipt_lease is None:
+            return
+        if await request_idempotency.renew(receipt_lease) is None:
+            raise IdempotencyConflictError("in_progress")
+
+    async def save_initial_pause(
+        session: AutonomousSession,
+        response: AutonomousResponse,
+    ) -> AutonomousResponse:
+        # The provider call may outlive the receipt lease. Fence immediately
+        # before publishing a pause so a stale worker cannot later reconcile
+        # its response over the current owner.
+        await renew_receipt()
+        async def recover_committed_pause() -> AutonomousResponse | None:
+            inspection = await autonomous_sessions.inspect(session.conversation_id)
+            if inspection is None:
+                return None
+            if inspection.state == "in_flight":
+                raise IdempotencyConflictError("in_progress")
+            if inspection.state != "paused":
+                raise IdempotencyConflictError("ambiguous")
+            persisted = _session_from_payload(
+                session.conversation_id, inspection.payload
+            )
+            canonical = await _validate_replayed_response(
+                _paused_response(persisted).model_dump(mode="json")
+            )
+            if receipt_lease is not None:
+                # Initial pauses are only safe to repair from a clean pending
+                # receipt. An effect-started receipt may belong to a newer
+                # takeover owner and must remain fail-closed.
+                await request_idempotency.reconcile_completed(
+                    receipt_lease.key,
+                    "agent.autonomous",
+                    req.model_dump(mode="json"),
+                    canonical.model_dump(mode="json"),
+                )
+            return canonical
+
+        try:
+            await autonomous_sessions.save(
+                session.conversation_id, _session_to_payload(session)
+            )
+            return response
+        except BaseException as save_exc:
+            # save() may commit and then lose its ACK. Drain a shielded lookup
+            # (also under repeated cancellation) before deciding whether the
+            # canonical pause exists. This prevents deleting the receipt and
+            # generating a second recovery capability after a committed save.
+            repair_task = asyncio.create_task(recover_committed_pause())
+            cancellation = (
+                save_exc if isinstance(save_exc, asyncio.CancelledError) else None
+            )
+            while not repair_task.done():
+                try:
+                    await asyncio.shield(repair_task)
+                except asyncio.CancelledError as later_cancel:
+                    cancellation = later_cancel
+                    continue
+            try:
+                recovered = repair_task.result()
+            except BaseException as repair_exc:
+                if cancellation is not None:
+                    raise cancellation
+                raise repair_exc from save_exc
+            if cancellation is not None:
+                raise cancellation
+            if recovered is not None:
+                return recovered
+            raise
+
     return await _run_react_loop(
         messages=messages, plan=plan, steps=[], tools_called=[],
         user_id=req.user_id, document_id=req.document_id,
         starting_round=0, run_id=run_id,
         evidence_registry={}, grounding_required=req.grounding_required,
-        idempotency_key=idempotency_key,
+        receipt_lease=receipt_lease,
+        on_before_round=renew_receipt,
+        pause_session_saver=(
+            save_initial_pause if receipt_lease is not None else None
+        ),
+        initial_conversation_id=_initial_conversation_id(receipt_lease),
     )
 
 
@@ -1341,25 +1573,73 @@ async def autonomous_agent(
 ) -> AutonomousResponse:
     """Run one request with an optional durable replay receipt."""
     key = normalize_idempotency_key(idempotency_key)
+    receipt_lease = None
+    request_payload = req.model_dump(mode="json")
     if key:
-        decision = await request_idempotency.begin(
-            key, "agent.autonomous", req.model_dump(mode="json")
-        )
+        try:
+            decision = await request_idempotency.begin(
+                key, "agent.autonomous", request_payload
+            )
+        except IdempotencyConflictError as exc:
+            if exc.reason in {"in_progress", "ambiguous"}:
+                recovered = await _recover_initial_pause_from_session(key, req)
+                if recovered is not None:
+                    return recovered
+            raise
         if decision.replayed:
             return await _validate_replayed_response(decision.response)
+        receipt_lease = decision.lease
+        if receipt_lease is None:
+            raise RuntimeError("idempotency claim returned without ownership data")
+        recovered = await _recover_initial_pause_from_session(
+            key,
+            req,
+            recovery_token=receipt_lease.recovery_token,
+        )
+        if recovered is not None:
+            return recovered
 
     run_id = f"auto_{uuid.uuid4().hex[:12]}"
+    durable_pause = False
     try:
         response = await _execute_autonomous(
-            req, run_id=run_id, idempotency_key=key
+            req, run_id=run_id, receipt_lease=receipt_lease
         )
-        if key:
-            await request_idempotency.complete(
-                key, response.model_dump(mode="json")
-            )
+        durable_pause = response.awaiting_user_input
+        if receipt_lease is not None:
+            try:
+                await request_idempotency.complete(
+                    receipt_lease, response.model_dump(mode="json")
+                )
+            except Exception:
+                if not durable_pause:
+                    raise
+                await request_idempotency.reconcile_completed(
+                    key,
+                    "agent.autonomous",
+                    request_payload,
+                    response.model_dump(mode="json"),
+                )
         return response
     except BaseException as exc:
-        durable_effect = await _abort_receipt(key)
+        if isinstance(exc, asyncio.CancelledError):
+            # Cancellation is an uncertain network/process boundary. Keep the
+            # bounded lease so an exact retry can take over or repair a pause;
+            # deleting it here could orphan a commit whose ACK was lost.
+            raise
+        if (
+            isinstance(exc, IdempotencyConflictError)
+            and exc.reason in {"in_progress", "ambiguous"}
+        ):
+            raise
+        if durable_pause:
+            # The exact pending response is already represented by the durable
+            # pause snapshot. Keep the browser's exact key bound for repair
+            # instead of turning a receipt-ack failure into a terminal conflict.
+            if isinstance(exc, Exception):
+                raise IdempotencyConflictError("in_progress") from exc
+            raise
+        durable_effect = await _abort_receipt(receipt_lease)
         # 写工具成功后，下一轮 provider 仍可能失败。此时整个请求不可作为
         # 普通 503 自动重试；持久 receipt 不依赖可淘汰的进程内 audit。
         effect_attempted = durable_effect or tool_registry.has_effect_attempt(run_id)
@@ -1370,6 +1650,33 @@ async def autonomous_agent(
         ):
             raise SideEffectAmbiguousError("autonomous_request") from exc
         raise
+
+
+@router.delete("/agent/autonomous/{conversation_id}")
+async def cancel_autonomous_session(
+    conversation_id: str = ApiPath(
+        ...,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    ),
+) -> dict[str, str]:
+    """Cancel only a currently paused HITL session.
+
+    A running owner is never interrupted by this endpoint. Missing, expired,
+    and already-completed capabilities are idempotent no-ops for the browser.
+    """
+    result = await autonomous_sessions.discard_paused(conversation_id)
+    if result.reason == "in_progress":
+        raise HTTPException(
+            status_code=409,
+            detail="conversation 正在续跑，当前不能取消",
+        )
+    if result.reason == "ambiguous":
+        raise IdempotencyConflictError("ambiguous")
+    return {
+        "status": "canceled" if result.discarded else "missing",
+    }
 
 
 @router.post("/agent/autonomous/continue", response_model=AutonomousResponse)
@@ -1384,53 +1691,58 @@ async def continue_autonomous(
     协议：把 user_reply 作为 ask_user 的 tool response 填回 messages，从下一轮继续 ReAct。
     """
     key = normalize_idempotency_key(idempotency_key)
+    receipt_lease = None
     if key:
-        decision = await request_idempotency.begin(
-            key, "agent.autonomous.continue", req.model_dump(mode="json")
-        )
+        try:
+            decision = await request_idempotency.begin(
+                key, "agent.autonomous.continue", req.model_dump(mode="json")
+            )
+        except IdempotencyConflictError as exc:
+            if exc.reason in {"in_progress", "ambiguous"}:
+                recovered = await _recover_continue_outcome_from_session(
+                    key, req
+                )
+                if recovered is not None:
+                    return recovered
+            raise
         if decision.replayed:
             return await _validate_replayed_response(decision.response)
-
-    try:
-        session_status = await autonomous_sessions.status(req.conversation_id)
-    except BaseException:
-        await _abort_receipt(key)
-        raise
-    if session_status is None:
-        await _abort_receipt(key)
-        raise HTTPException(status_code=404, detail="conversation 不存在或已过期")
-    if session_status == "in_flight":
-        await _abort_receipt(key)
-        raise HTTPException(status_code=409, detail="conversation 正在续跑，请稍后重试")
-
-    # 注入检测尚未改变 session 或执行工具；分类器失败时释放
-    # receipt，让客户端可以用同一个 key 安全重试。
-    try:
-        is_injection, _ = await check_injection(req.user_reply)
-    except BaseException:
-        await _abort_receipt(key)
-        raise
-    if is_injection:
-        # The durable pause is still live, so this must be a retryable request
-        # error rather than a successful terminal response. The Web client then
-        # keeps the dialog, draft and recovery token intact.
-        logger.warning("[autonomous] continuation blocked by injection policy")
-        await _abort_receipt(key)
-        raise HTTPException(
-            status_code=422,
-            detail="用户回答安全检查未通过，请修改后重试",
-        )
+        receipt_lease = decision.lease
+        if receipt_lease is None:
+            raise RuntimeError("idempotency claim returned without ownership data")
 
     # 数据库 CAS 认领 session，跨进程也只允许一个续跑 owner。
+    continue_fingerprint = _request_fingerprint(
+        "agent.autonomous.continue", req.model_dump(mode="json")
+    )
     try:
-        claim = await autonomous_sessions.claim(req.conversation_id)
+        claim = await autonomous_sessions.claim(
+            req.conversation_id, continue_fingerprint
+        )
     except BaseException:
-        await _abort_receipt(key)
+        await _abort_receipt(receipt_lease)
         raise
     if not claim.claimed:
-        await _abort_receipt(key)
+        if claim.reason == "completed":
+            if claim.outcome is None:
+                await _abort_receipt(receipt_lease)
+                raise HTTPException(
+                    status_code=410,
+                    detail="续跑结果记录无效；请重新开始",
+                )
+            response = await _validate_replayed_response(claim.outcome)
+            if receipt_lease is not None:
+                await request_idempotency.complete(
+                    receipt_lease, response.model_dump(mode="json")
+                )
+            return response
+        await _abort_receipt(receipt_lease)
+        if claim.reason == "payload_mismatch":
+            raise IdempotencyConflictError("payload_mismatch")
+        if claim.reason == "ambiguous":
+            raise IdempotencyConflictError("ambiguous")
         if claim.reason == "in_progress":
-            raise HTTPException(status_code=409, detail="conversation 正在续跑，请稍后重试")
+            raise IdempotencyConflictError("in_progress")
         raise HTTPException(status_code=404, detail="conversation 不存在或已过期")
     if not claim.claim_token:
         raise RuntimeError("session claim returned without ownership data")
@@ -1438,7 +1750,7 @@ async def continue_autonomous(
     claim_token = claim.claim_token
     if claim.payload is None:
         await autonomous_sessions.consume(req.conversation_id, claim_token)
-        await _abort_receipt(key)
+        await _abort_receipt(receipt_lease)
         logger.error(
             "[autonomous] unreadable persisted session: cid_prefix=%s reason=%s",
             req.conversation_id[:13],
@@ -1453,7 +1765,7 @@ async def continue_autonomous(
         session = _session_from_payload(req.conversation_id, claim.payload)
     except (TypeError, ValueError, ValidationError) as exc:
         await autonomous_sessions.consume(req.conversation_id, claim_token)
-        await _abort_receipt(key)
+        await _abort_receipt(receipt_lease)
         logger.error(
             "[autonomous] invalid persisted session: cid_prefix=%s error_type=%s",
             req.conversation_id[:13],
@@ -1463,6 +1775,30 @@ async def continue_autonomous(
             status_code=410,
             detail="暂停会话数据无效，已安全终止；请重新开始",
         ) from exc
+
+    # 注入检测尚未改变 session 或执行工具；失败时把 clean claim 原子退回暂停态。
+    try:
+        is_injection, _ = await check_injection(req.user_reply)
+    except BaseException:
+        released = await autonomous_sessions.release(
+            req.conversation_id, claim_token
+        )
+        await _abort_receipt(receipt_lease)
+        if not released:
+            raise IdempotencyConflictError("in_progress")
+        raise
+    if is_injection:
+        logger.warning("[autonomous] continuation blocked by injection policy")
+        released = await autonomous_sessions.release(
+            req.conversation_id, claim_token
+        )
+        await _abort_receipt(receipt_lease)
+        if not released:
+            raise IdempotencyConflictError("in_progress")
+        raise HTTPException(
+            status_code=422,
+            detail="用户回答安全检查未通过，请修改后重试",
+        )
 
     # copy-on-resume：provider 临时失败时保留数据库中的原始 JSON 快照。
     resume_messages = list(session.messages)
@@ -1476,30 +1812,45 @@ async def continue_autonomous(
     })
 
     progress_started = False
-    session_handed_off = False
+    outcome_committed = False
+    outcome_commit_attempted = False
+
+    async def renew_ownership() -> None:
+        if receipt_lease is not None:
+            renewed = await request_idempotency.renew(receipt_lease)
+            if renewed is None:
+                raise IdempotencyConflictError("in_progress")
+        if not await autonomous_sessions.renew(
+            req.conversation_id, claim_token
+        ):
+            raise IdempotencyConflictError("in_progress")
 
     async def mark_progress_before_tool_calls() -> None:
         nonlocal progress_started
-        if progress_started:
-            return
         marked = await autonomous_sessions.mark_progress(
             req.conversation_id, claim_token
         )
         if not marked:
-            raise RuntimeError("lost autonomous session claim before tool processing")
+            raise IdempotencyConflictError("in_progress")
         progress_started = True
 
-    async def handoff_to_next_pause(next_session: AutonomousSession) -> None:
-        nonlocal session_handed_off
+    async def handoff_to_next_pause(
+        next_session: AutonomousSession,
+        response: AutonomousResponse,
+    ) -> AutonomousResponse:
+        nonlocal outcome_commit_attempted, outcome_committed
+        outcome_commit_attempted = True
         handed_off = await autonomous_sessions.handoff(
             req.conversation_id,
             claim_token,
             next_session.conversation_id,
             _session_to_payload(next_session),
+            response.model_dump(mode="json"),
         )
         if not handed_off:
             raise RuntimeError("lost autonomous session claim during pause handoff")
-        session_handed_off = True
+        outcome_committed = True
+        return response
 
     run_id = f"auto_cont_{uuid.uuid4().hex[:12]}"
     baseline = (
@@ -1508,7 +1859,6 @@ async def continue_autonomous(
         len(resume_tools_called),
         len(resume_evidence_registry),
     )
-    session_consumed = False
     try:
         response = await _run_react_loop(
             messages=resume_messages, plan=session.plan,
@@ -1517,50 +1867,151 @@ async def continue_autonomous(
             starting_round=session.rounds_used, run_id=run_id,
             evidence_registry=resume_evidence_registry,
             grounding_required=session.grounding_required,
-            idempotency_key=key,
-            on_before_tool_calls=mark_progress_before_tool_calls,
+            receipt_lease=receipt_lease,
+            on_before_round=renew_ownership,
+            on_before_tool_calls=renew_ownership,
+            on_before_tool_dispatch=mark_progress_before_tool_calls,
             pause_session_saver=handoff_to_next_pause,
         )
-        if not session_handed_off:
-            if not await autonomous_sessions.consume(
-                req.conversation_id, claim_token
+        if not outcome_committed:
+            outcome_commit_attempted = True
+            if not await autonomous_sessions.finish(
+                req.conversation_id,
+                claim_token,
+                response.model_dump(mode="json"),
             ):
                 raise RuntimeError("lost autonomous session claim during completion")
-        session_consumed = True
-        if key:
+            outcome_committed = True
+        if receipt_lease is not None:
             await request_idempotency.complete(
-                key, response.model_dump(mode="json")
+                receipt_lease, response.model_dump(mode="json")
             )
         return response
     except BaseException as exc:
+        if (
+            outcome_commit_attempted
+            and receipt_lease is not None
+            and isinstance(exc, Exception)
+        ):
+            try:
+                recovered = await _recover_continue_outcome_from_session(
+                    receipt_lease.key,
+                    req,
+                )
+            except Exception as recovery_exc:
+                raise IdempotencyConflictError("in_progress") from recovery_exc
+            if recovered is not None:
+                return recovered
+        if isinstance(exc, Exception):
+            # A long provider call can outlive the session lease.  finish or
+            # handoff then reports ordinary False/RuntimeError, while a round
+            # fence reports IdempotencyConflictError.  Recheck ownership for
+            # both shapes before deciding whether this is a normal provider
+            # failure or a peer-owned/canonical state transition.
+            session_still_owned = await autonomous_sessions.renew(
+                req.conversation_id, claim_token
+            )
+        else:
+            session_still_owned = True
+        if (
+            isinstance(exc, Exception)
+            and (
+                not session_still_owned
+                or isinstance(exc, IdempotencyConflictError)
+            )
+        ):
+            inspection = await autonomous_sessions.inspect(req.conversation_id)
+            if (
+                inspection is not None
+                and inspection.state == "completed"
+                and inspection.outcome is not None
+                and inspection.continue_fingerprint == continue_fingerprint
+            ):
+                recovered_response = await _validate_replayed_response(
+                    inspection.outcome
+                )
+                if receipt_lease is not None:
+                    await request_idempotency.reconcile_completed(
+                        receipt_lease.key,
+                        "agent.autonomous.continue",
+                        req.model_dump(mode="json"),
+                        recovered_response.model_dump(mode="json"),
+                        allow_effect_started=True,
+                    )
+                return recovered_response
+            if inspection is not None and inspection.state == "ambiguous":
+                await _abort_receipt(receipt_lease)
+                raise IdempotencyConflictError("ambiguous") from exc
+            if inspection is not None and inspection.state == "in_flight":
+                if session_still_owned and not progress_started:
+                    await autonomous_sessions.release(
+                        req.conversation_id, claim_token
+                    )
+                raise IdempotencyConflictError("in_progress") from exc
+            if (
+                inspection is not None
+                and inspection.state == "paused"
+                and inspection.continue_fingerprint == continue_fingerprint
+            ):
+                # Inspect may reap our expired clean session lease back to the
+                # same canonical pause. Drop only our fenced receipt claim and
+                # let the exact browser request acquire both leases again.
+                await _abort_receipt(receipt_lease)
+                raise IdempotencyConflictError("in_progress") from exc
         trajectory_progressed = baseline != (
             len(resume_messages),
             len(resume_steps),
             len(resume_tools_called),
             len(resume_evidence_registry),
         )
+        business_tool_dispatched = len(resume_tools_called) > baseline[2]
+        if outcome_committed:
+            if not isinstance(exc, Exception):
+                raise
+            if receipt_lease is not None:
+                try:
+                    await request_idempotency.reconcile_completed(
+                        receipt_lease.key,
+                        "agent.autonomous.continue",
+                        req.model_dump(mode="json"),
+                        response.model_dump(mode="json"),
+                        allow_effect_started=True,
+                    )
+                except Exception:
+                    # Keep the canonical session outcome and exact browser key;
+                    # the next retry can repeat this repair without rerunning.
+                    raise IdempotencyConflictError("in_progress") from exc
+                return response
+            raise
+
         # Registry 在非幂等/未知 handler 前写 started marker。即使工具已开始而
         # trajectory 尚未来得及 append，也必须 fail closed，避免重放副作用。
-        durable_effect = await _abort_receipt(key)
+        durable_effect = await _abort_receipt(receipt_lease)
         effect_attempted = (
             durable_effect or tool_registry.has_effect_attempt(run_id)
         )
-        progressed = progress_started or trajectory_progressed or effect_attempted
+        # Model/control trajectory changes are still local until a terminal
+        # outcome is journaled. Only an actually dispatched business tool (or
+        # its durable side-effect marker) makes a retry unsafe.
+        progressed = (
+            progress_started or business_tool_dispatched or effect_attempted
+        )
 
-        if not session_consumed and not progressed:
+        if not progressed:
             released = await autonomous_sessions.release(
                 req.conversation_id, claim_token
             )
             if released:
                 raise
 
-        if not session_consumed:
-            await autonomous_sessions.consume(req.conversation_id, claim_token)
+        await autonomous_sessions.consume(req.conversation_id, claim_token)
 
         logger.warning(
-            "[autonomous] continuation terminated fail-closed: cid_prefix=%s progressed=%s",
+            "[autonomous] continuation terminated fail-closed: "
+            "cid_prefix=%s progressed=%s trajectory_changed=%s",
             req.conversation_id[:13],
             progressed,
+            trajectory_progressed,
         )
         if isinstance(exc, Exception):
             raise HTTPException(

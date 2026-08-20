@@ -239,9 +239,11 @@ export async function runAutonomous({
   document_id = null,
   grounding_required = false,
   idempotency_key,
+  signal,
 }) {
   return request('/agent/autonomous', {
     method: 'POST',
+    signal,
     headers: {
       'Content-Type': 'application/json',
       ...(idempotency_key ? { 'Idempotency-Key': idempotency_key } : {}),
@@ -255,14 +257,24 @@ export async function continueAutonomous({
   conversation_id,
   user_reply,
   idempotency_key,
+  signal,
 }) {
   return request('/agent/autonomous/continue', {
     method: 'POST',
+    signal,
     headers: {
       'Content-Type': 'application/json',
       ...(idempotency_key ? { 'Idempotency-Key': idempotency_key } : {}),
     },
     body: JSON.stringify({ conversation_id, user_reply }),
+  })
+}
+
+/** 放弃一个尚未续跑的 autonomous HITL 暂停会话。 */
+export async function cancelAutonomous(conversationId, { signal } = {}) {
+  return request(`/agent/autonomous/${encodeURIComponent(conversationId)}`, {
+    method: 'DELETE',
+    signal,
   })
 }
 

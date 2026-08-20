@@ -346,6 +346,9 @@ class TestApiErrorBoundaries(unittest.TestCase):
         self._seed_session(conversation_id)
 
         async def fail_after_progress(**kwargs):
+            await kwargs["on_before_tool_calls"]()
+            await kwargs["on_before_tool_dispatch"]()
+            kwargs["tools_called"].append("update_learning_profile")
             kwargs["steps"].append(
                 autonomous_router.StepRecord(
                     round_index=1,
