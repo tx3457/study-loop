@@ -32,13 +32,16 @@ import asyncio
 import copy
 import hashlib
 import logging
+import math
 import os
 import threading
 import time
 import uuid
+import weakref
 from collections import Counter
 from collections.abc import Awaitable, Callable
 from contextlib import nullcontext
+from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import TypeVar
@@ -63,6 +66,25 @@ _POSTGRES_STORE_SETUP_LOCK_ID = 0x53545544594D454D
 _POSTGRES_STORE_SETUP_LOCK_TIMEOUT_ENV = "MEMORY_STORE_SETUP_LOCK_TIMEOUT_SECONDS"
 _POSTGRES_STORE_SETUP_LOCK_TIMEOUT_DEFAULT_SECONDS = 300.0
 _POSTGRES_STORE_SETUP_LOCK_POLL_SECONDS = 0.05
+_POSTGRES_CONNECT_TIMEOUT_ENV = "MEMORY_STORE_PG_CONNECT_TIMEOUT_SECONDS"
+_POSTGRES_CONNECT_TIMEOUT_DEFAULT_SECONDS = 5.0
+_POSTGRES_LOCK_TIMEOUT_ENV = "MEMORY_STORE_PG_LOCK_TIMEOUT_MS"
+_POSTGRES_LOCK_TIMEOUT_DEFAULT_MS = 5_000
+_POSTGRES_STATEMENT_TIMEOUT_ENV = "MEMORY_STORE_PG_STATEMENT_TIMEOUT_MS"
+_POSTGRES_STATEMENT_TIMEOUT_DEFAULT_MS = 30_000
+_POSTGRES_SETUP_STATEMENT_TIMEOUT_ENV = (
+    "MEMORY_STORE_PG_SETUP_STATEMENT_TIMEOUT_SECONDS"
+)
+_POSTGRES_SETUP_STATEMENT_TIMEOUT_DEFAULT_SECONDS = 300.0
+_POSTGRES_TCP_USER_TIMEOUT_ENV = "MEMORY_STORE_PG_TCP_USER_TIMEOUT_MS"
+_POSTGRES_TCP_USER_TIMEOUT_DEFAULT_MS = 30_000
+_POSTGRES_IO_WAIT_TIMEOUT_ENV = "MEMORY_STORE_PG_IO_WAIT_TIMEOUT_SECONDS"
+_POSTGRES_IO_WAIT_TIMEOUT_DEFAULT_SECONDS = 30.0
+_POSTGRES_CANCEL_DRAIN_TIMEOUT_ENV = (
+    "MEMORY_STORE_PG_CANCEL_DRAIN_TIMEOUT_SECONDS"
+)
+_POSTGRES_CANCEL_DRAIN_TIMEOUT_DEFAULT_SECONDS = 35.0
+_POSTGRES_MAX_MILLISECONDS = 2_147_483_647
 _POSTGRES_SESSION_ARCHIVE_LOCK_TIMEOUT_ENV = (
     "MEMORY_SESSION_ARCHIVE_LOCK_TIMEOUT_SECONDS"
 )
@@ -72,7 +94,21 @@ _MEMORY_COMMIT_CANCEL_DRAIN_TIMEOUT_SECONDS = 15.0
 _WRONG_QUESTION_SOURCE_PREFIX = "wrong-question:"
 _STORE_LOCK = threading.RLock()
 _BACKGROUND_MEMORY_COMMITS: set[asyncio.Task] = set()
+_BACKGROUND_STORE_IO: set[asyncio.Task] = set()
+_STORE_IO_GATES_LOCK = threading.Lock()
+_STORE_IO_GATES: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 _T = TypeVar("_T")
+
+
+@dataclass(frozen=True)
+class _PostgresConnectionConfig:
+    connect_timeout_seconds: float
+    lock_timeout_ms: int
+    statement_timeout_ms: int
+    setup_statement_timeout_seconds: float
+    tcp_user_timeout_ms: int
+    io_wait_timeout_seconds: float
+    cancel_drain_timeout_seconds: float
 
 
 class PostgresStoreSetupLockTimeoutError(TimeoutError):
@@ -83,51 +119,231 @@ class PostgresSessionArchiveLockTimeoutError(TimeoutError):
     """Another worker did not release a user's learner-memory lock in time."""
 
 
-def _postgres_store_setup_lock_timeout_seconds() -> float:
-    source = os.getenv(
-        _POSTGRES_STORE_SETUP_LOCK_TIMEOUT_ENV,
-        str(_POSTGRES_STORE_SETUP_LOCK_TIMEOUT_DEFAULT_SECONDS),
-    )
+class PostgresStoreIOWaitTimeoutError(TimeoutError):
+    """The process-local learner-memory Store remained busy for too long."""
+
+
+def _positive_float_environment(name: str, default: float) -> float:
+    source = os.getenv(name, str(default))
     try:
         value = float(source)
     except (TypeError, ValueError):
+        raise ValueError(f"{name} must be a positive number") from None
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be a positive number")
+    return value
+
+
+def _positive_milliseconds_environment(name: str, default: int) -> int:
+    source = os.getenv(name, str(default))
+    try:
+        value = int(source)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be a positive integer") from None
+    if not 0 < value <= _POSTGRES_MAX_MILLISECONDS:
         raise ValueError(
-            f"{_POSTGRES_STORE_SETUP_LOCK_TIMEOUT_ENV} must be a positive number"
-        ) from None
-    if not 0 < value < float("inf"):
-        raise ValueError(
-            f"{_POSTGRES_STORE_SETUP_LOCK_TIMEOUT_ENV} must be a positive number"
+            f"{name} must be a positive integer no greater than "
+            f"{_POSTGRES_MAX_MILLISECONDS}"
         )
     return value
+
+
+def _postgres_connection_config() -> _PostgresConnectionConfig:
+    """Read and validate every PostgreSQL bound before opening a connection."""
+    return _PostgresConnectionConfig(
+        connect_timeout_seconds=_positive_float_environment(
+            _POSTGRES_CONNECT_TIMEOUT_ENV,
+            _POSTGRES_CONNECT_TIMEOUT_DEFAULT_SECONDS,
+        ),
+        lock_timeout_ms=_positive_milliseconds_environment(
+            _POSTGRES_LOCK_TIMEOUT_ENV,
+            _POSTGRES_LOCK_TIMEOUT_DEFAULT_MS,
+        ),
+        statement_timeout_ms=_positive_milliseconds_environment(
+            _POSTGRES_STATEMENT_TIMEOUT_ENV,
+            _POSTGRES_STATEMENT_TIMEOUT_DEFAULT_MS,
+        ),
+        setup_statement_timeout_seconds=_positive_float_environment(
+            _POSTGRES_SETUP_STATEMENT_TIMEOUT_ENV,
+            _POSTGRES_SETUP_STATEMENT_TIMEOUT_DEFAULT_SECONDS,
+        ),
+        tcp_user_timeout_ms=_positive_milliseconds_environment(
+            _POSTGRES_TCP_USER_TIMEOUT_ENV,
+            _POSTGRES_TCP_USER_TIMEOUT_DEFAULT_MS,
+        ),
+        io_wait_timeout_seconds=_positive_float_environment(
+            _POSTGRES_IO_WAIT_TIMEOUT_ENV,
+            _POSTGRES_IO_WAIT_TIMEOUT_DEFAULT_SECONDS,
+        ),
+        cancel_drain_timeout_seconds=_positive_float_environment(
+            _POSTGRES_CANCEL_DRAIN_TIMEOUT_ENV,
+            _POSTGRES_CANCEL_DRAIN_TIMEOUT_DEFAULT_SECONDS,
+        ),
+    )
+
+
+def _bounded_postgres_conninfo(
+    database_url: str,
+    *,
+    setup: bool = False,
+    config: _PostgresConnectionConfig | None = None,
+) -> str:
+    """Merge safety limits without discarding caller connection options.
+
+    Explicit DATABASE_URL options have the same precedence they had under
+    libpq. PGOPTIONS is used only when the DSN did not specify options. A
+    service-file-only DSN is rejected unless options are made explicit because
+    psycopg's public static parser cannot expose hidden service-file options.
+    """
+    from psycopg.conninfo import conninfo_to_dict, make_conninfo
+
+    config = config or _postgres_connection_config()
+    try:
+        parameters = conninfo_to_dict(database_url)
+    except Exception:
+        raise ValueError(
+            "PostgreSQL learner-memory DATABASE_URL is invalid"
+        ) from None
+    explicit_options = parameters.get("options")
+    environment_options = os.getenv("PGOPTIONS")
+    service_configured = bool(parameters.get("service") or os.getenv("PGSERVICE"))
+    if service_configured and explicit_options is None and not environment_options:
+        raise ValueError(
+            "PostgreSQL service DSNs must expose connection options through "
+            "DATABASE_URL or PGOPTIONS so learner-memory safety limits can be "
+            "merged without silently discarding service-file options"
+        )
+    # libpq service-file options are opaque to the public static parser.
+    # Explicit DSN options keep normal precedence; explicit PGOPTIONS is
+    # therefore treated as the caller-authoritative replacement when a
+    # service profile is involved.
+    existing_options = (
+        str(explicit_options)
+        if explicit_options is not None
+        else (environment_options or "")
+    ).strip()
+    statement_timeout_ms = config.statement_timeout_ms
+    if setup:
+        statement_timeout_ms = max(
+            1,
+            math.ceil(config.setup_statement_timeout_seconds * 1000),
+        )
+        if statement_timeout_ms > _POSTGRES_MAX_MILLISECONDS:
+            raise ValueError(
+                f"{_POSTGRES_SETUP_STATEMENT_TIMEOUT_ENV} is too large for PostgreSQL"
+            )
+    bounded_options = " ".join(
+        part
+        for part in (
+            existing_options,
+            f"-c lock_timeout={config.lock_timeout_ms}",
+            f"-c statement_timeout={statement_timeout_ms}",
+        )
+        if part
+    )
+    try:
+        return make_conninfo(
+            database_url,
+            connect_timeout=max(1, math.ceil(config.connect_timeout_seconds)),
+            tcp_user_timeout=config.tcp_user_timeout_ms,
+            options=bounded_options,
+        )
+    except Exception:
+        raise ValueError(
+            "PostgreSQL learner-memory DATABASE_URL is invalid"
+        ) from None
+
+
+def _postgres_store_setup_lock_timeout_seconds() -> float:
+    return _positive_float_environment(
+        _POSTGRES_STORE_SETUP_LOCK_TIMEOUT_ENV,
+        _POSTGRES_STORE_SETUP_LOCK_TIMEOUT_DEFAULT_SECONDS,
+    )
 
 
 def _postgres_session_archive_lock_timeout_seconds() -> float:
-    source = os.getenv(
+    return _positive_float_environment(
         _POSTGRES_SESSION_ARCHIVE_LOCK_TIMEOUT_ENV,
-        str(_POSTGRES_SESSION_ARCHIVE_LOCK_TIMEOUT_DEFAULT_SECONDS),
+        _POSTGRES_SESSION_ARCHIVE_LOCK_TIMEOUT_DEFAULT_SECONDS,
     )
-    try:
-        value = float(source)
-    except (TypeError, ValueError):
-        raise ValueError(
-            f"{_POSTGRES_SESSION_ARCHIVE_LOCK_TIMEOUT_ENV} must be a positive number"
-        ) from None
-    if not 0 < value < float("inf"):
-        raise ValueError(
-            f"{_POSTGRES_SESSION_ARCHIVE_LOCK_TIMEOUT_ENV} must be a positive number"
+
+
+def _store_prefix_index_state(connection) -> tuple[str, str, bool, bool] | None:
+    """Locate the upstream index in the schema of the visible Store table."""
+    row = connection.execute(
+        """
+        SELECT
+            table_namespace.nspname,
+            index_class.relname,
+            index_state.indisvalid,
+            index_state.indisready
+        FROM pg_catalog.pg_index AS index_state
+        JOIN pg_catalog.pg_class AS table_class
+          ON table_class.oid = index_state.indrelid
+        JOIN pg_catalog.pg_class AS index_class
+          ON index_class.oid = index_state.indexrelid
+        JOIN pg_catalog.pg_namespace AS table_namespace
+          ON table_namespace.oid = table_class.relnamespace
+        WHERE table_class.oid = pg_catalog.to_regclass('store')
+          AND index_class.relnamespace = table_class.relnamespace
+          AND index_class.relname = 'store_prefix_idx'
+        """
+    ).fetchone()
+    if row is None:
+        return None
+    return str(row[0]), str(row[1]), bool(row[2]), bool(row[3])
+
+
+def _drop_invalid_store_prefix_index(connection) -> bool:
+    state = _store_prefix_index_state(connection)
+    if state is None or (state[2] and state[3]):
+        return False
+    from psycopg import sql
+
+    schema_name, index_name, _, _ = state
+    connection.execute(
+        sql.SQL("DROP INDEX CONCURRENTLY IF EXISTS {}.{}").format(
+            sql.Identifier(schema_name),
+            sql.Identifier(index_name),
         )
-    return value
+    )
+    return True
 
 
-def _setup_postgres_store(store, database_url: str) -> None:
+def _ensure_valid_store_prefix_index(connection) -> None:
+    state = _store_prefix_index_state(connection)
+    if state is None:
+        connection.execute(
+            """
+            CREATE INDEX CONCURRENTLY IF NOT EXISTS store_prefix_idx
+            ON store USING btree (prefix text_pattern_ops)
+            """
+        )
+        state = _store_prefix_index_state(connection)
+    if state is None or not state[2] or not state[3]:
+        raise RuntimeError("PostgreSQL learner-memory index is missing or invalid")
+
+
+def _setup_postgres_store(
+    store,
+    database_url: str,
+    *,
+    config: _PostgresConnectionConfig | None = None,
+) -> None:
     import psycopg
 
+    config = config or _postgres_connection_config()
     timeout_seconds = _postgres_store_setup_lock_timeout_seconds()
+    setup_conninfo = _bounded_postgres_conninfo(
+        database_url,
+        setup=True,
+        config=config,
+    )
     # Closing this dedicated connection releases the session-level advisory
     # lock on both success and failure. Non-blocking attempts are required:
     # a blocking advisory-lock query keeps a transaction active while waiting,
     # which makes CREATE INDEX CONCURRENTLY wait for that transaction.
-    with psycopg.connect(database_url, autocommit=True) as connection:
+    with psycopg.connect(setup_conninfo, autocommit=True) as connection:
         deadline = time.monotonic() + timeout_seconds
         while True:
             acquired = connection.execute(
@@ -147,17 +363,78 @@ def _setup_postgres_store(store, database_url: str) -> None:
                     "the store before starting workers."
                 )
             time.sleep(min(_POSTGRES_STORE_SETUP_LOCK_POLL_SECONDS, remaining))
-        store.setup()
+        try:
+            _drop_invalid_store_prefix_index(connection)
+            store.setup()
+            # Migration v1 uses CREATE INDEX CONCURRENTLY IF NOT EXISTS. A
+            # cancelled build can leave an invalid index which IF NOT EXISTS
+            # would otherwise mistake for success on the next cold start.
+            _ensure_valid_store_prefix_index(connection)
+        except BaseException:
+            try:
+                _drop_invalid_store_prefix_index(connection)
+            except BaseException as cleanup_error:
+                logger.error(
+                    "learner-memory setup cleanup failed: error_type=%s",
+                    type(cleanup_error).__name__,
+                )
+            raise
 
 
-def _enter_postgres_store(store_context, database_url: str):
+def _enter_postgres_store(
+    store_context,
+    database_url: str,
+    *,
+    config: _PostgresConnectionConfig | None = None,
+):
     store = store_context.__enter__()
     try:
-        _setup_postgres_store(store, database_url)
+        _setup_postgres_store(store, database_url, config=config)
     except BaseException as exc:
-        store_context.__exit__(type(exc), exc, exc.__traceback__)
+        try:
+            store_context.__exit__(type(exc), exc, exc.__traceback__)
+        except BaseException as cleanup_error:
+            logger.error(
+                "learner-memory setup context cleanup failed: error_type=%s",
+                type(cleanup_error).__name__,
+            )
         raise
     return store
+
+
+def _initialize_postgres_store(store_type, database_url: str):
+    """Run bounded migrations on a temporary connection, then open runtime Store."""
+    config = _postgres_connection_config()
+    setup_context = store_type.from_conn_string(
+        _bounded_postgres_conninfo(database_url, setup=True, config=config)
+    )
+    _enter_postgres_store(
+        setup_context,
+        database_url,
+        config=config,
+    )
+    try:
+        setup_context.__exit__(None, None, None)
+    except BaseException:
+        # A close failure means the setup connection's final state is unknown;
+        # fail the cold start instead of opening the long-lived Store anyway.
+        raise
+
+    runtime_context = store_type.from_conn_string(
+        _bounded_postgres_conninfo(database_url, config=config)
+    )
+    try:
+        runtime_store = runtime_context.__enter__()
+    except BaseException as exc:
+        try:
+            runtime_context.__exit__(type(exc), exc, exc.__traceback__)
+        except BaseException as cleanup_error:
+            logger.error(
+                "learner-memory runtime context cleanup failed: error_type=%s",
+                type(cleanup_error).__name__,
+            )
+        raise
+    return runtime_context, runtime_store
 
 
 # ── Store 后端选择（有 DATABASE_URL 走 PG，否则用内存）──
@@ -166,8 +443,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if DATABASE_URL:
     from langgraph.store.postgres import PostgresStore
 
-    _store_ctx = PostgresStore.from_conn_string(DATABASE_URL)
-    store = _enter_postgres_store(_store_ctx, DATABASE_URL)
+    _store_ctx, store = _initialize_postgres_store(PostgresStore, DATABASE_URL)
 else:
     from langgraph.store.memory import InMemoryStore
 
@@ -177,6 +453,161 @@ else:
 def _store_access_lock():
     """本地 Store/快照共享锁；PostgreSQL 并发由数据库和 advisory lock 管理。"""
     return _STORE_LOCK if not DATABASE_URL else nullcontext()
+
+
+def _store_io_gate() -> asyncio.Lock:
+    """Return a loop-local gate; production owns one long-lived Uvicorn loop."""
+    loop = asyncio.get_running_loop()
+    with _STORE_IO_GATES_LOCK:
+        gate = _STORE_IO_GATES.get(loop)
+        if gate is None:
+            gate = asyncio.Lock()
+            _STORE_IO_GATES[loop] = gate
+        return gate
+
+
+def _consume_store_io_result(task: asyncio.Task, operation_name: str) -> None:
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        logger.warning(
+            "learner-memory store worker cancelled: operation=%s",
+            operation_name,
+        )
+    except BaseException as exc:
+        logger.error(
+            "learner-memory store worker failed: operation=%s error_type=%s",
+            operation_name,
+            type(exc).__name__,
+        )
+
+
+def _track_background_store_io(
+    task: asyncio.Task,
+    gate: asyncio.Lock,
+    operation_name: str,
+) -> None:
+    """Keep the single-flight gate until an uncancellable worker truly exits."""
+    _BACKGROUND_STORE_IO.add(task)
+
+    def on_done(completed: asyncio.Task) -> None:
+        _BACKGROUND_STORE_IO.discard(completed)
+        _consume_store_io_result(completed, operation_name)
+        if gate.locked():
+            gate.release()
+
+    task.add_done_callback(on_done)
+
+
+def _release_late_store_io_gate(
+    acquire_task: asyncio.Task,
+    gate: asyncio.Lock,
+) -> None:
+    """Release a gate acquired at the same instant its waiter was cancelled."""
+
+    def on_done(completed: asyncio.Task) -> None:
+        try:
+            acquired = completed.result()
+        except asyncio.CancelledError:
+            return
+        except BaseException as exc:
+            logger.error(
+                "learner-memory Store gate acquisition failed: error_type=%s",
+                type(exc).__name__,
+            )
+            return
+        if acquired and gate.locked():
+            gate.release()
+
+    acquire_task.add_done_callback(on_done)
+
+
+async def _acquire_store_io_gate(
+    gate: asyncio.Lock,
+    timeout_seconds: float,
+) -> None:
+    """Acquire without leaking a late lock across timeout/cancellation races."""
+    acquire_task = asyncio.create_task(gate.acquire())
+    try:
+        acquired = await asyncio.wait_for(
+            asyncio.shield(acquire_task),
+            timeout=timeout_seconds,
+        )
+    except BaseException:
+        acquire_task.cancel()
+        _release_late_store_io_gate(acquire_task, gate)
+        raise
+    if not acquired:
+        raise RuntimeError("PostgreSQL learner-memory Store gate was not acquired")
+
+
+async def _drain_cancelled_store_io(
+    task: asyncio.Task,
+    timeout_seconds: float,
+) -> bool:
+    """Drain repeated cancellation against one absolute deadline."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    while not task.done():
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return False
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=remaining)
+        except asyncio.CancelledError:
+            continue
+        except asyncio.TimeoutError:
+            return task.done()
+        except BaseException:
+            return True
+    return True
+
+
+async def _run_store_io(
+    operation: Callable[[], _T],
+    *,
+    operation_name: str,
+) -> _T:
+    """Run synchronous PostgreSQL Store I/O with bounded single-flight pressure."""
+    if not DATABASE_URL:
+        return operation()
+
+    config = _postgres_connection_config()
+    gate = _store_io_gate()
+    try:
+        await _acquire_store_io_gate(
+            gate,
+            config.io_wait_timeout_seconds,
+        )
+    except asyncio.TimeoutError:
+        raise PostgresStoreIOWaitTimeoutError(
+            "Timed out waiting for the PostgreSQL learner-memory Store"
+        ) from None
+
+    handed_off = False
+    try:
+        worker = asyncio.create_task(asyncio.to_thread(operation))
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError as cancellation:
+            completed = await _drain_cancelled_store_io(
+                worker,
+                config.cancel_drain_timeout_seconds,
+            )
+            if completed:
+                _consume_store_io_result(worker, operation_name)
+            else:
+                _track_background_store_io(worker, gate, operation_name)
+                handed_off = True
+                logger.warning(
+                    "cancelled request stopped waiting for learner-memory Store I/O; "
+                    "operation=%s",
+                    operation_name,
+                )
+            raise cancellation
+    finally:
+        if not handed_off and gate.locked():
+            gate.release()
 
 
 # ── 6 个 bank 的命名空间 ──────────────────────────────────────────────────
@@ -246,12 +677,18 @@ def _write_bank_state_sync(user_id: str, bank: str, payload: dict) -> None:
 
 async def read_bank_state(user_id: str, bank: str) -> dict | None:
     """读 semantic bank 的完整状态（统一 key='current'）。"""
-    return _read_bank_state_sync(user_id, bank)
+    return await _run_store_io(
+        lambda: _read_bank_state_sync(user_id, bank),
+        operation_name="read_bank_state",
+    )
 
 
 async def write_bank_state(user_id: str, bank: str, payload: dict) -> None:
     """覆盖写 semantic bank。"""
-    _write_bank_state_sync(user_id, bank, payload)
+    await _run_store_io(
+        lambda: _write_bank_state_sync(user_id, bank, payload),
+        operation_name="write_bank_state",
+    )
 
 
 async def mutate_bank_state(
@@ -278,11 +715,13 @@ async def mutate_bank_state(
             result.append(value)
 
     if DATABASE_URL:
-        await asyncio.to_thread(
-            _run_with_postgres_session_archive_lock,
-            user_id,
-            DATABASE_URL,
-            operation,
+        await _run_store_io(
+            lambda: _run_with_postgres_session_archive_lock(
+                user_id,
+                DATABASE_URL,
+                operation,
+            ),
+            operation_name="mutate_bank_state",
         )
     else:
         operation()
@@ -293,15 +732,22 @@ async def append_bank_event(user_id: str, bank: str, key: str, payload: dict) ->
     """append 单条事件到 episodic bank。"""
     stored_payload = copy.deepcopy(payload)
     stored_payload.setdefault("timestamp", _now_iso())
-    with _store_access_lock():
-        store.put(_bank_ns(user_id, bank), key, stored_payload)
+
+    def operation() -> None:
+        with _store_access_lock():
+            store.put(_bank_ns(user_id, bank), key, stored_payload)
+
+    await _run_store_io(operation, operation_name="append_bank_event")
 
 
 async def list_bank_events(user_id: str, bank: str, limit: int = 50) -> list[dict]:
     """读 episodic bank 全部事件，按 timestamp 倒序，截到 limit。"""
     if limit <= 0:
         return []
-    results = _search_all_items(_bank_ns(user_id, bank))
+    results = await _run_store_io(
+        lambda: _search_all_items(_bank_ns(user_id, bank)),
+        operation_name="list_bank_events",
+    )
     items = [copy.deepcopy(r.value) for r in results]
     items.sort(key=lambda x: x.get("timestamp", x.get("date", "")), reverse=True)
     return items[:limit]
@@ -371,11 +817,13 @@ async def update_mastery(user_id: str, document_id: str, current_score: float) -
                 _update_mastery_sync(user_id, document_id, current_score)
             )
 
-        await asyncio.to_thread(
-            _run_with_postgres_session_archive_lock,
-            user_id,
-            DATABASE_URL,
-            operation,
+        await _run_store_io(
+            lambda: _run_with_postgres_session_archive_lock(
+                user_id,
+                DATABASE_URL,
+                operation,
+            ),
+            operation_name="update_mastery",
         )
         return result[0]
     return _update_mastery_sync(user_id, document_id, current_score)
@@ -433,15 +881,17 @@ def _append_weak_points_sync(
 async def append_weak_points(user_id: str, new_points: list[str],
                              document_id: str | None = None) -> None:
     if DATABASE_URL:
-        await asyncio.to_thread(
-            _run_with_postgres_session_archive_lock,
-            user_id,
-            DATABASE_URL,
-            lambda: _append_weak_points_sync(
+        await _run_store_io(
+            lambda: _run_with_postgres_session_archive_lock(
                 user_id,
-                new_points,
-                document_id,
+                DATABASE_URL,
+                lambda: _append_weak_points_sync(
+                    user_id,
+                    new_points,
+                    document_id,
+                ),
             ),
+            operation_name="append_weak_points",
         )
         return
     _append_weak_points_sync(user_id, new_points, document_id)
@@ -493,11 +943,13 @@ async def append_session_brief(user_id: str, brief: dict) -> None:
         # 与归档共用同一个跨进程锁，使“查重→写入”和“扫描→归档→删除”
         # 不会在多个 worker 间交错。阻塞的 psycopg 调用在线程中执行，不冻结
         # FastAPI 事件循环；上层 commit_learning_memory 会在请求取消时等待提交收尾。
-        await asyncio.to_thread(
-            _run_with_postgres_session_archive_lock,
-            user_id,
-            DATABASE_URL,
-            lambda: _append_session_brief_sync(user_id, brief),
+        await _run_store_io(
+            lambda: _run_with_postgres_session_archive_lock(
+                user_id,
+                DATABASE_URL,
+                lambda: _append_session_brief_sync(user_id, brief),
+            ),
+            operation_name="append_session_brief",
         )
         return
     _append_session_brief_sync(user_id, brief)
@@ -519,11 +971,13 @@ def _append_error_sync(user_id: str, error: dict) -> None:
 
 async def append_error(user_id: str, error: dict) -> None:
     if DATABASE_URL:
-        await asyncio.to_thread(
-            _run_with_postgres_session_archive_lock,
-            user_id,
-            DATABASE_URL,
-            lambda: _append_error_sync(user_id, error),
+        await _run_store_io(
+            lambda: _run_with_postgres_session_archive_lock(
+                user_id,
+                DATABASE_URL,
+                lambda: _append_error_sync(user_id, error),
+            ),
+            operation_name="append_error",
         )
         return
     _append_error_sync(user_id, error)
@@ -564,11 +1018,13 @@ async def resolve_error(
                 _resolve_error_sync(user_id, error_id, resolved_session_id)
             )
 
-        await asyncio.to_thread(
-            _run_with_postgres_session_archive_lock,
-            user_id,
-            DATABASE_URL,
-            operation,
+        await _run_store_io(
+            lambda: _run_with_postgres_session_archive_lock(
+                user_id,
+                DATABASE_URL,
+                operation,
+            ),
+            operation_name="resolve_error",
         )
         return result[0]
     return _resolve_error_sync(user_id, error_id, resolved_session_id)
@@ -586,10 +1042,13 @@ async def list_errors(user_id: str, document_id: str | None = None, limit: int =
         return []
 
     event_filter = {"document_id": document_id} if document_id is not None else None
-    results = _search_all_items(
-        _bank_ns(user_id, "error_log"),
-        event_filter=event_filter,
-        batch_size=max(100, limit),
+    results = await _run_store_io(
+        lambda: _search_all_items(
+            _bank_ns(user_id, "error_log"),
+            event_filter=event_filter,
+            batch_size=max(100, limit),
+        ),
+        operation_name="list_errors",
     )
     items = [
         {
@@ -612,7 +1071,7 @@ async def list_errors(user_id: str, document_id: str | None = None, limit: int =
 # ═══════════════════════════════════════════════════════════════════════════
 # 兼容 API：内部委托到语义 bank
 # ═══════════════════════════════════════════════════════════════════════════
-async def _maybe_migrate_legacy(user_id: str) -> None:
+def _maybe_migrate_legacy_sync(user_id: str) -> None:
     """将 legacy profile / sessions 命名空间迁移到语义 bank，仅在目标为空时执行。"""
     # 已有任何新 bank 数据则跳过
     for bank in SEMANTIC_BANKS + EPISODIC_BANKS:
@@ -628,22 +1087,44 @@ async def _maybe_migrate_legacy(user_id: str) -> None:
     if legacy_profile and legacy_profile.value:
         v = legacy_profile.value
         if v.get("topic_mastery"):
-            await write_bank_state(user_id, "mastery", {
-                **v["topic_mastery"],
-                "last_updated": v.get("last_updated", _now_iso()),
-            })
+            _write_bank_state_sync(
+                user_id,
+                "mastery",
+                {
+                    **v["topic_mastery"],
+                    "last_updated": v.get("last_updated", _now_iso()),
+                },
+            )
         if v.get("weak_points"):
             ts = _now_iso()
-            await write_bank_state(user_id, "weak_points", {
-                "points": [{"point": p, "ts": ts} for p in v["weak_points"]],
-                "last_updated": ts,
-            })
+            _write_bank_state_sync(
+                user_id,
+                "weak_points",
+                {
+                    "points": [{"point": p, "ts": ts} for p in v["weak_points"]],
+                    "last_updated": ts,
+                },
+            )
 
     # 2. legacy sessions → session_briefs（按 key 透传）
     legacy_sessions = _search_all_items(("users", user_id, "sessions"))
     for r in legacy_sessions:
         with _store_access_lock():
             store.put(_bank_ns(user_id, "session_briefs"), r.key, r.value)
+
+
+async def _maybe_migrate_legacy(user_id: str) -> None:
+    if DATABASE_URL:
+        await _run_store_io(
+            lambda: _run_with_postgres_session_archive_lock(
+                user_id,
+                DATABASE_URL,
+                lambda: _maybe_migrate_legacy_sync(user_id),
+            ),
+            operation_name="migrate_legacy_memory",
+        )
+        return
+    _maybe_migrate_legacy_sync(user_id)
 
 
 def _count_sessions(results: list) -> int:
@@ -710,8 +1191,11 @@ def _average_session_score(results: list) -> float | None:
 async def get_user_session_count(user_id: str) -> int:
     """返回包含归档内容的精确会话数，不受历史展示上限影响。"""
     await _maybe_migrate_legacy(user_id)
-    return _count_sessions(
-        _search_all_items(_bank_ns(user_id, "session_briefs"))
+    return await _run_store_io(
+        lambda: _count_sessions(
+            _search_all_items(_bank_ns(user_id, "session_briefs"))
+        ),
+        operation_name="get_user_session_count",
     )
 
 
@@ -724,7 +1208,10 @@ async def get_user_profile(user_id: str) -> dict | None:
     mastery_state.pop("last_updated", None)
     mastery_state.pop("_applied_sessions", None)
     wp = await get_weak_points(user_id)
-    session_results = _search_all_items(_bank_ns(user_id, "session_briefs"))
+    session_results = await _run_store_io(
+        lambda: _search_all_items(_bank_ns(user_id, "session_briefs")),
+        operation_name="get_user_profile_sessions",
+    )
     session_count = _count_sessions(session_results)
     average_correct_rate = _average_session_score(session_results)
 
@@ -745,7 +1232,10 @@ async def get_user_profile(user_id: str) -> dict | None:
 async def get_user_sessions(user_id: str) -> list[dict]:
     """兼容 API：从 session_briefs bank 读取，按日期倒序。"""
     await _maybe_migrate_legacy(user_id)
-    results = _search_all_items(_bank_ns(user_id, "session_briefs"))
+    results = await _run_store_io(
+        lambda: _search_all_items(_bank_ns(user_id, "session_briefs")),
+        operation_name="get_user_sessions",
+    )
     archived_ids = {
         str(session_id)
         for result in results
@@ -854,11 +1344,13 @@ def _update_semantic_memory_sync(
 async def update_semantic_memory(user_id: str, report: GradingReport, document_id: str) -> None:
     """更新 mastery（按 session 幂等）并追加 weak_points。"""
     if DATABASE_URL:
-        await asyncio.to_thread(
-            _run_with_postgres_session_archive_lock,
-            user_id,
-            DATABASE_URL,
-            lambda: _update_semantic_memory_sync(user_id, report, document_id),
+        await _run_store_io(
+            lambda: _run_with_postgres_session_archive_lock(
+                user_id,
+                DATABASE_URL,
+                lambda: _update_semantic_memory_sync(user_id, report, document_id),
+            ),
+            operation_name="update_semantic_memory",
         )
         return
     _update_semantic_memory_sync(user_id, report, document_id)
@@ -1155,15 +1647,12 @@ def _run_with_postgres_session_archive_lock(
 
     lock_id = _session_archive_lock_id(user_id)
     timeout_seconds = _postgres_session_archive_lock_timeout_seconds()
-    connect_timeout = max(1, int(timeout_seconds + 0.999))
-    statement_timeout_ms = max(1, int(timeout_seconds * 1000))
+    bounded_conninfo = _bounded_postgres_conninfo(database_url)
     # 使用独立直连而不是 Store 的池连接；with 退出会关闭 session，并在成功、
     # 异常两条路径上释放 session-level advisory lock。
     with psycopg.connect(
-        database_url,
+        bounded_conninfo,
         autocommit=True,
-        connect_timeout=connect_timeout,
-        options=f"-c statement_timeout={statement_timeout_ms}",
     ) as connection:
         deadline = time.monotonic() + timeout_seconds
         while True:
@@ -1204,10 +1693,12 @@ async def maybe_archive_session_briefs(user_id: str) -> None:
         return
 
     try:
-        await asyncio.to_thread(
-            _archive_session_briefs_with_postgres_lock,
-            user_id,
-            DATABASE_URL,
+        await _run_store_io(
+            lambda: _archive_session_briefs_with_postgres_lock(
+                user_id,
+                DATABASE_URL,
+            ),
+            operation_name="archive_session_briefs",
         )
     except Exception as exc:
         # 归档是有界压缩，不应让一次锁连接故障破坏已经写入的学习结果；

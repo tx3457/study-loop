@@ -596,6 +596,11 @@ class TestPostgresArchiveLock(unittest.TestCase):
         )
         with (
             patch.dict(sys.modules, {"psycopg": fake_psycopg}),
+            patch.object(
+                memory,
+                "_bounded_postgres_conninfo",
+                side_effect=lambda database_url: database_url,
+            ),
             patch.object(memory, "_archive_session_briefs_sync", side_effect=archive) as run,
             concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor,
         ):
@@ -644,6 +649,11 @@ class TestPostgresArchiveLock(unittest.TestCase):
         )
         with (
             patch.dict(sys.modules, {"psycopg": fake_psycopg}),
+            patch.object(
+                memory,
+                "_bounded_postgres_conninfo",
+                side_effect=lambda database_url: database_url,
+            ),
             patch.dict(
                 os.environ,
                 {"MEMORY_SESSION_ARCHIVE_LOCK_TIMEOUT_SECONDS": "1"},
