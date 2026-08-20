@@ -2301,7 +2301,7 @@ test('Autonomous restores a pending HITL question and draft after reload', async
 
   await page.goto('/autonomous')
   await page.getByLabel('你的学习目标').fill('保留这个学习目标')
-  await page.getByLabel('用户 ID').fill('reload-user')
+  await expect(page.getByLabel('用户 ID')).toHaveCount(0)
   await page.getByLabel('文档 ID（可选）').fill('reload.md')
   await page.getByRole('button', { name: '开始执行' }).click()
 
@@ -2316,7 +2316,7 @@ test('Autonomous restores a pending HITL question and draft after reload', async
     draft: '保留这个回答草稿',
     request: {
       query: '保留这个学习目标',
-      user_id: 'reload-user',
+      user_id: 'default_user',
       document_id: 'reload.md',
       grounding_required: true,
     },
@@ -2441,6 +2441,24 @@ test('Autonomous reset clears recovery state and corrupt storage fails closed', 
   await expect(page.getByRole('dialog', { name: 'Agent 想问你' })).toHaveCount(0)
   await expect(page.getByLabel('你的学习目标')).toHaveValue('')
   expect(await page.evaluate(key => sessionStorage.getItem(key), AUTONOMOUS_SESSION_KEY)).toBeNull()
+
+  await page.evaluate(key => sessionStorage.setItem(key, JSON.stringify({
+    version: 1,
+    conversation_id: 'legacy-custom-user',
+    user_question: '不应恢复的旧用户会话？',
+    draft: '旧草稿',
+    request: {
+      query: '旧学习目标',
+      user_id: 'another-user',
+      document_id: '',
+      grounding_required: false,
+    },
+    continue_idempotency_key: null,
+  })), AUTONOMOUS_SESSION_KEY)
+  await page.reload()
+  await expect(page.getByRole('dialog', { name: 'Agent 想问你' })).toHaveCount(0)
+  await expect(page.getByLabel('你的学习目标')).toHaveValue('')
+  expect(await page.evaluate(key => sessionStorage.getItem(key), AUTONOMOUS_SESSION_KEY)).toBeNull()
   expect(unexpectedRequests).toEqual([])
   expect(problems).toEqual([])
 })
@@ -2532,10 +2550,6 @@ test('Autonomous rotates a failed start key after edits or reset', async ({ page
     {
       name: 'goal',
       mutate: async () => page.getByLabel('你的学习目标').fill('修改后的目标'),
-    },
-    {
-      name: 'user',
-      mutate: async () => page.getByLabel('用户 ID').fill('edited-user'),
     },
     {
       name: 'document',

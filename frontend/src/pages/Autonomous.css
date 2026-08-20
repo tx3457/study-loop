@@ -39,11 +39,6 @@
   border-color: #3b82f6;
   box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
 }
-.autonomous-page .form-row-inline {
-  display: grid;
-  grid-template-columns: 200px 1fr;
-  gap: 16px;
-}
 .autonomous-page .field-label-row {
   display: flex;
   justify-content: space-between;
@@ -540,7 +535,6 @@
     padding: 16px;
   }
 
-  .autonomous-page .form-row-inline,
   .autonomous-page .meta-grid {
     grid-template-columns: 1fr;
   }
