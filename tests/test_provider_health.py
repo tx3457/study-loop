@@ -395,7 +395,7 @@ class TestProviderHealthApi(unittest.TestCase):
 
     def test_application_starts_and_reports_503_without_provider_credentials(self):
         repo_root = Path(__file__).parents[1]
-        with tempfile.TemporaryDirectory(dir="/tmp") as chroma_dir:
+        with tempfile.TemporaryDirectory() as chroma_dir:
             env = os.environ.copy()
             for name in (
                 "LLM_API_KEY",
@@ -417,11 +417,22 @@ class TestProviderHealthApi(unittest.TestCase):
             env["MCP_LIVE_ENABLED"] = "false"
             script = """
 import socket
+import sys
 
 from fastapi.testclient import TestClient
 
 
-def reject_network(*args, **kwargs):
+original_connect = socket.socket.connect
+
+
+def reject_network(sock, address):
+    # asyncio's Windows event loop creates its wakeup socket over loopback.
+    if (
+        sys.platform == "win32"
+        and isinstance(address, tuple)
+        and address[0] in {"127.0.0.1", "::1"}
+    ):
+        return original_connect(sock, address)
     raise AssertionError("unexpected network access")
 
 

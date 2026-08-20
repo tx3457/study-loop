@@ -3,6 +3,7 @@
 import tempfile
 import unittest
 import sys
+from contextlib import ExitStack
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -17,6 +18,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import routers.documents as documents_router
 import services.vectorstore as vectorstore
 from main import app
+
+
+def _stop_chroma_client(client) -> None:
+    """Release Chroma file handles before a Windows temporary directory exits."""
+    system = getattr(client, "_system", None)
+    stop = getattr(system, "stop", None)
+    if callable(stop):
+        stop()
 
 
 class TestDocumentUploadErrorBoundaries(unittest.TestCase):
@@ -151,8 +160,10 @@ class TestDocumentUploadErrorBoundaries(unittest.TestCase):
 class TestUnicodeDocumentStorage(unittest.IsolatedAsyncioTestCase):
     async def test_unicode_public_id_round_trips_through_safe_collection_name(self):
         filename = "机器 学习讲义.md"
-        with tempfile.TemporaryDirectory(dir="/tmp") as temp_dir:
+        with ExitStack() as stack:
+            temp_dir = stack.enter_context(tempfile.TemporaryDirectory())
             client = chromadb.PersistentClient(path=str(Path(temp_dir) / "chroma"))
+            stack.callback(_stop_chroma_client, client)
             embeddings = SimpleNamespace(
                 data=[SimpleNamespace(embedding=[0.1, 0.2, 0.3])]
             )
