@@ -20,6 +20,10 @@ import {
   sameQuizIntent,
   writeQuizRecovery,
 } from '../state/quizRecovery'
+import {
+  abortRecoveryRequests,
+  runRecoveryRequest,
+} from '../state/recoveryRequest'
 import './Quiz.css'
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -295,6 +299,36 @@ function isRecoveryBusyError(error) {
   )
 }
 
+function isUncertainRequestError(error) {
+  return error?.code === 'recovery_request_timeout'
+    || error?.status == null
+    || error.status >= 500
+    || [408, 425, 429].includes(error.status)
+    || (
+      error.status === 413
+      && error.code === 'quiz_session_too_large'
+    )
+    || (
+      error.status === 409
+      && (
+        [
+          'quiz_session_stale',
+          'quiz_session_not_completed',
+        ].includes(error.code)
+        || ['stale', 'not_completed'].includes(error.reason)
+      )
+    )
+    || isRecoveryBusyError(error)
+}
+
+function isDeterministicQuizRejection(error) {
+  return [400, 422].includes(error?.status)
+    || (
+      error?.status === 413
+      && error?.code === 'quiz_session_too_large'
+    )
+}
+
 function terminalLearningPathStartDestination(error, record) {
   const source = learningPathSourceForRecovery(record)
   const unavailableStage = error?.status === 409
@@ -304,14 +338,22 @@ function terminalLearningPathStartDestination(error, record) {
     && error?.code === 'learning_path_binding_mismatch'
   const missingPath = error?.status === 404
     && error?.code === 'learning_path_not_found'
+  const corruptPath = error?.status === 503
+    && error?.code === 'learning_path_corrupt'
   if (
     record?.session
     || !source
-    || (!unavailableStage && !bindingMismatch && !missingPath)
+    || (
+      !unavailableStage
+      && !bindingMismatch
+      && !missingPath
+      && !corruptPath
+    )
   ) return null
   return {
-    pathId: missingPath ? null : source.learning_path_id,
+    pathId: missingPath || corruptPath ? null : source.learning_path_id,
     missing: missingPath,
+    corrupt: corruptPath,
   }
 }
 
@@ -327,6 +369,7 @@ export default function Quiz() {
   const recoveryInFlight = useRef(false)
   const recoveryEpoch = useRef(0)
   const recoveryRetryTimer = useRef(null)
+  const activeRecoveryControllers = useRef(new Set())
   const mountedRef = useRef(true)
   const locationSearchRef = useRef(location.search)
   locationSearchRef.current = location.search
@@ -421,6 +464,7 @@ export default function Quiz() {
   }, [])
 
   useEffect(() => {
+    const recoveryControllers = activeRecoveryControllers.current
     mountedRef.current = true
     return () => {
       mountedRef.current = false
@@ -433,6 +477,8 @@ export default function Quiz() {
       queueMicrotask(() => {
         if (mountedRef.current) return
         recoveryEpoch.current += 1
+        abortRecoveryRequests(recoveryControllers)
+        recoveryInFlight.current = false
         gradingRequestEpoch.current += 1
         reportRequestEpoch.current += 1
       })
@@ -523,9 +569,15 @@ export default function Quiz() {
     setError(stored ? null : '浏览器无法更新恢复进度，请不要刷新页面')
   }, [persistRecovery, startTimer, stopTimer])
 
-  const recoverQuiz = useCallback(async (epoch) => {
+  const recoverQuiz = useCallback(async (epoch, signal) => {
     const assertCurrent = () => {
-      if (epoch !== recoveryEpoch.current) throw new RecoverySupersededError()
+      if (
+        signal.aborted
+        || !mountedRef.current
+        || epoch !== recoveryEpoch.current
+      ) {
+        throw new RecoverySupersededError()
+      }
     }
 
     let record = recoveryRef.current
@@ -541,11 +593,13 @@ export default function Quiz() {
         ? await startSession({
             ...record.intent.request,
             idempotency_key: record.start_idempotency_key,
+            signal,
           })
         : await startWrongQuestionPractice(
             record.intent.request.document_id,
             record.intent.request.user_id,
             record.start_idempotency_key,
+            { signal },
           )
       assertCurrent()
       const responseSession = recoverySessionFromResponse(response)
@@ -588,7 +642,7 @@ export default function Quiz() {
     }
 
     let snapshot = assertSessionSnapshot(
-      await getSessionSnapshot(record.session.session_id),
+      await getSessionSnapshot(record.session.session_id, { signal }),
       record.session.session_id,
       record.intent.request.document_id,
       record.intent.kind === 'standard' ? 'standard' : 'wrong_question',
@@ -616,10 +670,11 @@ export default function Quiz() {
         answer: pendingAnswer.answer,
         question_index: pendingAnswer.question_index,
         idempotency_key: pendingAnswer.idempotency_key,
+        signal,
       })
       assertCurrent()
       snapshot = assertSessionSnapshot(
-        await getSessionSnapshot(record.session.session_id),
+        await getSessionSnapshot(record.session.session_id, { signal }),
         record.session.session_id,
         record.intent.request.document_id,
         record.intent.kind === 'standard' ? 'standard' : 'wrong_question',
@@ -653,8 +708,15 @@ export default function Quiz() {
     recoveryInFlight.current = true
     const epoch = ++recoveryEpoch.current
 
-    void recoverQuiz(epoch).catch(err => {
-      if (err instanceof RecoverySupersededError || epoch !== recoveryEpoch.current) return
+    void runRecoveryRequest(
+      signal => recoverQuiz(epoch, signal),
+      activeRecoveryControllers.current,
+    ).catch(err => {
+      if (
+        err instanceof RecoverySupersededError
+        || !mountedRef.current
+        || epoch !== recoveryEpoch.current
+      ) return
       const current = recoveryRef.current
       let retryDelay = null
       const pathDestination = terminalLearningPathStartDestination(err, current)
@@ -673,7 +735,20 @@ export default function Quiz() {
         setSessionId(null)
         setQuestions([])
         setPhase('setup')
+      } else if (isDeterministicQuizRejection(err) && !current?.session) {
+        discardRecovery()
+        setRecoveryReady(true)
+        setSessionId(null)
+        setQuestions([])
+        setPhase('setup')
       } else if (isPayloadMismatch(err) && current?.session) {
+        const reset = persistRecovery({ ...current, pending_answer: null })
+        setPhase('loading')
+        if (reset) retryDelay = 0
+      } else if (
+        isDeterministicQuizRejection(err)
+        && current?.pending_answer
+      ) {
         const reset = persistRecovery({ ...current, pending_answer: null })
         setPhase('loading')
         if (reset) retryDelay = 0
@@ -693,7 +768,9 @@ export default function Quiz() {
         )
       }
     }).finally(() => {
-      if (epoch === recoveryEpoch.current) recoveryInFlight.current = false
+      if (mountedRef.current && epoch === recoveryEpoch.current) {
+        recoveryInFlight.current = false
+      }
     })
   }, [
     discardRecovery,
@@ -867,13 +944,18 @@ export default function Quiz() {
     setError(null)
 
     try {
-      const fb = await submitAnswer(sessionId, {
-        answer,
-        question_index: questionIndex,
-        idempotency_key: pendingAnswer.idempotency_key,
-      })
+      const fb = await runRecoveryRequest(
+        signal => submitAnswer(sessionId, {
+          answer,
+          question_index: questionIndex,
+          idempotency_key: pendingAnswer.idempotency_key,
+          signal,
+        }),
+        activeRecoveryControllers.current,
+      )
       if (
-        operationEpoch !== recoveryEpoch.current
+        !mountedRef.current
+        || operationEpoch !== recoveryEpoch.current
         || recoveryRef.current?.session?.session_id !== sessionId
       ) return
       persistRecovery({
@@ -892,7 +974,7 @@ export default function Quiz() {
       setFeedback(fb)
       setPhase('feedback')
     } catch (err) {
-      if (operationEpoch !== recoveryEpoch.current) return
+      if (!mountedRef.current || operationEpoch !== recoveryEpoch.current) return
       if (shouldClearQuizSession(err)) {
         clearSession()
       } else if (isPayloadMismatch(err)) {
@@ -907,12 +989,22 @@ export default function Quiz() {
         setPhase('loading')
         setRecoveryReady(false)
         setRecoveryAttempt(attempt => attempt + 1)
+      } else if (isDeterministicQuizRejection(err)) {
+        persistRecovery({ ...record, pending_answer: null })
+        setPhase('answering')
+        setRecoveryReady(true)
+      } else if (isUncertainRequestError(err)) {
+        setPhase('loading')
+        setRecoveryReady(false)
+        setRecoveryAttempt(attempt => attempt + 1)
       } else {
         setPhase('answering')
       }
       setError(err.message)
     } finally {
-      if (operationEpoch === recoveryEpoch.current) setSubmitting(false)
+      if (mountedRef.current && operationEpoch === recoveryEpoch.current) {
+        setSubmitting(false)
+      }
     }
   }
 
@@ -935,9 +1027,13 @@ export default function Quiz() {
     if (feedback?.is_last) {
       stopTimer()
       try {
-        const res = await getSessionResult(sessionId)
+        const res = await runRecoveryRequest(
+          signal => getSessionResult(sessionId, { signal }),
+          activeRecoveryControllers.current,
+        )
         if (
-          operationEpoch !== recoveryEpoch.current
+          !mountedRef.current
+          || operationEpoch !== recoveryEpoch.current
           || recoveryRef.current?.session?.session_id !== sessionId
         ) return
         if (acknowledgedRecord) {
@@ -960,9 +1056,18 @@ export default function Quiz() {
           void runGrade(sessionId)
         }
       } catch (err) {
-        if (operationEpoch === recoveryEpoch.current) setError(err.message)
+        if (mountedRef.current && operationEpoch === recoveryEpoch.current) {
+          if (shouldClearQuizSession(err)) {
+            clearSession()
+          } else if (isUncertainRequestError(err)) {
+            setPhase('loading')
+            setRecoveryReady(false)
+            setRecoveryAttempt(attempt => attempt + 1)
+          }
+          setError(err.message)
+        }
       } finally {
-        if (operationEpoch === recoveryEpoch.current) {
+        if (mountedRef.current && operationEpoch === recoveryEpoch.current) {
           advancingInFlight.current = false
           setAdvancing(false)
         }
@@ -981,6 +1086,7 @@ export default function Quiz() {
     stopTimer()
     clearTimeout(recoveryRetryTimer.current)
     recoveryEpoch.current += 1
+    abortRecoveryRequests(activeRecoveryControllers.current)
     recoveryInFlight.current = false
     discardRecovery()
     setRecoveryReady(true)
@@ -1057,8 +1163,11 @@ export default function Quiz() {
     setGrading(true)
     setError(null)
     try {
-      const report = await gradeSession(targetSessionId)
-      if (requestEpoch !== gradingRequestEpoch.current) return
+      const report = await runRecoveryRequest(
+        signal => gradeSession(targetSessionId, { signal }),
+        activeRecoveryControllers.current,
+      )
+      if (!mountedRef.current || requestEpoch !== gradingRequestEpoch.current) return
       const record = recoveryRef.current
       const completion = assertLearningPathResponse(
         report,
@@ -1080,11 +1189,17 @@ export default function Quiz() {
       setLearningPathCompletion(completion)
       setPhase('grading')
     } catch (err) {
-      if (requestEpoch !== gradingRequestEpoch.current) return
-      if (shouldClearQuizSession(err)) clearSession()
+      if (!mountedRef.current || requestEpoch !== gradingRequestEpoch.current) return
+      if (shouldClearQuizSession(err)) {
+        clearSession()
+      } else if (isUncertainRequestError(err)) {
+        setPhase('loading')
+        setRecoveryReady(false)
+        setRecoveryAttempt(attempt => attempt + 1)
+      }
       setError(err.message)
     } finally {
-      if (requestEpoch === gradingRequestEpoch.current) {
+      if (mountedRef.current && requestEpoch === gradingRequestEpoch.current) {
         gradingInFlight.current = false
         setGrading(false)
       }
@@ -1102,8 +1217,11 @@ export default function Quiz() {
     setReporting(true)
     setError(null)
     try {
-      const report = await generateReport(targetSessionId)
-      if (requestEpoch !== reportRequestEpoch.current) return
+      const report = await runRecoveryRequest(
+        signal => generateReport(targetSessionId, { signal }),
+        activeRecoveryControllers.current,
+      )
+      if (!mountedRef.current || requestEpoch !== reportRequestEpoch.current) return
       const record = recoveryRef.current
       const completion = assertLearningPathResponse(
         report,
@@ -1125,11 +1243,17 @@ export default function Quiz() {
       setLearningPathCompletion(completion)
       setPhase('report')
     } catch (err) {
-      if (requestEpoch !== reportRequestEpoch.current) return
-      if (shouldClearQuizSession(err)) clearSession()
+      if (!mountedRef.current || requestEpoch !== reportRequestEpoch.current) return
+      if (shouldClearQuizSession(err)) {
+        clearSession()
+      } else if (isUncertainRequestError(err)) {
+        setPhase('loading')
+        setRecoveryReady(false)
+        setRecoveryAttempt(attempt => attempt + 1)
+      }
       setError(err.message)
     } finally {
-      if (requestEpoch === reportRequestEpoch.current) {
+      if (mountedRef.current && requestEpoch === reportRequestEpoch.current) {
         reportingInFlight.current = false
         setReporting(false)
       }
@@ -1259,6 +1383,8 @@ export default function Quiz() {
           <p className="state-desc">
             {activeRecoveryPathTarget.missing
               ? '这条学习路径已不存在，请返回学习路径重新选择。'
+              : activeRecoveryPathTarget.corrupt
+                ? '这条学习路径数据损坏，请返回学习路径重新生成。'
               : '服务端进度已经变化，请返回学习路径查看当前可学习阶段。'}
           </p>
           <button
@@ -1268,6 +1394,8 @@ export default function Quiz() {
           >
             {activeRecoveryPathTarget.missing
               ? '返回学习路径重新选择'
+              : activeRecoveryPathTarget.corrupt
+                ? '返回学习路径重新生成'
               : '返回学习路径刷新进度'}
           </button>
         </div>

@@ -114,9 +114,11 @@ export async function createLearningPathResource({
   document_id,
   user_id = 'default_user',
   idempotency_key,
+  signal,
 }) {
   return request('/learning-paths', {
     method: 'POST',
+    signal,
     headers: {
       'Content-Type': 'application/json',
       ...(idempotency_key ? { 'Idempotency-Key': idempotency_key } : {}),
@@ -126,16 +128,24 @@ export async function createLearningPathResource({
 }
 
 /** 读取服务端持久化的学习路径资源。 */
-export async function getLearningPathResource(learningPathId) {
-  return request(`/learning-paths/${encodeURIComponent(learningPathId)}`)
+export async function getLearningPathResource(
+  learningPathId,
+  { signal } = {},
+) {
+  return request(`/learning-paths/${encodeURIComponent(learningPathId)}`, {
+    signal,
+  })
 }
 
 /** 读取默认用户最近创建的学习路径；没有记录时返回 null。 */
-export async function getCurrentLearningPathResource(documentId = null) {
+export async function getCurrentLearningPathResource(
+  documentId = null,
+  { signal } = {},
+) {
   const query = documentId
     ? `?${new URLSearchParams({ document_id: documentId })}`
     : ''
-  return request(`/learning-paths/current${query}`)
+  return request(`/learning-paths/current${query}`, { signal })
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -152,9 +162,11 @@ export async function startSession({
   user_id,
   learning_path_source,
   idempotency_key,
+  signal,
 }) {
   return request('/session/start', {
     method: 'POST',
+    signal,
     headers: {
       'Content-Type': 'application/json',
       ...(idempotency_key ? { 'Idempotency-Key': idempotency_key } : {}),
@@ -172,8 +184,8 @@ export async function startSession({
 }
 
 /** 获取浏览器安全的会话快照，用于刷新与跨页面恢复 */
-export async function getSessionSnapshot(sessionId) {
-  return request(`/session/${encodeURIComponent(sessionId)}`)
+export async function getSessionSnapshot(sessionId, { signal } = {}) {
+  return request(`/session/${encodeURIComponent(sessionId)}`, { signal })
 }
 
 /** 提交单题答案 */
@@ -181,9 +193,11 @@ export async function submitAnswer(sessionId, {
   answer,
   question_index,
   idempotency_key,
+  signal,
 }) {
   return request(`/session/${sessionId}/answer`, {
     method: 'POST',
+    signal,
     headers: {
       'Content-Type': 'application/json',
       ...(idempotency_key ? { 'Idempotency-Key': idempotency_key } : {}),
@@ -193,13 +207,13 @@ export async function submitAnswer(sessionId, {
 }
 
 /** 获取答题结果 */
-export async function getSessionResult(sessionId) {
-  return request(`/session/${sessionId}/result`)
+export async function getSessionResult(sessionId, { signal } = {}) {
+  return request(`/session/${sessionId}/result`, { signal })
 }
 
 /** AI 批改 */
-export async function gradeSession(sessionId) {
-  return request(`/session/${sessionId}/grade`, { method: 'POST' })
+export async function gradeSession(sessionId, { signal } = {}) {
+  return request(`/session/${sessionId}/grade`, { method: 'POST', signal })
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -227,12 +241,14 @@ export async function startWrongQuestionPractice(
   documentId,
   userId = 'default_user',
   idempotencyKey,
+  { signal } = {},
 ) {
   const query = new URLSearchParams({ user_id: userId })
   return request(
     `/wrong-questions/${encodeURIComponent(documentId)}/practice?${query}`,
     {
       method: 'POST',
+      signal,
       headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {},
     },
   )
@@ -243,8 +259,8 @@ export async function startWrongQuestionPractice(
    ═══════════════════════════════════════════════════════════════════ */
 
 /** 学习评估报告 */
-export async function generateReport(sessionId) {
-  return request(`/session/${sessionId}/report`, { method: 'POST' })
+export async function generateReport(sessionId, { signal } = {}) {
+  return request(`/session/${sessionId}/report`, { method: 'POST', signal })
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -312,9 +328,11 @@ export async function startAdaptive({
   document_id,
   goal,
   idempotency_key,
+  signal,
 }) {
   return request('/agent/adaptive/start', {
     method: 'POST',
+    signal,
     headers: {
       'Content-Type': 'application/json',
       ...(idempotency_key ? { 'Idempotency-Key': idempotency_key } : {}),
@@ -324,9 +342,13 @@ export async function startAdaptive({
 }
 
 /** 读取服务端持久化的 Adaptive 安全快照。 */
-export async function getAdaptiveSnapshot(adaptiveSessionId) {
+export async function getAdaptiveSnapshot(
+  adaptiveSessionId,
+  { signal } = {},
+) {
   return request(
     `/agent/adaptive/${encodeURIComponent(adaptiveSessionId)}`,
+    { signal },
   )
 }
 
@@ -337,9 +359,11 @@ export async function submitAdaptive({
   turn,
   revision,
   idempotency_key,
+  signal,
 }) {
   return request('/agent/adaptive/submit', {
     method: 'POST',
+    signal,
     headers: {
       'Content-Type': 'application/json',
       ...(idempotency_key ? { 'Idempotency-Key': idempotency_key } : {}),

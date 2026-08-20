@@ -21,6 +21,10 @@ import {
   sameAdaptiveIntent,
   writeAdaptiveRecovery,
 } from '../state/adaptiveRecovery'
+import {
+  abortRecoveryRequests,
+  runRecoveryRequest,
+} from '../state/recoveryRequest'
 import './Adaptive.css'
 
 const ACTION_META = {
@@ -62,8 +66,28 @@ function isStaleError(error) {
   )
 }
 
-function isRejectedSubmit(error) {
+function isRejectedRequest(error) {
   return error?.status === 400 || error?.status === 422
+}
+
+function isPayloadMismatch(error) {
+  return error?.status === 409 && error?.reason === 'payload_mismatch'
+}
+
+function isTerminalRecoveryError(error) {
+  return (
+    error?.status === 413
+    && [
+      'adaptive_session_too_large',
+      'adaptive_learning_path_too_large',
+    ].includes(error?.code)
+  ) || (
+    error?.status === 503
+    && [
+      'adaptive_session_corrupt',
+      'adaptive_learning_path_corrupt',
+    ].includes(error?.code)
+  )
 }
 
 function safeStages(path) {
@@ -139,6 +163,7 @@ export default function Adaptive() {
   const recoveryInFlight = useRef(false)
   const recoveryEpoch = useRef(0)
   const recoveryRetryTimer = useRef(null)
+  const activeRecoveryControllers = useRef(new Set())
   const mountedRef = useRef(true)
   const [confirmedLearningPathId, setConfirmedLearningPathId] = useState(null)
   const [pathConfirmationComplete, setPathConfirmationComplete] = useState(false)
@@ -182,6 +207,7 @@ export default function Adaptive() {
 
   const supersedeRequests = useCallback(() => {
     recoveryEpoch.current += 1
+    abortRecoveryRequests(activeRecoveryControllers.current)
     recoveryInFlight.current = false
     setConfirmedLearningPathId(null)
     setPathConfirmationComplete(false)
@@ -212,13 +238,18 @@ export default function Adaptive() {
   }, [loadDocs])
 
   useEffect(() => {
+    const recoveryControllers = activeRecoveryControllers.current
     mountedRef.current = true
     return () => {
       mountedRef.current = false
       docsRequestId.current += 1
       clearTimeout(recoveryRetryTimer.current)
       queueMicrotask(() => {
-        if (!mountedRef.current) recoveryEpoch.current += 1
+        if (!mountedRef.current) {
+          recoveryEpoch.current += 1
+          abortRecoveryRequests(recoveryControllers)
+          recoveryInFlight.current = false
+        }
       })
     }
   }, [])
@@ -259,9 +290,13 @@ export default function Adaptive() {
     return stored
   }, [persistRecovery, renderSnapshot])
 
-  const recoverAdaptive = useCallback(async (epoch) => {
+  const recoverAdaptive = useCallback(async (epoch, signal) => {
     const assertCurrent = () => {
-      if (!mountedRef.current || epoch !== recoveryEpoch.current) {
+      if (
+        signal.aborted
+        || !mountedRef.current
+        || epoch !== recoveryEpoch.current
+      ) {
         throw new RecoverySupersededError()
       }
     }
@@ -278,6 +313,7 @@ export default function Adaptive() {
       const started = normalizeAdaptiveSnapshot(await startAdaptive({
         ...record.intent,
         idempotency_key: record.start_idempotency_key,
+        signal,
       }))
       assertCurrent()
       if (!started) throw new Error('服务端返回的自适应学习快照无效，请稍后重试')
@@ -287,7 +323,10 @@ export default function Adaptive() {
 
     setPhase('recovering')
     let snapshot = normalizeAdaptiveSnapshot(
-      await getAdaptiveSnapshot(record.session.adaptive_session_id),
+      await getAdaptiveSnapshot(
+        record.session.adaptive_session_id,
+        { signal },
+      ),
       record.session.adaptive_session_id,
     )
     assertCurrent()
@@ -321,6 +360,7 @@ export default function Adaptive() {
     const submitted = normalizeAdaptiveSnapshot(await submitAdaptive({
       ...pending.body,
       idempotency_key: pending.idempotency_key,
+      signal,
     }), record.session.adaptive_session_id)
     assertCurrent()
     if (!submitted) throw new Error('服务端返回的自适应学习快照无效，请稍后重试')
@@ -334,12 +374,47 @@ export default function Adaptive() {
     recoveryInFlight.current = true
     const epoch = ++recoveryEpoch.current
 
-    void recoverAdaptive(epoch).catch(err => {
-      if (err instanceof RecoverySupersededError || epoch !== recoveryEpoch.current) return
+    void runRecoveryRequest(
+      signal => recoverAdaptive(epoch, signal),
+      activeRecoveryControllers.current,
+    ).catch(err => {
+      if (
+        err instanceof RecoverySupersededError
+        || !mountedRef.current
+        || epoch !== recoveryEpoch.current
+      ) return
       const current = recoveryRef.current
       let retryDelay = null
 
       if (isSessionGone(err)) {
+        discardRecovery()
+        setResp(null)
+        setAnswers([])
+        setPhase('idle')
+        setRecoveryReady(true)
+      } else if (isTerminalRecoveryError(err)) {
+        discardRecovery()
+        setConfirmedLearningPathId(null)
+        setPathConfirmationComplete(false)
+        setResp(null)
+        setAnswers([])
+        setPhase('idle')
+        setRecoveryReady(true)
+      } else if (isPayloadMismatch(err) && current?.pending_submit) {
+        const stored = persistRecovery({ ...current, pending_submit: null })
+        if (stored?.snapshot) {
+          renderSnapshot(stored.snapshot, stored, false)
+        } else {
+          setPhase('error')
+        }
+        setRecoveryReady(true)
+      } else if (isPayloadMismatch(err) && !current?.session) {
+        discardRecovery()
+        setResp(null)
+        setAnswers([])
+        setPhase('idle')
+        setRecoveryReady(true)
+      } else if (isRejectedRequest(err) && !current?.session) {
         discardRecovery()
         setResp(null)
         setAnswers([])
@@ -354,7 +429,7 @@ export default function Adaptive() {
         setPhase('recovering')
         setRecoveryReady(false)
         retryDelay = 0
-      } else if (isRejectedSubmit(err) && current?.pending_submit) {
+      } else if (isRejectedRequest(err) && current?.pending_submit) {
         const stored = persistRecovery({ ...current, pending_submit: null })
         if (stored) {
           setPhase('recovering')
@@ -383,7 +458,9 @@ export default function Adaptive() {
         }, retryDelay)
       }
     }).finally(() => {
-      if (epoch === recoveryEpoch.current) recoveryInFlight.current = false
+      if (mountedRef.current && epoch === recoveryEpoch.current) {
+        recoveryInFlight.current = false
+      }
     })
   }, [
     discardRecovery,

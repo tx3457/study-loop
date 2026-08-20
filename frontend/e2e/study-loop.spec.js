@@ -8,6 +8,8 @@ const QUIZ_RECOVERY_KEY = 'study-loop.quiz.recovery.v1'
 const ADAPTIVE_RECOVERY_KEY = 'study-loop.adaptive.recovery.v1'
 const LEARNING_PATH_RECOVERY_KEY = 'study-loop.learning-path.recovery.v1'
 const FUTURE_EXPIRES_AT = 4_102_444_800
+const RECOVERY_DEADLINE_ADVANCE_MS = 120_001
+const RECOVERY_TIMEOUT_MESSAGE = '等待服务端响应超时；请求结果尚未确定，请使用原请求重试恢复'
 
 test.beforeEach(async ({ page }) => {
   await page.route('https://fonts.googleapis.com/**', route => route.fulfill({
@@ -84,6 +86,101 @@ async function mockApi(page, handler) {
   )
 
   return unexpectedRequests
+}
+
+function waitForAbortedApiRequest(page, method, path) {
+  return page.waitForEvent('requestfailed', {
+    predicate: request => (
+      request.method() === method
+      && new URL(request.url()).pathname === `${API_PREFIX}${path}`
+    ),
+    timeout: 6_000,
+  }).catch(error => error)
+}
+
+function expectBrowserAbort(request) {
+  expect(typeof request?.failure).toBe('function')
+  expect(request.failure()?.errorText || '').toMatch(/abort|cancel/iu)
+}
+
+function quizRecovery({
+  sessionId = null,
+  pendingAnswer = null,
+  acknowledgedAnswerCount = 0,
+} = {}) {
+  return {
+    schema_version: 1,
+    intent: {
+      kind: 'standard',
+      request: {
+        document_id: 'notes.md',
+        description: '首字母',
+        count: 1,
+        difficulty: 'medium',
+        type: 'choice',
+        user_id: 'default_user',
+      },
+    },
+    launch_id: null,
+    launch_preset: null,
+    start_idempotency_key: '11111111-1111-4111-8111-111111111111',
+    session: sessionId ? {
+      session_id: sessionId,
+      revision: 1,
+      expires_at: FUTURE_EXPIRES_AT,
+    } : null,
+    acknowledged_answer_count: acknowledgedAnswerCount,
+    pending_answer: pendingAnswer,
+  }
+}
+
+function quizSnapshot({
+  sessionId,
+  status = 'active',
+  answeredCount = status === 'completed' ? 1 : 0,
+  revision = answeredCount + 1,
+  lastAnswerResult = null,
+  result = status === 'completed' ? {
+    session_id: sessionId,
+    document_id: 'notes.md',
+    total: 1,
+    correct: 1,
+    incorrect: 0,
+    pending: 0,
+    score: 1,
+    details: [],
+    revision,
+    expires_at: FUTURE_EXPIRES_AT,
+  } : null,
+  gradingReport = null,
+  learningReport = null,
+} = {}) {
+  return {
+    schema_version: 1,
+    origin: 'standard',
+    session_id: sessionId,
+    document_id: 'notes.md',
+    revision,
+    status,
+    total: 1,
+    answered_count: answeredCount,
+    questions: [{
+      index: 0,
+      question: '请选择首字母',
+      options: ['Alpha', 'Beta'],
+      type: 'choice',
+    }],
+    last_answer_index: lastAnswerResult ? 0 : null,
+    last_user_answer: lastAnswerResult ? 'Alpha' : null,
+    last_answer_result: lastAnswerResult,
+    result,
+    grading_report: gradingReport,
+    learning_report: learningReport,
+    learning_path_source: null,
+    learning_path_completion: null,
+    expires_at: FUTURE_EXPIRES_AT,
+    busy: false,
+  }
 }
 
 function adaptiveSnapshot(overrides = {}) {
@@ -337,7 +434,15 @@ test('learning flow document failures stay recoverable and distinct from empty d
 })
 
 test('learning path keeps the last durable result until a replacement succeeds', async ({ page }) => {
-  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+  const replacement = learningPathResource({
+    id: 'lp_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    documentId: 'b.md',
+    title: 'B 文档专属路径',
+    stageTitle: '理解 B',
+    topics: ['B'],
+  })
+  const replacementAttempts = []
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
     if (request.method() === 'GET' && path === '/documents') {
       return { body: { documents: ['a.md', 'b.md'] } }
     }
@@ -355,7 +460,13 @@ test('learning path keeps the last durable result until a replacement succeeds',
         }
       }
       if (body.document_id === 'b.md') {
-        return { status: 503, body: { detail: 'B 文档路径生成失败' } }
+        replacementAttempts.push({
+          key: await request.headerValue('idempotency-key'),
+          body,
+        })
+        return replacementAttempts.length === 1
+          ? { status: 503, body: { detail: 'B 文档路径生成失败' } }
+          : { body: replacement }
       }
     }
     return null
@@ -374,9 +485,14 @@ test('learning path keeps the last durable result until a replacement succeeds',
   await page.getByRole('button', { name: '生成学习路径' }).click()
   await expect(page.getByRole('alert')).toContainText('B 文档路径生成失败')
   await expect(page.getByRole('heading', { name: 'A 文档专属路径' })).toBeVisible()
-
-  await documentSelect.selectOption('a.md')
-  await expect(page.getByRole('alert')).toHaveCount(0)
+  await expect(documentSelect).toHaveValue('b.md')
+  await expect(documentSelect).toBeDisabled()
+  const retry = page.locator('.lp-generate-btn')
+  await expect(retry).toHaveText('重试恢复')
+  await retry.click()
+  await expect(page.getByRole('heading', { name: 'B 文档专属路径' })).toBeVisible()
+  expect(replacementAttempts).toHaveLength(2)
+  expect(replacementAttempts[1]).toEqual(replacementAttempts[0])
   expect(unexpectedRequests).toEqual([])
 })
 
@@ -456,7 +572,9 @@ test('learning path browser navigation cancels an in-flight replacement and load
     title: 'B 路径',
   })
   let releaseReplacement
+  let markReplacementStarted
   const replacementGate = new Promise(resolve => { releaseReplacement = resolve })
+  const replacementStarted = new Promise(resolve => { markReplacementStarted = resolve })
   const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
     if (request.method() === 'GET' && path === '/documents') {
       return { body: { documents: ['a.md', 'b.md', 'c.md'] } }
@@ -474,28 +592,212 @@ test('learning path browser navigation cancels an in-flight replacement and load
       return { body: target }
     }
     if (request.method() === 'POST' && path === '/learning-paths') {
+      markReplacementStarted()
       await replacementGate
       return { body: lateReplacement }
     }
     return null
   })
 
-  await page.goto(`/learning-path?path_id=${first.learning_path_id}`)
-  await expect(page.getByRole('heading', { name: 'A 路径' })).toBeVisible()
-  await page.getByRole('combobox', { name: '学习文档' }).selectOption('b.md')
-  await page.getByRole('button', { name: '生成学习路径' }).click()
+  try {
+    await page.goto(`/learning-path?path_id=${first.learning_path_id}`)
+    await expect(page.getByRole('heading', { name: 'A 路径' })).toBeVisible()
+    await page.getByRole('combobox', { name: '学习文档' }).selectOption('b.md')
+    const replacementAborted = waitForAbortedApiRequest(page, 'POST', '/learning-paths')
+    await page.getByRole('button', { name: '生成学习路径' }).click()
+    await replacementStarted
 
-  await page.evaluate(pathId => {
-    history.pushState({}, '', `/learning-path?path_id=${pathId}`)
-    dispatchEvent(new PopStateEvent('popstate'))
-  }, target.learning_path_id)
-  await expect(page.getByRole('heading', { name: 'C 路径' })).toBeVisible()
+    await page.evaluate(pathId => {
+      history.pushState({}, '', `/learning-path?path_id=${pathId}`)
+      dispatchEvent(new PopStateEvent('popstate'))
+    }, target.learning_path_id)
+    await expect(page.getByRole('heading', { name: 'C 路径' })).toBeVisible()
+    expectBrowserAbort(await replacementAborted)
 
-  releaseReplacement()
-  await page.waitForTimeout(100)
-  await expect(page.getByRole('heading', { name: 'C 路径' })).toBeVisible()
-  await expect(page.getByRole('heading', { name: 'B 路径' })).toHaveCount(0)
-  expect(unexpectedRequests).toEqual([])
+    releaseReplacement()
+    await expect(page.getByRole('heading', { name: 'C 路径' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'B 路径' })).toHaveCount(0)
+    expect(unexpectedRequests).toEqual([])
+  } finally {
+    releaseReplacement()
+  }
+})
+
+test('learning path create deadline preserves its receipt and retries the exact request', async ({ page }) => {
+  await page.clock.install()
+  const late = learningPathResource({
+    id: 'lp_dddddddddddddddddddddddddddddddd',
+    title: '不应采用的迟到路径',
+  })
+  const canonical = learningPathResource({
+    id: 'lp_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+    title: '超时后恢复的路径',
+  })
+  const queryTarget = learningPathResource({
+    id: 'lp_ffffffffffffffffffffffffffffffff',
+    documentId: 'other.md',
+    title: '显式查询的其他路径',
+  })
+  const attempts = []
+  let releaseFirst
+  let markFirstStarted
+  const firstGate = new Promise(resolve => { releaseFirst = resolve })
+  const firstStarted = new Promise(resolve => { markFirstStarted = resolve })
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md', 'other.md'] } }
+    }
+    if (
+      request.method() === 'GET'
+      && path === `/learning-paths/${queryTarget.learning_path_id}`
+    ) {
+      return { body: queryTarget }
+    }
+    if (request.method() === 'POST' && path === '/learning-paths') {
+      attempts.push({
+        key: await request.headerValue('idempotency-key'),
+        body: request.postDataJSON(),
+        rawBody: request.postData(),
+      })
+      if (attempts.length === 1) {
+        markFirstStarted()
+        await firstGate
+        return { body: late }
+      }
+      return { body: canonical }
+    }
+    return null
+  })
+
+  try {
+    await page.goto('/learning-path')
+    await page.getByRole('combobox', { name: '学习文档' }).selectOption('notes.md')
+    const firstAborted = waitForAbortedApiRequest(page, 'POST', '/learning-paths')
+    await page.getByRole('button', { name: '生成学习路径' }).click()
+    await firstStarted
+    await page.clock.fastForward(RECOVERY_DEADLINE_ADVANCE_MS)
+    await expect(page.getByRole('alert')).toContainText(RECOVERY_TIMEOUT_MESSAGE)
+    expectBrowserAbort(await firstAborted)
+    const select = page.getByRole('combobox', { name: '学习文档' })
+    await expect(select).toHaveValue('notes.md')
+    await expect(select).toBeDisabled()
+    await expect(page.locator('.error-retry')).toHaveCount(0)
+    const mainRetry = page.locator('.lp-generate-btn')
+    await expect(mainRetry).toHaveText('重试恢复')
+    await expect(mainRetry).toBeEnabled()
+    const pending = await page.evaluate(
+      key => JSON.parse(sessionStorage.getItem(key)),
+      LEARNING_PATH_RECOVERY_KEY,
+    )
+    expect(pending).toMatchObject({
+      intent: { user_id: 'default_user', document_id: 'notes.md' },
+      learning_path_id: null,
+    })
+    expect(pending.start_idempotency_key).toBe(attempts[0].key)
+
+    await page.evaluate(pathId => {
+      history.pushState({}, '', `/learning-path?path_id=${pathId}`)
+      dispatchEvent(new PopStateEvent('popstate'))
+    }, queryTarget.learning_path_id)
+    await expect(page.getByRole('heading', { name: '显式查询的其他路径' })).toBeVisible()
+    await expect(select).toHaveValue('notes.md')
+    await expect(select).toBeDisabled()
+    await expect(mainRetry).toHaveText('重试恢复')
+    await expect(mainRetry).toBeEnabled()
+
+    releaseFirst()
+    await mainRetry.click()
+    await expect(page.getByRole('heading', { name: '超时后恢复的路径' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: '不应采用的迟到路径' })).toHaveCount(0)
+    await expect(page.getByRole('heading', { name: '显式查询的其他路径' })).toHaveCount(0)
+    expect(attempts).toHaveLength(2)
+    expect(attempts[0]).toEqual(attempts[1])
+    expect(attempts[0].body).toEqual({
+      document_id: 'notes.md',
+      user_id: 'default_user',
+    })
+    expect(attempts[0].key).toMatch(UUID_V4_PATTERN)
+    expect(
+      await page.evaluate(
+        key => JSON.parse(sessionStorage.getItem(key)),
+        LEARNING_PATH_RECOVERY_KEY,
+      ),
+    ).toMatchObject({
+      start_idempotency_key: attempts[0].key,
+      learning_path_id: canonical.learning_path_id,
+    })
+    expect(unexpectedRequests).toEqual([])
+  } finally {
+    releaseFirst()
+  }
+})
+
+test('learning path GET deadline keeps the bound recovery until an explicit retry', async ({ page }) => {
+  await page.clock.install()
+  const canonical = learningPathResource({ title: '权威路径快照' })
+  const late = learningPathResource({ title: '迟到路径快照' })
+  const recovery = {
+    schema_version: 1,
+    intent: { user_id: 'default_user', document_id: 'notes.md' },
+    start_idempotency_key: 'learning-path-get-timeout-key',
+    learning_path_id: canonical.learning_path_id,
+  }
+  await page.addInitScript(({ key, value }) => {
+    sessionStorage.setItem(key, JSON.stringify(value))
+  }, { key: LEARNING_PATH_RECOVERY_KEY, value: recovery })
+  let reads = 0
+  let releaseFirst
+  let markFirstStarted
+  const firstGate = new Promise(resolve => { releaseFirst = resolve })
+  const firstStarted = new Promise(resolve => { markFirstStarted = resolve })
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (
+      request.method() === 'GET'
+      && path === `/learning-paths/${canonical.learning_path_id}`
+    ) {
+      reads += 1
+      if (reads === 1) {
+        markFirstStarted()
+        await firstGate
+        return { body: late }
+      }
+      return { body: canonical }
+    }
+    return null
+  })
+
+  try {
+    const firstAborted = waitForAbortedApiRequest(
+      page,
+      'GET',
+      `/learning-paths/${canonical.learning_path_id}`,
+    )
+    await page.goto(`/learning-path?path_id=${canonical.learning_path_id}`)
+    await firstStarted
+    await page.clock.fastForward(RECOVERY_DEADLINE_ADVANCE_MS)
+    await expect(page.getByRole('alert')).toContainText(RECOVERY_TIMEOUT_MESSAGE)
+    expectBrowserAbort(await firstAborted)
+    const retry = page.getByRole('button', { name: '重试恢复' })
+    await expect(retry).toBeEnabled()
+    expect(
+      await page.evaluate(
+        key => JSON.parse(sessionStorage.getItem(key)),
+        LEARNING_PATH_RECOVERY_KEY,
+      ),
+    ).toEqual(recovery)
+
+    releaseFirst()
+    await retry.click()
+    await expect(page.getByRole('heading', { name: '权威路径快照' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: '迟到路径快照' })).toHaveCount(0)
+    expect(reads).toBe(2)
+    expect(unexpectedRequests).toEqual([])
+  } finally {
+    releaseFirst()
+  }
 })
 
 test('learning path stage opens a refresh-safe quiz preset without auto-starting', async ({ page }) => {
@@ -645,6 +947,7 @@ test('canonical quiz grade unlocks the next learning path stage', async ({ page 
   const progressedPath = sequentialLearningPathResource(1)
   let gradeCommitted = false
   let gradeAttempts = 0
+  let snapshotReads = 0
   let startBody = null
   const source = {
     learning_path_id: initialPath.learning_path_id,
@@ -731,6 +1034,52 @@ test('canonical quiz grade unlocks the next learning path stage', async ({ page 
         },
       }
     }
+    if (request.method() === 'GET' && path === '/session/quiz-path-progress') {
+      snapshotReads += 1
+      return {
+        body: {
+          schema_version: 1,
+          origin: 'standard',
+          session_id: 'quiz-path-progress',
+          document_id: 'notes.md',
+          revision: 3,
+          status: 'completed',
+          total: 1,
+          answered_count: 1,
+          questions: [question],
+          last_answer_index: 0,
+          last_user_answer: question.options[0],
+          last_answer_result: {
+            evaluation_status: 'final',
+            correct: false,
+            correct_answer: 'B. 错误描述',
+            explanation: '回答错误，但完成批改后仍推进阶段',
+            is_last: true,
+            next_index: null,
+            revision: 2,
+            expires_at: FUTURE_EXPIRES_AT,
+          },
+          result: {
+            session_id: 'quiz-path-progress',
+            document_id: 'notes.md',
+            total: 1,
+            correct: 0,
+            incorrect: 1,
+            pending: 0,
+            score: 0,
+            details: [],
+            revision: 3,
+            expires_at: FUTURE_EXPIRES_AT,
+          },
+          grading_report: null,
+          learning_report: null,
+          learning_path_source: source,
+          learning_path_completion: null,
+          expires_at: FUTURE_EXPIRES_AT,
+          busy: false,
+        },
+      }
+    }
     if (request.method() === 'POST' && path === '/session/quiz-path-progress/grade') {
       gradeAttempts += 1
       if (gradeAttempts === 1) {
@@ -783,10 +1132,12 @@ test('canonical quiz grade unlocks the next learning path stage', async ({ page 
   ).toHaveCount(0)
 
   await page.getByRole('button', { name: 'AI 批改讲解' }).click()
-  await expect(page.getByRole('alert')).toContainText('答题会话不一致')
+  await expect.poll(() => snapshotReads).toBe(1)
+  expect(gradeAttempts).toBe(1)
   await expect(
     page.getByRole('button', { name: '返回学习路径，继续下一阶段' }),
   ).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'AI 批改讲解' })).toBeVisible()
   await page.getByRole('button', { name: 'AI 批改讲解' }).click()
   await expect(page.getByRole('heading', { name: 'AI 批改报告' })).toBeVisible()
   const returnButton = page.getByRole('button', {
@@ -808,6 +1159,7 @@ test('canonical quiz grade unlocks the next learning path stage', async ({ page 
   expect(unexpectedRequests).toEqual([])
   expect(problems).toEqual([])
   expect(gradeAttempts).toBe(2)
+  expect(snapshotReads).toBe(1)
 })
 
 test('stale learning path stage start clears pending recovery and returns to the exact path', async ({ page }) => {
@@ -897,6 +1249,48 @@ test('a missing bound path exits its unretryable start instead of looping on 404
   expect(starts).toBe(1)
   expect(await page.evaluate(key => sessionStorage.getItem(key), QUIZ_RECOVERY_KEY)).toBeNull()
   await page.getByRole('button', { name: '返回学习路径重新选择' }).click()
+  await expect(page).toHaveURL(/\/learning-path$/)
+  expect(starts).toBe(1)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('a corrupt bound path clears quiz recovery and returns to learning path regeneration', async ({ page }) => {
+  const source = {
+    learning_path_id: 'lp_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    stage_id: 1,
+  }
+  let starts = 0
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (request.method() === 'POST' && path === '/session/start') {
+      starts += 1
+      return {
+        status: 503,
+        body: {
+          code: 'learning_path_corrupt',
+          detail: '学习路径数据损坏',
+        },
+      }
+    }
+    return null
+  })
+  const query = new URLSearchParams({
+    document_id: 'notes.md',
+    topic: '损坏路径阶段',
+    launch_id: 'corrupt-path-launch-1234',
+    path_id: source.learning_path_id,
+    stage_id: String(source.stage_id),
+  })
+
+  await page.goto(`/quiz?${query}`)
+  await page.getByRole('button', { name: '开始答题' }).click()
+
+  await expect(page.getByText('这条学习路径数据损坏，请返回学习路径重新生成。')).toBeVisible()
+  expect(starts).toBe(1)
+  expect(await page.evaluate(key => sessionStorage.getItem(key), QUIZ_RECOVERY_KEY)).toBeNull()
+  await page.getByRole('button', { name: '返回学习路径重新生成' }).click()
   await expect(page).toHaveURL(/\/learning-path$/)
   expect(starts).toBe(1)
   expect(unexpectedRequests).toEqual([])
@@ -1395,7 +1789,9 @@ test('learning path ignores a late GET after browser history returns to the visi
     title: 'B 路径',
   })
   let releaseLate
+  let markLateStarted
   const lateGate = new Promise(resolve => { releaseLate = resolve })
+  const lateStarted = new Promise(resolve => { markLateStarted = resolve })
   const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
     if (request.method() === 'GET' && path === '/documents') {
       return { body: { documents: ['notes.md'] } }
@@ -1410,30 +1806,41 @@ test('learning path ignores a late GET after browser history returns to the visi
       request.method() === 'GET'
       && path === `/learning-paths/${late.learning_path_id}`
     ) {
+      markLateStarted()
       await lateGate
       return { body: late }
     }
     return null
   })
 
-  await page.goto(`/learning-path?path_id=${first.learning_path_id}`)
-  await expect(page.getByRole('heading', { name: 'A 路径' })).toBeVisible()
-  await page.evaluate(pathId => {
-    history.pushState({}, '', `/learning-path?path_id=${pathId}`)
-    dispatchEvent(new PopStateEvent('popstate'))
-  }, late.learning_path_id)
-  await expect(page.getByText('正在恢复学习路径')).toBeVisible()
+  try {
+    await page.goto(`/learning-path?path_id=${first.learning_path_id}`)
+    await expect(page.getByRole('heading', { name: 'A 路径' })).toBeVisible()
+    const lateAborted = waitForAbortedApiRequest(
+      page,
+      'GET',
+      `/learning-paths/${late.learning_path_id}`,
+    )
+    await page.evaluate(pathId => {
+      history.pushState({}, '', `/learning-path?path_id=${pathId}`)
+      dispatchEvent(new PopStateEvent('popstate'))
+    }, late.learning_path_id)
+    await lateStarted
+    await expect(page.getByText('正在恢复学习路径')).toBeVisible()
 
-  await page.goBack()
-  await expect(page).toHaveURL(new RegExp(`path_id=${first.learning_path_id}`))
-  await expect(page.getByRole('heading', { name: 'A 路径' })).toBeVisible()
-  await expect(page.getByText('正在恢复学习路径')).toHaveCount(0)
+    await page.goBack()
+    await expect(page).toHaveURL(new RegExp(`path_id=${first.learning_path_id}`))
+    await expect(page.getByRole('heading', { name: 'A 路径' })).toBeVisible()
+    await expect(page.getByText('正在恢复学习路径')).toHaveCount(0)
+    expectBrowserAbort(await lateAborted)
 
-  releaseLate()
-  await page.waitForTimeout(100)
-  await expect(page.getByRole('heading', { name: 'A 路径' })).toBeVisible()
-  await expect(page.getByRole('heading', { name: 'B 路径' })).toHaveCount(0)
-  expect(unexpectedRequests).toEqual([])
+    releaseLate()
+    await expect(page.getByRole('heading', { name: 'A 路径' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'B 路径' })).toHaveCount(0)
+    expect(unexpectedRequests).toEqual([])
+  } finally {
+    releaseLate()
+  }
 })
 
 test('learning path remains readable after material deletion but cannot start practice', async ({ page }) => {
@@ -1655,40 +2062,46 @@ test('a late answer cannot restore a quiz after accepting a new launch', async (
     return null
   })
 
-  await page.goto('/quiz')
-  await page.getByRole('combobox', { name: '学习文档' }).selectOption('old.md')
-  await page.getByRole('button', { name: '开始答题' }).click()
-  await page.getByRole('button', { name: 'A' }).click()
-  await page.getByRole('button', { name: '提交答案' }).click()
-  await answerStarted
+  try {
+    await page.goto('/quiz')
+    await page.getByRole('combobox', { name: '学习文档' }).selectOption('old.md')
+    await page.getByRole('button', { name: '开始答题' }).click()
+    await page.getByRole('button', { name: 'A' }).click()
+    await page.getByRole('button', { name: '提交答案' }).click()
+    await answerStarted
 
-  const nextLaunch = '/quiz?document_id=new.md&topic=新目标&launch_id=late-answer-launch-1234'
-  await page.evaluate(url => {
-    history.pushState({}, '', url)
-    dispatchEvent(new PopStateEvent('popstate'))
-  }, nextLaunch)
-  await expect(page.getByRole('region', { name: '检测到另一项练习' })).toBeVisible()
-  await page.getByRole('button', { name: '放弃并开始新练习' }).click()
-  await expect(page.getByRole('combobox', { name: '学习文档' })).toHaveValue('new.md')
+    const oldAnswerAborted = waitForAbortedApiRequest(
+      page,
+      'POST',
+      '/session/quiz-old-in-flight/answer',
+    )
+    const nextLaunch = '/quiz?document_id=new.md&topic=新目标&launch_id=late-answer-launch-1234'
+    await page.evaluate(url => {
+      history.pushState({}, '', url)
+      dispatchEvent(new PopStateEvent('popstate'))
+    }, nextLaunch)
+    await expect(page.getByRole('region', { name: '检测到另一项练习' })).toBeVisible()
+    await page.getByRole('button', { name: '放弃并开始新练习' }).click()
+    await expect(page.getByRole('combobox', { name: '学习文档' })).toHaveValue('new.md')
+    expectBrowserAbort(await oldAnswerAborted)
 
-  const oldResponse = page.waitForResponse(response => (
-    response.url().includes('/api/session/quiz-old-in-flight/answer')
-  ))
-  releaseAnswer()
-  await oldResponse
-  await expect(page.getByText('这条旧反馈不得复活')).toHaveCount(0)
-  expect(await page.evaluate(key => sessionStorage.getItem(key), QUIZ_RECOVERY_KEY)).toBeNull()
+    releaseAnswer()
+    await expect(page.getByText('这条旧反馈不得复活')).toHaveCount(0)
+    expect(await page.evaluate(key => sessionStorage.getItem(key), QUIZ_RECOVERY_KEY)).toBeNull()
 
-  await page.getByRole('button', { name: '开始答题' }).click()
-  await expect(page.getByText('新目标题目')).toBeVisible()
-  expect(
-    await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), QUIZ_RECOVERY_KEY)
-  ).toMatchObject({
-    launch_id: 'late-answer-launch-1234',
-    session: { session_id: 'quiz-new-after-late-answer' },
-  })
-  expect(unexpectedRequests).toEqual([])
-  expect(problems).toEqual([])
+    await page.getByRole('button', { name: '开始答题' }).click()
+    await expect(page.getByText('新目标题目')).toBeVisible()
+    expect(
+      await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), QUIZ_RECOVERY_KEY)
+    ).toMatchObject({
+      launch_id: 'late-answer-launch-1234',
+      session: { session_id: 'quiz-new-after-late-answer' },
+    })
+    expect(unexpectedRequests).toEqual([])
+    expect(problems).toEqual([])
+  } finally {
+    releaseAnswer()
+  }
 })
 
 test('quiz preset rejects a document that is no longer available', async ({ page }) => {
@@ -1851,6 +2264,259 @@ test('adaptive submit response loss survives refresh with an identical key and b
   expect(pendingBeforeReload.body).toEqual(submits[0].body)
   expect(pendingBeforeReload.idempotency_key).toBe(submits[0].key)
   expect(unexpectedRequests).toEqual([])
+})
+
+test('adaptive start deadline retains the exact intent and key for UI retry', async ({ page }) => {
+  await page.clock.install()
+  const attempts = []
+  let releaseFirst
+  let markFirstStarted
+  const firstGate = new Promise(resolve => { releaseFirst = resolve })
+  const firstStarted = new Promise(resolve => { markFirstStarted = resolve })
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'POST' && path === '/agent/adaptive/start') {
+      attempts.push({
+        key: await request.headerValue('idempotency-key'),
+        body: await request.postDataJSON(),
+        rawBody: request.postData(),
+      })
+      if (attempts.length === 1) {
+        markFirstStarted()
+        await firstGate
+        return {
+          body: adaptiveSnapshot({
+            adaptive_session_id: 'adapt-start-too-late',
+            questions: [{
+              index: 0,
+              question: '不应采用的迟到自适应题目',
+              options: ['旧答案'],
+              type: 'choice',
+            }],
+          }),
+        }
+      }
+      return {
+        body: adaptiveSnapshot({
+          adaptive_session_id: 'adapt-start-after-timeout',
+          questions: [{
+            index: 0,
+            question: '超时重试后的自适应题目',
+            options: ['新答案'],
+            type: 'choice',
+          }],
+        }),
+      }
+    }
+    return null
+  })
+
+  try {
+    await page.goto('/adaptive')
+    await page.getByLabel('学习目标').fill('验证自适应超时恢复')
+    await page.getByLabel('文档 ID').fill('notes.md')
+    const firstAborted = waitForAbortedApiRequest(page, 'POST', '/agent/adaptive/start')
+    await page.getByRole('button', { name: '开始自适应辅导' }).click()
+    await firstStarted
+    await page.clock.fastForward(RECOVERY_DEADLINE_ADVANCE_MS)
+    await expect(page.getByRole('alert')).toContainText(RECOVERY_TIMEOUT_MESSAGE)
+    expectBrowserAbort(await firstAborted)
+    const retry = page.getByRole('button', { name: '重试恢复' })
+    await expect(retry).toBeEnabled()
+    const pending = await page.evaluate(
+      key => JSON.parse(sessionStorage.getItem(key)),
+      ADAPTIVE_RECOVERY_KEY,
+    )
+    expect(pending).toMatchObject({
+      intent: {
+        user_id: 'default_user',
+        document_id: 'notes.md',
+        goal: '验证自适应超时恢复',
+      },
+      session: null,
+      pending_submit: null,
+    })
+    expect(pending.start_idempotency_key).toBe(attempts[0].key)
+
+    releaseFirst()
+    await retry.click()
+    await expect(page.getByText('超时重试后的自适应题目')).toBeVisible()
+    await expect(page.getByText('不应采用的迟到自适应题目')).toHaveCount(0)
+    expect(attempts).toHaveLength(2)
+    expect(attempts[0]).toEqual(attempts[1])
+    expect(attempts[0].key).toMatch(UUID_V4_PATTERN)
+    expect(unexpectedRequests).toEqual([])
+  } finally {
+    releaseFirst()
+  }
+})
+
+test('adaptive submit deadline preserves its frozen turn for exact replay', async ({ page }) => {
+  await page.clock.install()
+  const active = adaptiveSnapshot({ adaptive_session_id: 'adapt-submit-timeout' })
+  const completed = adaptiveSnapshot({
+    adaptive_session_id: 'adapt-submit-timeout',
+    done: true,
+    questions: [],
+    summary: '冻结提交已用原请求安全恢复',
+    terminate_reason: 'agent_finish',
+    decision: {
+      ...active.decision,
+      action: 'finish',
+      reason: '本轮目标已完成',
+    },
+    revision: 2,
+  })
+  const submits = []
+  let snapshotReads = 0
+  let releaseFirstRead
+  let markFirstReadStarted
+  let releaseFirst
+  let markFirstStarted
+  const firstReadGate = new Promise(resolve => { releaseFirstRead = resolve })
+  const firstReadStarted = new Promise(resolve => { markFirstReadStarted = resolve })
+  const firstGate = new Promise(resolve => { releaseFirst = resolve })
+  const firstStarted = new Promise(resolve => { markFirstStarted = resolve })
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'POST' && path === '/agent/adaptive/start') {
+      return { body: active }
+    }
+    if (request.method() === 'GET' && path === '/agent/adaptive/adapt-submit-timeout') {
+      snapshotReads += 1
+      if (snapshotReads === 1) {
+        markFirstReadStarted()
+        await firstReadGate
+      }
+      return { body: active }
+    }
+    if (request.method() === 'POST' && path === '/agent/adaptive/submit') {
+      submits.push({
+        key: await request.headerValue('idempotency-key'),
+        body: await request.postDataJSON(),
+        rawBody: request.postData(),
+      })
+      if (submits.length === 1) {
+        markFirstStarted()
+        await firstGate
+      }
+      return { body: completed }
+    }
+    return null
+  })
+
+  try {
+    await page.goto('/adaptive')
+    await page.getByLabel('学习目标').fill('验证冻结提交')
+    await page.getByLabel('文档 ID').fill('notes.md')
+    await page.getByRole('button', { name: '开始自适应辅导' }).click()
+    await page.getByRole('radio', { name: 'Alpha' }).check()
+    const firstAborted = waitForAbortedApiRequest(page, 'POST', '/agent/adaptive/submit')
+    await page.getByRole('button', { name: /提交本轮/ }).click()
+    await firstReadStarted
+    await page.clock.fastForward(119_000)
+    releaseFirstRead()
+    await firstStarted
+    await page.clock.fastForward(1_001)
+    await expect(page.getByRole('alert')).toContainText(RECOVERY_TIMEOUT_MESSAGE)
+    expectBrowserAbort(await firstAborted)
+    const retry = page.getByRole('button', { name: '重试恢复' })
+    await expect(retry).toBeEnabled()
+    const pending = await page.evaluate(key => (
+      JSON.parse(sessionStorage.getItem(key)).pending_submit
+    ), ADAPTIVE_RECOVERY_KEY)
+    expect(pending.body).toEqual({
+      adaptive_session_id: 'adapt-submit-timeout',
+      answers: ['Alpha'],
+      turn: 1,
+      revision: 1,
+    })
+    expect(pending.idempotency_key).toBe(submits[0].key)
+
+    releaseFirst()
+    await retry.click()
+    await expect(page.getByText('冻结提交已用原请求安全恢复')).toBeVisible()
+    expect(submits).toHaveLength(2)
+    expect(submits[0]).toEqual(submits[1])
+    expect(submits[0].key).toMatch(UUID_V4_PATTERN)
+    expect(snapshotReads).toBe(2)
+    expect(unexpectedRequests).toEqual([])
+  } finally {
+    releaseFirstRead()
+    releaseFirst()
+  }
+})
+
+test('adaptive snapshot deadline leaves durable recovery untouched until retry', async ({ page }) => {
+  await page.clock.install()
+  const active = adaptiveSnapshot({ adaptive_session_id: 'adapt-get-timeout' })
+  const late = adaptiveSnapshot({
+    adaptive_session_id: 'adapt-get-timeout',
+    questions: [{
+      index: 0,
+      question: '不应采用的迟到 Adaptive GET',
+      options: ['旧答案'],
+      type: 'choice',
+    }],
+  })
+  const canonical = adaptiveSnapshot({
+    adaptive_session_id: 'adapt-get-timeout',
+    questions: [{
+      index: 0,
+      question: 'Adaptive GET 重试成功',
+      options: ['新答案'],
+      type: 'choice',
+    }],
+  })
+  const recovery = adaptiveRecovery(active)
+  await page.addInitScript(({ key, value }) => {
+    sessionStorage.setItem(key, JSON.stringify(value))
+  }, { key: ADAPTIVE_RECOVERY_KEY, value: recovery })
+  let reads = 0
+  let releaseFirst
+  let markFirstStarted
+  const firstGate = new Promise(resolve => { releaseFirst = resolve })
+  const firstStarted = new Promise(resolve => { markFirstStarted = resolve })
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/agent/adaptive/adapt-get-timeout') {
+      reads += 1
+      if (reads === 1) {
+        markFirstStarted()
+        await firstGate
+        return { body: late }
+      }
+      return { body: canonical }
+    }
+    return null
+  })
+
+  try {
+    const firstAborted = waitForAbortedApiRequest(
+      page,
+      'GET',
+      '/agent/adaptive/adapt-get-timeout',
+    )
+    await page.goto('/adaptive')
+    await firstStarted
+    await page.clock.fastForward(RECOVERY_DEADLINE_ADVANCE_MS)
+    await expect(page.getByRole('alert')).toContainText(RECOVERY_TIMEOUT_MESSAGE)
+    expectBrowserAbort(await firstAborted)
+    const retry = page.getByRole('button', { name: '重试恢复' })
+    await expect(retry).toBeEnabled()
+    expect(
+      await page.evaluate(
+        key => JSON.parse(sessionStorage.getItem(key)),
+        ADAPTIVE_RECOVERY_KEY,
+      ),
+    ).toEqual(recovery)
+
+    releaseFirst()
+    await retry.click()
+    await expect(page.getByText('Adaptive GET 重试成功')).toBeVisible()
+    await expect(page.getByText('不应采用的迟到 Adaptive GET')).toHaveCount(0)
+    expect(reads).toBe(2)
+    expect(unexpectedRequests).toEqual([])
+  } finally {
+    releaseFirst()
+  }
 })
 
 test('adaptive GET restores quiz, lesson, and readable completed learning path states', async ({ page }) => {
@@ -2446,6 +3112,44 @@ test('adaptive same-turn stale recovery preserves the original pending request',
   expect(unexpectedRequests).toEqual([])
 })
 
+test('adaptive rejected start clears its receipt before a corrected request', async ({ page }) => {
+  const corrected = adaptiveSnapshot({ adaptive_session_id: 'adapt-corrected-start' })
+  const starts = []
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'POST' && path === '/agent/adaptive/start') {
+      starts.push({
+        key: await request.headerValue('idempotency-key'),
+        body: await request.postDataJSON(),
+      })
+      if (starts.length === 1) {
+        return { status: 400, body: { detail: '学习目标不符合要求' } }
+      }
+      return { body: corrected }
+    }
+    return null
+  })
+
+  await page.goto('/adaptive')
+  await page.getByLabel('学习目标').fill('需要修正的目标')
+  await page.getByLabel('文档 ID').fill('notes.md')
+  await page.getByRole('button', { name: '开始自适应辅导' }).click()
+
+  await expect(page.getByRole('alert')).toContainText('学习目标不符合要求')
+  await expect(page.getByLabel('学习目标')).toBeEditable()
+  await expect(page.getByLabel('学习目标')).toHaveValue('需要修正的目标')
+  await expect.poll(() => (
+    page.evaluate(key => sessionStorage.getItem(key), ADAPTIVE_RECOVERY_KEY)
+  )).toBeNull()
+
+  await page.getByLabel('学习目标').fill('修正后的目标')
+  await page.getByRole('button', { name: '开始自适应辅导' }).click()
+  await expect(page.getByText('请选择首字母')).toBeVisible()
+  expect(starts).toHaveLength(2)
+  expect(starts[1].key).not.toBe(starts[0].key)
+  expect(starts[1].body.goal).toBe('修正后的目标')
+  expect(unexpectedRequests).toEqual([])
+})
+
 test('adaptive rejected submit unlocks the canonical turn for a corrected request', async ({ page }) => {
   const active = adaptiveSnapshot({ adaptive_session_id: 'adapt-rejected' })
   const completed = adaptiveSnapshot({
@@ -2493,6 +3197,13 @@ test('adaptive rejected submit unlocks the canonical turn for a corrected reques
   await expect.poll(() => page.evaluate(key => (
     JSON.parse(sessionStorage.getItem(key)).pending_submit
   ), ADAPTIVE_RECOVERY_KEY)).toBeNull()
+  expect(
+    await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), ADAPTIVE_RECOVERY_KEY),
+  ).toMatchObject({
+    session: { adaptive_session_id: active.adaptive_session_id },
+    snapshot: { adaptive_session_id: active.adaptive_session_id, revision: 1 },
+    pending_submit: null,
+  })
 
   await page.getByRole('radio', { name: 'Beta' }).check()
   await page.getByRole('button', { name: /提交本轮/ }).click()
@@ -2502,6 +3213,119 @@ test('adaptive rejected submit unlocks the canonical turn for a corrected reques
   expect(submits[0].body.answers).toEqual(['Alpha'])
   expect(submits[1].body.answers).toEqual(['Beta'])
   expect(submits[1].key).not.toBe(submits[0].key)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('adaptive oversized start clears the entire recovery and unlocks setup', async ({ page }) => {
+  const starts = []
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'POST' && path === '/agent/adaptive/start') {
+      starts.push({
+        key: await request.headerValue('idempotency-key'),
+        body: await request.postDataJSON(),
+      })
+      return {
+        status: 413,
+        body: {
+          detail: '自适应会话超过持久化上限，请重新开始',
+          code: 'adaptive_session_too_large',
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/adaptive')
+  await page.getByLabel('学习目标').fill('触发超大 start')
+  await page.getByLabel('文档 ID').fill('notes.md')
+  await page.getByRole('button', { name: '开始自适应辅导' }).click()
+
+  await expect(page.getByRole('alert')).toContainText('自适应会话超过持久化上限')
+  await expect(page.getByLabel('学习目标')).toBeEditable()
+  await expect(page.getByLabel('文档 ID')).toBeEditable()
+  await expect(page.getByRole('button', { name: '开始自适应辅导' })).toBeVisible()
+  await expect.poll(() => (
+    page.evaluate(key => sessionStorage.getItem(key), ADAPTIVE_RECOVERY_KEY)
+  )).toBeNull()
+  expect(starts).toHaveLength(1)
+  expect(starts[0].key).toMatch(UUID_V4_PATTERN)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('adaptive oversized submit discards the old session before a new start', async ({ page }) => {
+  const oldSession = adaptiveSnapshot({ adaptive_session_id: 'adapt-oversized-submit' })
+  const newSession = adaptiveSnapshot({
+    adaptive_session_id: 'adapt-after-oversized-submit',
+    questions: [{
+      index: 0,
+      question: '终态清理后的新会话题目',
+      options: ['新答案'],
+      type: 'choice',
+    }],
+  })
+  const starts = []
+  const submits = []
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'POST' && path === '/agent/adaptive/start') {
+      starts.push({
+        key: await request.headerValue('idempotency-key'),
+        body: await request.postDataJSON(),
+      })
+      return { body: starts.length === 1 ? oldSession : newSession }
+    }
+    if (
+      request.method() === 'GET'
+      && path === `/agent/adaptive/${oldSession.adaptive_session_id}`
+    ) {
+      return { body: oldSession }
+    }
+    if (request.method() === 'POST' && path === '/agent/adaptive/submit') {
+      submits.push({
+        key: await request.headerValue('idempotency-key'),
+        body: await request.postDataJSON(),
+      })
+      return {
+        status: 413,
+        body: {
+          detail: '自适应会话超过持久化上限，请重新开始',
+          code: 'adaptive_session_too_large',
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/adaptive')
+  await page.getByLabel('学习目标').fill('旧会话目标')
+  await page.getByLabel('文档 ID').fill('notes.md')
+  await page.getByRole('button', { name: '开始自适应辅导' }).click()
+  await page.getByRole('radio', { name: 'Alpha' }).check()
+  await page.getByRole('button', { name: /提交本轮/ }).click()
+
+  await expect(page.getByRole('alert')).toContainText('自适应会话超过持久化上限')
+  await expect(page.getByText('请选择首字母')).toHaveCount(0)
+  await expect(page.getByLabel('学习目标')).toBeEditable()
+  await expect(page.getByLabel('文档 ID')).toBeEditable()
+  await expect(page.getByRole('button', { name: '开始自适应辅导' })).toBeVisible()
+  await expect.poll(() => (
+    page.evaluate(key => sessionStorage.getItem(key), ADAPTIVE_RECOVERY_KEY)
+  )).toBeNull()
+  expect(submits).toHaveLength(1)
+  expect(submits[0]).toMatchObject({
+    body: {
+      adaptive_session_id: oldSession.adaptive_session_id,
+      answers: ['Alpha'],
+      turn: 1,
+      revision: 1,
+    },
+  })
+
+  await page.getByLabel('学习目标').fill('终态后的新目标')
+  await page.getByRole('button', { name: '开始自适应辅导' }).click()
+  await expect(page.getByText('终态清理后的新会话题目')).toBeVisible()
+  expect(starts).toHaveLength(2)
+  expect(starts[1].key).not.toBe(starts[0].key)
+  expect(submits).toHaveLength(1)
   expect(unexpectedRequests).toEqual([])
 })
 
@@ -2575,37 +3399,42 @@ test('adaptive ignores a late start response after reset and a newer start', asy
     return null
   })
 
-  await page.goto('/adaptive')
-  await page.getByLabel('学习目标').fill('旧目标')
-  await page.getByLabel('文档 ID').fill('notes.md')
-  await page.getByRole('button', { name: '开始自适应辅导' }).click()
-  await oldStarted
+  try {
+    await page.goto('/adaptive')
+    await page.getByLabel('学习目标').fill('旧目标')
+    await page.getByLabel('文档 ID').fill('notes.md')
+    await page.getByRole('button', { name: '开始自适应辅导' }).click()
+    await oldStarted
 
-  await page.getByRole('button', { name: '重新开始' }).click()
-  await page.getByLabel('学习目标').fill('新目标')
-  await page.getByLabel('文档 ID').fill('notes.md')
-  await page.getByRole('button', { name: '开始自适应辅导' }).click()
-  await expect(page.getByText('新的有效题目')).toBeVisible()
+    const oldStartAborted = waitForAbortedApiRequest(
+      page,
+      'POST',
+      '/agent/adaptive/start',
+    )
+    await page.getByRole('button', { name: '重新开始' }).click()
+    expectBrowserAbort(await oldStartAborted)
+    releaseOld()
 
-  const oldResponseDelivered = page.waitForResponse(response => {
-    const request = response.request()
-    return request.method() === 'POST'
-      && new URL(request.url()).pathname.endsWith('/agent/adaptive/start')
-      && request.postDataJSON()?.goal === '旧目标'
-  })
-  releaseOld()
-  await oldResponseDelivered
-  await expect(page.getByText('新的有效题目')).toBeVisible()
-  await expect(page.getByText('不应出现的旧题目')).toHaveCount(0)
-  const stored = await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), ADAPTIVE_RECOVERY_KEY)
-  expect(stored.session.adaptive_session_id).toBe('adapt-new')
-  expect(unexpectedRequests).toEqual([])
+    await page.getByLabel('学习目标').fill('新目标')
+    await page.getByLabel('文档 ID').fill('notes.md')
+    await page.getByRole('button', { name: '开始自适应辅导' }).click()
+    await expect(page.getByText('新的有效题目')).toBeVisible()
+    await expect(page.getByText('不应出现的旧题目')).toHaveCount(0)
+    const stored = await page.evaluate(
+      key => JSON.parse(sessionStorage.getItem(key)),
+      ADAPTIVE_RECOVERY_KEY,
+    )
+    expect(stored.session.adaptive_session_id).toBe('adapt-new')
+    expect(unexpectedRequests).toEqual([])
+  } finally {
+    releaseOld()
+  }
 })
 
-test('quiz restart clears transient errors and prior grading and learning reports', async ({ page }) => {
+test('quiz restart clears errors and prior grading and learning reports', async ({ page }) => {
   let starts = 0
-  let answerRequests = 0
-  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+  const answerRequests = []
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
     if (request.method() === 'GET' && path === '/documents') {
       return { body: { documents: ['notes.md'] } }
     }
@@ -2620,9 +3449,13 @@ test('quiz restart clears transient errors and prior grading and learning report
       }
     }
     if (request.method() === 'POST' && /^\/session\/quiz-\d+\/answer$/.test(path)) {
-      answerRequests += 1
-      return answerRequests === 1
-        ? { status: 503, body: { detail: '答案暂时无法提交' } }
+      answerRequests.push({
+        path,
+        key: await request.headerValue('idempotency-key'),
+        body: await request.postDataJSON(),
+      })
+      return answerRequests.length === 1
+        ? { status: 422, body: { detail: '答案格式无效' } }
         : {
             body: {
               correct: true,
@@ -2688,7 +3521,12 @@ test('quiz restart clears transient errors and prior grading and learning report
   await page.getByRole('button', { name: '开始答题' }).click()
   await page.getByRole('button', { name: /Alpha/ }).click()
   await page.getByRole('button', { name: '提交答案' }).click()
-  await expect(page.getByRole('alert')).toContainText('答案暂时无法提交')
+  await expect(page.getByRole('alert')).toContainText('答案格式无效')
+  await expect(page.getByRole('button', { name: /Beta/ })).toBeEnabled()
+  await expect.poll(() => page.evaluate(key => (
+    JSON.parse(sessionStorage.getItem(key)).pending_answer
+  ), QUIZ_RECOVERY_KEY)).toBeNull()
+  await page.getByRole('button', { name: /Beta/ }).click()
   await page.getByRole('button', { name: '提交答案' }).click()
   await page.getByRole('button', { name: '查看结果' }).click()
   await page.getByRole('button', { name: 'AI 批改讲解' }).click()
@@ -2710,6 +3548,896 @@ test('quiz restart clears transient errors and prior grading and learning report
   await expect(page.getByText('第二轮学习报告摘要')).toHaveCount(0)
   await expect(page.getByRole('alert')).toHaveCount(0)
   expect(starts).toBe(2)
+  expect(answerRequests.slice(0, 2).map(request => request.body)).toEqual([
+    { answer: 'Alpha', question_index: 0 },
+    { answer: 'Beta', question_index: 0 },
+  ])
+  expect(answerRequests[1].key).not.toBe(answerRequests[0].key)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('quiz deterministic start rejections discard their receipts and rotate keys', async ({ page }) => {
+  const starts = []
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (request.method() === 'POST' && path === '/session/start') {
+      starts.push({
+        key: await request.headerValue('idempotency-key'),
+        body: await request.postDataJSON(),
+      })
+      if (starts.length === 1) {
+        return { status: 422, body: { detail: '出题参数无效' } }
+      }
+      if (starts.length === 2) {
+        return {
+          status: 413,
+          body: {
+            detail: '答题会话超过持久化上限',
+            code: 'quiz_session_too_large',
+          },
+        }
+      }
+      return {
+        body: {
+          session_id: 'quiz-after-start-rejections',
+          total: 1,
+          questions: [{
+            index: 0,
+            question: '确定拒绝后使用了新请求吗？',
+            options: ['是', '否'],
+            type: 'choice',
+          }],
+          revision: 1,
+          expires_at: FUTURE_EXPIRES_AT,
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/quiz')
+  await page.getByRole('combobox', { name: '学习文档' }).selectOption('notes.md')
+  const topic = page.getByRole('textbox', { name: /出题主题/ })
+  await topic.fill('第一次确定拒绝')
+  await page.getByRole('button', { name: '开始答题' }).click()
+  await expect(page.getByRole('alert')).toContainText('出题参数无效')
+  await expect(topic).toBeEditable()
+  await expect.poll(() => (
+    page.evaluate(key => sessionStorage.getItem(key), QUIZ_RECOVERY_KEY)
+  )).toBeNull()
+
+  await topic.fill('第二次确定拒绝')
+  await page.getByRole('button', { name: '开始答题' }).click()
+  await expect(page.getByRole('alert')).toContainText('答题会话超过持久化上限')
+  await expect(topic).toBeEditable()
+  await expect.poll(() => (
+    page.evaluate(key => sessionStorage.getItem(key), QUIZ_RECOVERY_KEY)
+  )).toBeNull()
+
+  await topic.fill('最终有效请求')
+  await page.getByRole('button', { name: '开始答题' }).click()
+  await expect(page.getByText('确定拒绝后使用了新请求吗？')).toBeVisible()
+  expect(starts.map(start => start.body.description)).toEqual([
+    '第一次确定拒绝',
+    '第二次确定拒绝',
+    '最终有效请求',
+  ])
+  expect(new Set(starts.map(start => start.key))).toHaveProperty('size', 3)
+  for (const start of starts) expect(start.key).toMatch(UUID_V4_PATTERN)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('quiz coded oversized answer clears pending before a corrected request', async ({ page }) => {
+  const answers = []
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (request.method() === 'POST' && path === '/session/start') {
+      return {
+        body: {
+          session_id: 'quiz-oversized-answer',
+          total: 1,
+          questions: [{
+            index: 0,
+            question: '请选择可修正的答案',
+            options: ['Alpha', 'Beta'],
+            type: 'choice',
+          }],
+          revision: 1,
+          expires_at: FUTURE_EXPIRES_AT,
+        },
+      }
+    }
+    if (request.method() === 'POST' && path === '/session/quiz-oversized-answer/answer') {
+      answers.push({
+        key: await request.headerValue('idempotency-key'),
+        body: await request.postDataJSON(),
+      })
+      if (answers.length === 1) {
+        return {
+          status: 413,
+          body: {
+            detail: '答案导致会话超过持久化上限',
+            code: 'quiz_session_too_large',
+          },
+        }
+      }
+      return {
+        body: {
+          evaluation_status: 'final',
+          correct: true,
+          correct_answer: 'Beta',
+          explanation: '已使用修正后的新请求。',
+          is_last: true,
+          next_index: null,
+          revision: 2,
+          expires_at: FUTURE_EXPIRES_AT,
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/quiz')
+  await page.getByRole('combobox', { name: '学习文档' }).selectOption('notes.md')
+  await page.getByRole('button', { name: '开始答题' }).click()
+  await page.getByRole('button', { name: 'Alpha' }).click()
+  await page.getByRole('button', { name: '提交答案' }).click()
+
+  await expect(page.getByRole('alert')).toContainText('答案导致会话超过持久化上限')
+  await expect(page.getByRole('button', { name: 'Beta' })).toBeEnabled()
+  await expect.poll(() => page.evaluate(key => (
+    JSON.parse(sessionStorage.getItem(key)).pending_answer
+  ), QUIZ_RECOVERY_KEY)).toBeNull()
+  await page.getByRole('button', { name: 'Beta' }).click()
+  await page.getByRole('button', { name: '提交答案' }).click()
+  await expect(page.getByText('已使用修正后的新请求。')).toBeVisible()
+
+  expect(answers.map(answer => answer.body)).toEqual([
+    { answer: 'Alpha', question_index: 0 },
+    { answer: 'Beta', question_index: 0 },
+  ])
+  expect(answers[1].key).not.toBe(answers[0].key)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('quiz start deadline preserves the exact recovery request for explicit retry', async ({ page }) => {
+  await page.clock.install()
+  const attempts = []
+  let releaseFirst
+  let markFirstStarted
+  const firstGate = new Promise(resolve => { releaseFirst = resolve })
+  const firstStarted = new Promise(resolve => { markFirstStarted = resolve })
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (request.method() === 'POST' && path === '/session/start') {
+      attempts.push({
+        key: await request.headerValue('idempotency-key'),
+        body: await request.postDataJSON(),
+        rawBody: request.postData(),
+      })
+      if (attempts.length === 1) {
+        markFirstStarted()
+        await firstGate
+        return {
+          body: {
+            session_id: 'quiz-start-too-late',
+            total: 1,
+            questions: [{
+              index: 0,
+              question: '不应采用的迟到 Quiz 题目',
+              options: ['旧答案'],
+              type: 'choice',
+            }],
+            revision: 1,
+            expires_at: FUTURE_EXPIRES_AT,
+          },
+        }
+      }
+      return {
+        body: {
+          session_id: 'quiz-start-after-timeout',
+          total: 1,
+          questions: [{
+            index: 0,
+            question: 'Quiz 超时重试后的题目',
+            options: ['新答案'],
+            type: 'choice',
+          }],
+          revision: 1,
+          expires_at: FUTURE_EXPIRES_AT,
+        },
+      }
+    }
+    return null
+  })
+
+  try {
+    await page.goto('/quiz')
+    await page.getByRole('combobox', { name: '学习文档' }).selectOption('notes.md')
+    const firstAborted = waitForAbortedApiRequest(page, 'POST', '/session/start')
+    await page.getByRole('button', { name: '开始答题' }).click()
+    await firstStarted
+    await page.clock.fastForward(RECOVERY_DEADLINE_ADVANCE_MS)
+    await expect(page.getByRole('alert')).toContainText(RECOVERY_TIMEOUT_MESSAGE)
+    expectBrowserAbort(await firstAborted)
+    const retry = page.getByRole('button', { name: '重试恢复' })
+    await expect(retry).toBeEnabled()
+    const pending = await page.evaluate(
+      key => JSON.parse(sessionStorage.getItem(key)),
+      QUIZ_RECOVERY_KEY,
+    )
+    expect(pending).toMatchObject({
+      intent: { kind: 'standard', request: { document_id: 'notes.md' } },
+      session: null,
+      pending_answer: null,
+    })
+    expect(pending.start_idempotency_key).toBe(attempts[0].key)
+
+    releaseFirst()
+    await retry.click()
+    await expect(page.getByText('Quiz 超时重试后的题目')).toBeVisible()
+    await expect(page.getByText('不应采用的迟到 Quiz 题目')).toHaveCount(0)
+    expect(attempts).toHaveLength(2)
+    expect(attempts[0]).toEqual(attempts[1])
+    expect(attempts[0].key).toMatch(UUID_V4_PATTERN)
+    expect(unexpectedRequests).toEqual([])
+  } finally {
+    releaseFirst()
+  }
+})
+
+test('quiz snapshot deadline leaves the session receipt unchanged until retry', async ({ page }) => {
+  await page.clock.install()
+  const sessionId = 'quiz-get-timeout'
+  const recovery = quizRecovery({ sessionId })
+  const late = quizSnapshot({ sessionId })
+  late.questions[0].question = '不应采用的迟到 Quiz GET'
+  const canonical = quizSnapshot({ sessionId })
+  canonical.questions[0].question = 'Quiz GET 重试成功'
+  await page.addInitScript(({ key, value }) => {
+    sessionStorage.setItem(key, JSON.stringify(value))
+  }, { key: QUIZ_RECOVERY_KEY, value: recovery })
+  let reads = 0
+  let releaseFirst
+  let markFirstStarted
+  const firstGate = new Promise(resolve => { releaseFirst = resolve })
+  const firstStarted = new Promise(resolve => { markFirstStarted = resolve })
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (request.method() === 'GET' && path === `/session/${sessionId}`) {
+      reads += 1
+      if (reads === 1) {
+        markFirstStarted()
+        await firstGate
+        return { body: late }
+      }
+      return { body: canonical }
+    }
+    return null
+  })
+
+  try {
+    const firstAborted = waitForAbortedApiRequest(page, 'GET', `/session/${sessionId}`)
+    await page.goto('/quiz')
+    await firstStarted
+    await page.clock.fastForward(RECOVERY_DEADLINE_ADVANCE_MS)
+    await expect(page.getByRole('alert')).toContainText(RECOVERY_TIMEOUT_MESSAGE)
+    expectBrowserAbort(await firstAborted)
+    const retry = page.getByRole('button', { name: '重试恢复' })
+    await expect(retry).toBeEnabled()
+    expect(
+      await page.evaluate(
+        key => JSON.parse(sessionStorage.getItem(key)),
+        QUIZ_RECOVERY_KEY,
+      ),
+    ).toEqual(recovery)
+
+    releaseFirst()
+    await retry.click()
+    await expect(page.getByText('Quiz GET 重试成功')).toBeVisible()
+    await expect(page.getByText('不应采用的迟到 Quiz GET')).toHaveCount(0)
+    expect(reads).toBe(2)
+    expect(unexpectedRequests).toEqual([])
+  } finally {
+    releaseFirst()
+  }
+})
+
+test('quiz answer deadline reconciles before replaying the frozen answer', async ({ page }) => {
+  await page.clock.install()
+  const sessionId = 'quiz-answer-timeout'
+  const activeSnapshot = quizSnapshot({ sessionId })
+  const recoveredFeedback = {
+    evaluation_status: 'final',
+    correct: true,
+    correct_answer: 'Alpha',
+    explanation: '已用原答案和请求键安全恢复',
+    is_last: true,
+    next_index: null,
+    revision: 2,
+    expires_at: FUTURE_EXPIRES_AT,
+  }
+  const completedSnapshot = quizSnapshot({
+    sessionId,
+    status: 'completed',
+    lastAnswerResult: recoveredFeedback,
+  })
+  const answers = []
+  let snapshotReads = 0
+  let releaseAnswer
+  let markAnswerStarted
+  let releaseFailedRead
+  let markFailedReadStarted
+  const answerGate = new Promise(resolve => { releaseAnswer = resolve })
+  const answerStarted = new Promise(resolve => { markAnswerStarted = resolve })
+  const failedReadGate = new Promise(resolve => { releaseFailedRead = resolve })
+  const failedReadStarted = new Promise(resolve => { markFailedReadStarted = resolve })
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (request.method() === 'POST' && path === '/session/start') {
+      return {
+        body: {
+          session_id: sessionId,
+          total: 1,
+          questions: activeSnapshot.questions,
+          revision: 1,
+          expires_at: FUTURE_EXPIRES_AT,
+        },
+      }
+    }
+    if (request.method() === 'POST' && path === `/session/${sessionId}/answer`) {
+      answers.push({
+        key: await request.headerValue('idempotency-key'),
+        body: await request.postDataJSON(),
+        rawBody: request.postData(),
+      })
+      if (answers.length === 1) {
+        markAnswerStarted()
+        await answerGate
+      }
+      return { body: recoveredFeedback }
+    }
+    if (request.method() === 'GET' && path === `/session/${sessionId}`) {
+      snapshotReads += 1
+      if (snapshotReads === 1) {
+        markFailedReadStarted()
+        await failedReadGate
+        return { status: 503, body: { detail: '答案对账暂时不可用' } }
+      }
+      return { body: snapshotReads === 2 ? activeSnapshot : completedSnapshot }
+    }
+    return null
+  })
+
+  try {
+    await page.goto('/quiz')
+    await page.getByRole('combobox', { name: '学习文档' }).selectOption('notes.md')
+    await page.getByRole('button', { name: '开始答题' }).click()
+    await page.getByRole('button', { name: 'Alpha' }).click()
+    const answerAborted = waitForAbortedApiRequest(
+      page,
+      'POST',
+      `/session/${sessionId}/answer`,
+    )
+    await page.getByRole('button', { name: '提交答案' }).click()
+    await answerStarted
+    await page.clock.fastForward(RECOVERY_DEADLINE_ADVANCE_MS)
+    await expect(page.getByRole('alert')).toContainText(RECOVERY_TIMEOUT_MESSAGE)
+    expectBrowserAbort(await answerAborted)
+    releaseAnswer()
+    await failedReadStarted
+    const pending = await page.evaluate(key => (
+      JSON.parse(sessionStorage.getItem(key)).pending_answer
+    ), QUIZ_RECOVERY_KEY)
+    expect(pending).toMatchObject({ question_index: 0, answer: 'Alpha' })
+    expect(pending.idempotency_key).toBe(answers[0].key)
+
+    releaseFailedRead()
+    await expect(page.getByRole('alert')).toContainText('答案对账暂时不可用')
+    const retry = page.getByRole('button', { name: '重试恢复' })
+    await expect(retry).toBeEnabled()
+    await retry.click()
+    await expect(page.getByText('已用原答案和请求键安全恢复')).toBeVisible()
+    expect(answers).toHaveLength(2)
+    expect(answers[0]).toEqual(answers[1])
+    expect(answers[0].body).toEqual({ answer: 'Alpha', question_index: 0 })
+    expect(answers[0].key).toMatch(UUID_V4_PATTERN)
+    expect(snapshotReads).toBe(3)
+    expect(
+      await page.evaluate(
+        key => JSON.parse(sessionStorage.getItem(key)).pending_answer,
+        QUIZ_RECOVERY_KEY,
+      ),
+    ).toBeNull()
+    expect(unexpectedRequests).toEqual([])
+  } finally {
+    releaseAnswer()
+    releaseFailedRead()
+  }
+})
+
+test('quiz result deadline exits advancing and hydrates the canonical snapshot', async ({ page }) => {
+  await page.clock.install()
+  const sessionId = 'quiz-result-timeout'
+  const feedback = {
+    evaluation_status: 'final',
+    correct: true,
+    correct_answer: 'Alpha',
+    explanation: '答案已提交，等待结果。',
+    is_last: true,
+    next_index: null,
+    revision: 2,
+    expires_at: FUTURE_EXPIRES_AT,
+  }
+  const canonicalSnapshot = quizSnapshot({
+    sessionId,
+    status: 'completed',
+    lastAnswerResult: feedback,
+  })
+  const lateResult = {
+    ...canonicalSnapshot.result,
+    correct: 0,
+    incorrect: 1,
+    score: 0,
+  }
+  let results = 0
+  let snapshotReads = 0
+  let releaseResult
+  let markResultStarted
+  let releaseReconcile
+  let markReconcileStarted
+  const resultGate = new Promise(resolve => { releaseResult = resolve })
+  const resultStarted = new Promise(resolve => { markResultStarted = resolve })
+  const reconcileGate = new Promise(resolve => { releaseReconcile = resolve })
+  const reconcileStarted = new Promise(resolve => { markReconcileStarted = resolve })
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (request.method() === 'POST' && path === '/session/start') {
+      return {
+        body: {
+          session_id: sessionId,
+          total: 1,
+          questions: canonicalSnapshot.questions,
+          revision: 1,
+          expires_at: FUTURE_EXPIRES_AT,
+        },
+      }
+    }
+    if (request.method() === 'POST' && path === `/session/${sessionId}/answer`) {
+      return { body: feedback }
+    }
+    if (request.method() === 'GET' && path === `/session/${sessionId}/result`) {
+      results += 1
+      markResultStarted()
+      await resultGate
+      return { body: lateResult }
+    }
+    if (request.method() === 'GET' && path === `/session/${sessionId}`) {
+      snapshotReads += 1
+      markReconcileStarted()
+      await reconcileGate
+      return { body: canonicalSnapshot }
+    }
+    return null
+  })
+
+  try {
+    await page.goto('/quiz')
+    await page.getByRole('combobox', { name: '学习文档' }).selectOption('notes.md')
+    await page.getByRole('button', { name: '开始答题' }).click()
+    await page.getByRole('button', { name: 'Alpha' }).click()
+    await page.getByRole('button', { name: '提交答案' }).click()
+    const resultAborted = waitForAbortedApiRequest(
+      page,
+      'GET',
+      `/session/${sessionId}/result`,
+    )
+    await page.getByRole('button', { name: '查看结果' }).click()
+    await resultStarted
+    await page.clock.fastForward(RECOVERY_DEADLINE_ADVANCE_MS)
+    await expect(page.getByRole('alert')).toContainText(RECOVERY_TIMEOUT_MESSAGE)
+    expectBrowserAbort(await resultAborted)
+    releaseResult()
+    await reconcileStarted
+    await expect(page.getByText('正在恢复答题进度...')).toBeVisible()
+    expect(
+      await page.evaluate(
+        key => JSON.parse(sessionStorage.getItem(key)),
+        QUIZ_RECOVERY_KEY,
+      ),
+    ).toMatchObject({
+      session: { session_id: sessionId, revision: 2 },
+      acknowledged_answer_count: 1,
+      pending_answer: null,
+    })
+
+    releaseReconcile()
+    await expect(page.locator('.quiz-results')).toBeVisible()
+    await expect(page.locator('.score-number')).toHaveText('100')
+    expect(results).toBe(1)
+    expect(snapshotReads).toBe(1)
+    expect(unexpectedRequests).toEqual([])
+  } finally {
+    releaseResult()
+    releaseReconcile()
+  }
+})
+
+test('quiz terminal result response clears recovery without snapshot retries', async ({ page }) => {
+  const sessionId = 'quiz-result-expired'
+  let resultReads = 0
+  let snapshotReads = 0
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (request.method() === 'POST' && path === '/session/start') {
+      return {
+        body: {
+          session_id: sessionId,
+          total: 1,
+          questions: [{
+            index: 0,
+            question: '终态结果不应继续恢复吗？',
+            options: ['是', '否'],
+            type: 'choice',
+          }],
+          revision: 1,
+          expires_at: FUTURE_EXPIRES_AT,
+        },
+      }
+    }
+    if (request.method() === 'POST' && path === `/session/${sessionId}/answer`) {
+      return {
+        body: {
+          evaluation_status: 'final',
+          correct: true,
+          correct_answer: '是',
+          explanation: '答案已记录。',
+          is_last: true,
+          next_index: null,
+          revision: 2,
+          expires_at: FUTURE_EXPIRES_AT,
+        },
+      }
+    }
+    if (request.method() === 'GET' && path === `/session/${sessionId}/result`) {
+      resultReads += 1
+      return {
+        status: 410,
+        body: {
+          detail: '答题会话已过期',
+          code: 'quiz_session_expired',
+        },
+      }
+    }
+    if (request.method() === 'GET' && path === `/session/${sessionId}`) {
+      snapshotReads += 1
+      return { status: 500, body: { detail: '终态后不应读取快照' } }
+    }
+    return null
+  })
+
+  await page.goto('/quiz')
+  await page.getByRole('combobox', { name: '学习文档' }).selectOption('notes.md')
+  await page.getByRole('button', { name: '开始答题' }).click()
+  await page.getByRole('button', { name: '是' }).click()
+  await page.getByRole('button', { name: '提交答案' }).click()
+  await page.getByRole('button', { name: '查看结果' }).click()
+
+  await expect(page.getByRole('alert')).toContainText('答题会话已过期')
+  await expect(page.getByRole('button', { name: '开始答题' })).toBeVisible()
+  await expect.poll(() => (
+    page.evaluate(key => sessionStorage.getItem(key), QUIZ_RECOVERY_KEY)
+  )).toBeNull()
+  expect(resultReads).toBe(1)
+  expect(snapshotReads).toBe(0)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('quiz grading deadline hydrates the canonical report instead of reposting', async ({ page }) => {
+  await page.clock.install()
+  const sessionId = 'quiz-grade-timeout'
+  const recovery = quizRecovery({ sessionId, acknowledgedAnswerCount: 1 })
+  const canonicalGrade = {
+    session_id: sessionId,
+    total: 1,
+    correct: 1,
+    score: 1,
+    grades: [{
+      index: 0,
+      question: '请选择首字母',
+      user_answer: 'Alpha',
+      correct_answer: 'Alpha',
+      is_correct: true,
+      ai_feedback: '权威快照中的批改',
+      knowledge_gap: null,
+    }],
+    revision: 2,
+    expires_at: FUTURE_EXPIRES_AT,
+    learning_path_source: null,
+    learning_path_completion: null,
+  }
+  const lateGrade = {
+    ...canonicalGrade,
+    grades: [{ ...canonicalGrade.grades[0], ai_feedback: '不应采用的迟到批改' }],
+  }
+  const baseSnapshot = quizSnapshot({ sessionId, status: 'completed' })
+  const canonicalSnapshot = quizSnapshot({
+    sessionId,
+    status: 'completed',
+    gradingReport: canonicalGrade,
+  })
+  await page.addInitScript(({ key, value }) => {
+    sessionStorage.setItem(key, JSON.stringify(value))
+  }, { key: QUIZ_RECOVERY_KEY, value: recovery })
+  let reads = 0
+  let grades = 0
+  let releaseGrade
+  let markGradeStarted
+  let releaseReconcile
+  let markReconcileStarted
+  const gradeGate = new Promise(resolve => { releaseGrade = resolve })
+  const gradeStarted = new Promise(resolve => { markGradeStarted = resolve })
+  const reconcileGate = new Promise(resolve => { releaseReconcile = resolve })
+  const reconcileStarted = new Promise(resolve => { markReconcileStarted = resolve })
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (request.method() === 'GET' && path === `/session/${sessionId}`) {
+      reads += 1
+      if (reads === 1) return { body: baseSnapshot }
+      markReconcileStarted()
+      await reconcileGate
+      return { body: canonicalSnapshot }
+    }
+    if (request.method() === 'POST' && path === `/session/${sessionId}/grade`) {
+      grades += 1
+      markGradeStarted()
+      await gradeGate
+      return { body: lateGrade }
+    }
+    return null
+  })
+
+  try {
+    await page.goto('/quiz')
+    const gradeAborted = waitForAbortedApiRequest(
+      page,
+      'POST',
+      `/session/${sessionId}/grade`,
+    )
+    await page.getByRole('button', { name: 'AI 批改讲解' }).click()
+    await gradeStarted
+    await page.clock.fastForward(RECOVERY_DEADLINE_ADVANCE_MS)
+    await expect(page.getByRole('alert')).toContainText(RECOVERY_TIMEOUT_MESSAGE)
+    expectBrowserAbort(await gradeAborted)
+    releaseGrade()
+    await reconcileStarted
+
+    releaseReconcile()
+    await expect(page.getByRole('heading', { name: 'AI 批改报告' })).toBeVisible()
+    await expect(page.getByText('权威快照中的批改')).toBeVisible()
+    await expect(page.getByText('不应采用的迟到批改')).toHaveCount(0)
+    expect(grades).toBe(1)
+    expect(reads).toBe(2)
+    expect(unexpectedRequests).toEqual([])
+  } finally {
+    releaseGrade()
+    releaseReconcile()
+  }
+})
+
+test('quiz report deadline hydrates the canonical report instead of reposting', async ({ page }) => {
+  await page.clock.install()
+  const sessionId = 'quiz-report-timeout'
+  const recovery = quizRecovery({ sessionId, acknowledgedAnswerCount: 1 })
+  const grade = {
+    session_id: sessionId,
+    total: 1,
+    correct: 1,
+    score: 1,
+    grades: [],
+    revision: 2,
+    expires_at: FUTURE_EXPIRES_AT,
+    learning_path_source: null,
+    learning_path_completion: null,
+  }
+  const canonicalReport = {
+    session_id: sessionId,
+    document_id: 'notes.md',
+    overall_score: 1,
+    topic_mastery: [],
+    strengths: ['权威快照中的学习报告'],
+    weaknesses: [],
+    recommendations: ['继续保持'],
+    summary: '服务端快照已确认报告。',
+    revision: 2,
+    expires_at: FUTURE_EXPIRES_AT,
+    learning_path_source: null,
+    learning_path_completion: null,
+  }
+  const lateReport = {
+    ...canonicalReport,
+    strengths: ['不应采用的迟到学习报告'],
+    summary: '迟到报告不应出现。',
+  }
+  const baseSnapshot = quizSnapshot({
+    sessionId,
+    status: 'completed',
+    gradingReport: grade,
+  })
+  const canonicalSnapshot = quizSnapshot({
+    sessionId,
+    status: 'completed',
+    gradingReport: grade,
+    learningReport: canonicalReport,
+  })
+  await page.addInitScript(({ key, value }) => {
+    sessionStorage.setItem(key, JSON.stringify(value))
+  }, { key: QUIZ_RECOVERY_KEY, value: recovery })
+  let reads = 0
+  let reports = 0
+  let releaseReport
+  let markReportStarted
+  let releaseReconcile
+  let markReconcileStarted
+  const reportGate = new Promise(resolve => { releaseReport = resolve })
+  const reportStarted = new Promise(resolve => { markReportStarted = resolve })
+  const reconcileGate = new Promise(resolve => { releaseReconcile = resolve })
+  const reconcileStarted = new Promise(resolve => { markReconcileStarted = resolve })
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (request.method() === 'GET' && path === `/session/${sessionId}`) {
+      reads += 1
+      if (reads === 1) return { body: baseSnapshot }
+      markReconcileStarted()
+      await reconcileGate
+      return { body: canonicalSnapshot }
+    }
+    if (request.method() === 'POST' && path === `/session/${sessionId}/report`) {
+      reports += 1
+      markReportStarted()
+      await reportGate
+      return { body: lateReport }
+    }
+    return null
+  })
+
+  try {
+    await page.goto('/quiz')
+    const reportAborted = waitForAbortedApiRequest(
+      page,
+      'POST',
+      `/session/${sessionId}/report`,
+    )
+    await page.getByRole('button', { name: '学习评估报告' }).click()
+    await reportStarted
+    await page.clock.fastForward(RECOVERY_DEADLINE_ADVANCE_MS)
+    await expect(page.getByRole('alert')).toContainText(RECOVERY_TIMEOUT_MESSAGE)
+    expectBrowserAbort(await reportAborted)
+    releaseReport()
+    await reconcileStarted
+
+    releaseReconcile()
+    await expect(page.getByText('服务端快照已确认报告。')).toBeVisible()
+    await expect(page.getByText('权威快照中的学习报告')).toBeVisible()
+    await expect(page.getByText('迟到报告不应出现。')).toHaveCount(0)
+    expect(reports).toBe(1)
+    expect(reads).toBe(2)
+    expect(unexpectedRequests).toEqual([])
+  } finally {
+    releaseReport()
+    releaseReconcile()
+  }
+})
+
+test('quiz stale grade and coded oversized report reconcile by GET without reposting', async ({ page }) => {
+  const sessionId = 'quiz-report-oversized'
+  const recovery = quizRecovery({ sessionId, acknowledgedAnswerCount: 1 })
+  const grade = {
+    session_id: sessionId,
+    total: 1,
+    correct: 1,
+    score: 1,
+    grades: [],
+    revision: 2,
+    expires_at: FUTURE_EXPIRES_AT,
+    learning_path_source: null,
+    learning_path_completion: null,
+  }
+  const canonicalReport = {
+    session_id: sessionId,
+    document_id: 'notes.md',
+    overall_score: 1,
+    topic_mastery: [],
+    strengths: ['GET 已确认唯一学习报告'],
+    weaknesses: [],
+    recommendations: ['继续保持'],
+    summary: '服务端快照确认报告已经存在。',
+    revision: 2,
+    expires_at: FUTURE_EXPIRES_AT,
+    learning_path_source: null,
+    learning_path_completion: null,
+  }
+  const baseSnapshot = quizSnapshot({ sessionId, status: 'completed' })
+  const gradedSnapshot = quizSnapshot({
+    sessionId,
+    status: 'completed',
+    gradingReport: grade,
+  })
+  const canonicalSnapshot = quizSnapshot({
+    sessionId,
+    status: 'completed',
+    gradingReport: grade,
+    learningReport: canonicalReport,
+  })
+  await page.addInitScript(({ key, value }) => {
+    sessionStorage.setItem(key, JSON.stringify(value))
+  }, { key: QUIZ_RECOVERY_KEY, value: recovery })
+  let reads = 0
+  let grades = 0
+  let reports = 0
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === `/session/${sessionId}`) {
+      reads += 1
+      return {
+        body: reads === 1
+          ? baseSnapshot
+          : reads === 2 ? gradedSnapshot : canonicalSnapshot,
+      }
+    }
+    if (request.method() === 'POST' && path === `/session/${sessionId}/grade`) {
+      grades += 1
+      return {
+        status: 409,
+        body: {
+          detail: '批改时服务端进度已变化',
+          code: 'quiz_session_stale',
+          reason: 'stale',
+        },
+      }
+    }
+    if (request.method() === 'POST' && path === `/session/${sessionId}/report`) {
+      reports += 1
+      return {
+        status: 413,
+        body: {
+          detail: '报告响应超过持久化上限，结果可能已经提交',
+          code: 'quiz_session_too_large',
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/quiz')
+  await page.getByRole('button', { name: 'AI 批改讲解' }).click()
+  await expect(page.getByRole('heading', { name: 'AI 批改报告' })).toBeVisible()
+  expect(grades).toBe(1)
+  expect(reads).toBe(2)
+
+  await page.getByRole('button', { name: '学习评估报告' }).click()
+  await expect(page.getByText('服务端快照确认报告已经存在。')).toBeVisible()
+  await expect(page.getByText('GET 已确认唯一学习报告')).toBeVisible()
+  expect(grades).toBe(1)
+  expect(reports).toBe(1)
+  expect(reads).toBe(3)
   expect(unexpectedRequests).toEqual([])
 })
 
@@ -2763,6 +4491,10 @@ test('quiz reload reuses the pending start key after the first response is lost'
 test('quiz reload reconciles a pending answer and replays the exact request key', async ({ page }) => {
   const answerAttempts = []
   let snapshotReads = 0
+  let releaseFirstRead
+  let markFirstReadStarted
+  const firstReadGate = new Promise(resolve => { releaseFirstRead = resolve })
+  const firstReadStarted = new Promise(resolve => { markFirstReadStarted = resolve })
   const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
     if (request.method() === 'GET' && path === '/documents') {
       return { body: { documents: ['notes.md'] } }
@@ -2780,7 +4512,11 @@ test('quiz reload reconciles a pending answer and replays the exact request key'
     }
     if (request.method() === 'GET' && path === '/session/quiz-retry') {
       snapshotReads += 1
-      const answered = snapshotReads > 1
+      if (snapshotReads === 1) {
+        markFirstReadStarted()
+        await firstReadGate
+      }
+      const answered = snapshotReads > 2
       return {
         body: {
           schema_version: 1,
@@ -2847,33 +4583,46 @@ test('quiz reload reconciles a pending answer and replays the exact request key'
     return null
   })
 
-  await page.goto('/quiz')
-  await page.getByRole('combobox', { name: '学习文档' }).selectOption('notes.md')
-  await page.getByRole('button', { name: '开始答题' }).click()
+  try {
+    await page.goto('/quiz')
+    await page.getByRole('combobox', { name: '学习文档' }).selectOption('notes.md')
+    await page.getByRole('button', { name: '开始答题' }).click()
 
-  await page.getByRole('button', { name: /Alpha/ }).click()
-  await page.getByRole('button', { name: '提交答案' }).click()
-  await expect(page.getByRole('alert')).toContainText('答案提交暂时不可用')
-  expect(await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), QUIZ_RECOVERY_KEY))
-    .toMatchObject({
-      session: { session_id: 'quiz-retry', revision: 1 },
-      pending_answer: { question_index: 0, answer: 'Alpha' },
-    })
+    await page.getByRole('button', { name: /Alpha/ }).click()
+    await page.getByRole('button', { name: '提交答案' }).click()
+    await firstReadStarted
+    await expect(page.getByText('正在恢复答题进度...')).toBeVisible()
+    expect(answerAttempts).toHaveLength(1)
+    expect(await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), QUIZ_RECOVERY_KEY))
+      .toMatchObject({
+        session: { session_id: 'quiz-retry', revision: 1 },
+        pending_answer: { question_index: 0, answer: 'Alpha' },
+      })
 
-  await page.reload()
-  await expect(page.getByText('已安全恢复答案')).toBeVisible()
+    const firstReadAborted = waitForAbortedApiRequest(
+      page,
+      'GET',
+      '/session/quiz-retry',
+    )
+    await page.reload()
+    expectBrowserAbort(await firstReadAborted)
+    releaseFirstRead()
+    await expect(page.getByText('已安全恢复答案')).toBeVisible()
 
-  expect(answerAttempts.map(attempt => attempt.body)).toEqual([
-    { answer: 'Alpha', question_index: 0 },
-    { answer: 'Alpha', question_index: 0 },
-  ])
-  expect(answerAttempts[0].key).toMatch(UUID_V4_PATTERN)
-  expect(answerAttempts[1].key).toBe(answerAttempts[0].key)
-  expect(snapshotReads).toBe(2)
-  expect(
-    await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), QUIZ_RECOVERY_KEY)
-  ).toMatchObject({ pending_answer: null, acknowledged_answer_count: 0 })
-  expect(unexpectedRequests).toEqual([])
+    expect(answerAttempts.map(attempt => attempt.body)).toEqual([
+      { answer: 'Alpha', question_index: 0 },
+      { answer: 'Alpha', question_index: 0 },
+    ])
+    expect(answerAttempts[0].key).toMatch(UUID_V4_PATTERN)
+    expect(answerAttempts[1].key).toBe(answerAttempts[0].key)
+    expect(snapshotReads).toBe(3)
+    expect(
+      await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), QUIZ_RECOVERY_KEY)
+    ).toMatchObject({ pending_answer: null, acknowledged_answer_count: 0 })
+    expect(unexpectedRequests).toEqual([])
+  } finally {
+    releaseFirstRead()
+  }
 })
 
 test('quiz snapshot restores a completed learning report without replaying mutations', async ({ page }) => {
@@ -4974,33 +6723,34 @@ test('a late grading response cannot revive a restarted quiz', async ({ page }) 
     return null
   })
 
-  await page.goto('/quiz')
-  await page.getByRole('combobox', { name: '学习文档' }).selectOption('notes.md')
-  await page.getByRole('button', { name: '开始答题' }).click()
-  await page.getByRole('button', { name: 'A. 正确' }).click()
-  await page.getByRole('button', { name: '提交答案' }).click()
-  await page.getByRole('button', { name: '查看结果' }).click()
-  await page.getByRole('button', { name: 'AI 批改讲解' }).click()
-  await gradeStarted
+  try {
+    await page.goto('/quiz')
+    await page.getByRole('combobox', { name: '学习文档' }).selectOption('notes.md')
+    await page.getByRole('button', { name: '开始答题' }).click()
+    await page.getByRole('button', { name: 'A. 正确' }).click()
+    await page.getByRole('button', { name: '提交答案' }).click()
+    await page.getByRole('button', { name: '查看结果' }).click()
+    await page.getByRole('button', { name: 'AI 批改讲解' }).click()
+    await gradeStarted
 
-  await page.getByRole('button', { name: '再来一轮' }).click()
-  await page.getByRole('button', { name: '开始答题' }).click()
-  await expect(page.getByText('新会话题目')).toBeVisible()
+    const oldGradeAborted = waitForAbortedApiRequest(
+      page,
+      'POST',
+      '/session/late-grade-1/grade',
+    )
+    await page.getByRole('button', { name: '再来一轮' }).click()
+    expectBrowserAbort(await oldGradeAborted)
+    releaseGrade()
 
-  const lateGradeResponsePromise = page.waitForResponse(response => (
-    response.url().includes('/api/session/late-grade-1/grade')
-  ))
-  releaseGrade()
-  const lateGradeResponse = await lateGradeResponsePromise
-  await lateGradeResponse.finished()
-  await page.evaluate(() => new Promise(resolve => {
-    requestAnimationFrame(() => requestAnimationFrame(resolve))
-  }))
-  await expect(page.getByText('新会话题目')).toBeVisible()
-  await expect(page.getByRole('heading', { name: 'AI 批改报告' })).toHaveCount(0)
-  expect(starts).toBe(2)
-  expect(unexpectedRequests).toEqual([])
-  expect(problems).toEqual([])
+    await page.getByRole('button', { name: '开始答题' }).click()
+    await expect(page.getByText('新会话题目')).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'AI 批改报告' })).toHaveCount(0)
+    expect(starts).toBe(2)
+    expect(unexpectedRequests).toEqual([])
+    expect(problems).toEqual([])
+  } finally {
+    releaseGrade()
+  }
 })
 
 test('a late learning-report response cannot replace a new quiz', async ({ page }) => {
@@ -5093,34 +6843,35 @@ test('a late learning-report response cannot replace a new quiz', async ({ page 
     return null
   })
 
-  await page.goto('/quiz')
-  await page.getByRole('combobox', { name: '学习文档' }).selectOption('notes.md')
-  await page.getByRole('button', { name: '开始答题' }).click()
-  await page.getByRole('button', { name: 'A. 正确' }).click()
-  await page.getByRole('button', { name: '提交答案' }).click()
-  await page.getByRole('button', { name: '查看结果' }).click()
-  await page.getByRole('button', { name: 'AI 批改讲解' }).click()
-  await page.getByRole('button', { name: '学习评估报告' }).click()
-  await reportStarted
+  try {
+    await page.goto('/quiz')
+    await page.getByRole('combobox', { name: '学习文档' }).selectOption('notes.md')
+    await page.getByRole('button', { name: '开始答题' }).click()
+    await page.getByRole('button', { name: 'A. 正确' }).click()
+    await page.getByRole('button', { name: '提交答案' }).click()
+    await page.getByRole('button', { name: '查看结果' }).click()
+    await page.getByRole('button', { name: 'AI 批改讲解' }).click()
+    await page.getByRole('button', { name: '学习评估报告' }).click()
+    await reportStarted
 
-  await page.getByRole('button', { name: '再来一轮' }).click()
-  await page.getByRole('button', { name: '开始答题' }).click()
-  await expect(page.getByText('报告后的新题目')).toBeVisible()
+    const oldReportAborted = waitForAbortedApiRequest(
+      page,
+      'POST',
+      '/session/late-report-1/report',
+    )
+    await page.getByRole('button', { name: '再来一轮' }).click()
+    expectBrowserAbort(await oldReportAborted)
+    releaseReport()
 
-  const lateReportResponsePromise = page.waitForResponse(response => (
-    response.url().includes('/api/session/late-report-1/report')
-  ))
-  releaseReport()
-  const lateReportResponse = await lateReportResponsePromise
-  await lateReportResponse.finished()
-  await page.evaluate(() => new Promise(resolve => {
-    requestAnimationFrame(() => requestAnimationFrame(resolve))
-  }))
-  await expect(page.getByText('报告后的新题目')).toBeVisible()
-  await expect(page.getByText('不应复活的旧报告。')).toHaveCount(0)
-  expect(starts).toBe(2)
-  expect(unexpectedRequests).toEqual([])
-  expect(problems).toEqual([])
+    await page.getByRole('button', { name: '开始答题' }).click()
+    await expect(page.getByText('报告后的新题目')).toBeVisible()
+    await expect(page.getByText('不应复活的旧报告。')).toHaveCount(0)
+    expect(starts).toBe(2)
+    expect(unexpectedRequests).toEqual([])
+    expect(problems).toEqual([])
+  } finally {
+    releaseReport()
+  }
 })
 
 test('Dashboard requires an explicit choice before replacing Quiz recovery', async ({ page }) => {
@@ -5558,52 +7309,54 @@ test('a response from an unmounted Quiz cannot overwrite a newer Dashboard recov
     return null
   })
 
-  await page.goto('/quiz')
-  await page.getByRole('combobox', { name: '学习文档' }).selectOption('a.md')
-  await page.getByRole('button', { name: '开始答题' }).click()
-  await page.getByRole('button', { name: 'A. 正确' }).click()
-  await page.getByRole('button', { name: '提交答案' }).click()
-  await answerStarted
+  try {
+    await page.goto('/quiz')
+    await page.getByRole('combobox', { name: '学习文档' }).selectOption('a.md')
+    await page.getByRole('button', { name: '开始答题' }).click()
+    await page.getByRole('button', { name: 'A. 正确' }).click()
+    await page.getByRole('button', { name: '提交答案' }).click()
+    await answerStarted
 
-  await page.getByRole('link', { name: '学习报告' }).click()
-  await page.getByLabel('错题文档').selectOption('b.md')
-  await page.getByRole('button', { name: '开始重练（1）' }).click()
-  await expect(page.getByRole('heading', { name: '检测到尚未结束的练习' })).toBeVisible()
-  expect(
-    await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), QUIZ_RECOVERY_KEY),
-  ).toMatchObject({
-    intent: {
-      kind: 'standard',
-      request: { document_id: 'a.md', user_id: 'default_user' },
-    },
-    session: { session_id: 'old-a-session' },
-  })
-  await page.getByRole('button', { name: '放弃并开始错题重练' }).click()
-  await expect(page).toHaveURL(/\/quiz$/)
-  await practiceStarted
+    const oldAnswerAborted = waitForAbortedApiRequest(
+      page,
+      'POST',
+      '/session/old-a-session/answer',
+    )
+    await page.getByRole('link', { name: '学习报告' }).click()
+    expectBrowserAbort(await oldAnswerAborted)
+    releaseAnswer()
 
-  const oldResponsePromise = page.waitForResponse(response => (
-    response.request().method() === 'POST'
-    && new URL(response.url()).pathname === `${API_PREFIX}/session/old-a-session/answer`
-  ))
-  releaseAnswer()
-  const oldResponse = await oldResponsePromise
-  await oldResponse.finished()
-  await page.evaluate(() => new Promise(resolve => {
-    requestAnimationFrame(() => requestAnimationFrame(resolve))
-  }))
-  expect(
-    await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), QUIZ_RECOVERY_KEY),
-  ).toMatchObject({
-    intent: {
-      kind: 'wrong_question',
-      request: { document_id: 'b.md', user_id: 'default_user' },
-    },
-    session: null,
-  })
+    await page.getByLabel('错题文档').selectOption('b.md')
+    await page.getByRole('button', { name: '开始重练（1）' }).click()
+    await expect(page.getByRole('heading', { name: '检测到尚未结束的练习' })).toBeVisible()
+    expect(
+      await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), QUIZ_RECOVERY_KEY),
+    ).toMatchObject({
+      intent: {
+        kind: 'standard',
+        request: { document_id: 'a.md', user_id: 'default_user' },
+      },
+      session: { session_id: 'old-a-session' },
+    })
+    await page.getByRole('button', { name: '放弃并开始错题重练' }).click()
+    await expect(page).toHaveURL(/\/quiz$/)
+    await practiceStarted
+    expect(
+      await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), QUIZ_RECOVERY_KEY),
+    ).toMatchObject({
+      intent: {
+        kind: 'wrong_question',
+        request: { document_id: 'b.md', user_id: 'default_user' },
+      },
+      session: null,
+    })
 
-  releasePractice()
-  await expect(page.getByText('只属于 B 文档的错题')).toBeVisible()
-  expect(unexpectedRequests).toEqual([])
-  expect(problems).toEqual([])
+    releasePractice()
+    await expect(page.getByText('只属于 B 文档的错题')).toBeVisible()
+    expect(unexpectedRequests).toEqual([])
+    expect(problems).toEqual([])
+  } finally {
+    releaseAnswer()
+    releasePractice()
+  }
 })
