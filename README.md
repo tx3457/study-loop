@@ -131,8 +131,9 @@ worker 和一个 replica，请勿扩容：向量库使用内嵌的 Chroma `Persi
 但它本身并不会把内嵌 Chroma 变成多进程安全；设置 `WEB_CONCURRENCY>1` 也不会绕过该边界。
 若未来要做多 worker/replica，必须先改成独立 Chroma 服务与 `HttpClient`，并同时配置
 PostgreSQL；这只是必要条件，还要把进程内 BM25 缓存失效和文档写入协调改造成跨进程协议。
-`MEMORY_STORE_SETUP_LOCK_TIMEOUT_SECONDS` 等参数控制 PostgreSQL 状态组件内部的初始化与
-并发锁；它们并不表示完整应用已经支持多 worker/replica。未配置 `DATABASE_URL` 时，学习者
+`MEMORY_STORE_SETUP_LOCK_TIMEOUT_SECONDS`、`QUIZ_SESSION_PG_LOCK_TIMEOUT_MS` 等参数控制
+PostgreSQL 状态组件内部的初始化、连接、语句、并发锁与取消清理；它们并不表示完整应用已经支持
+多 worker/replica。未配置 `DATABASE_URL` 时，学习者
 记忆还会额外使用单进程内存和本地 JSON 快照兜底。
 
 Structured Output 和 Embeddings 的专用 key 与地址必须成对配置；两者同时留空时才会整组回退到 `LLM_*`。完整配置见 [`.env.example`](.env.example)。
