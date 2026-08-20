@@ -120,8 +120,16 @@ async def rewrite_query(
         if not rewritten or rewritten == description.strip():
             logger.info("[sufficiency] rewrite returned identical/empty, fallback to original")
             return description
-        logger.info(f"[sufficiency] rewrote '{description[:40]}' → '{rewritten[:40]}'")
+        logger.info(
+            "[sufficiency] query rewritten: input_chars=%d output_chars=%d",
+            len(description),
+            len(rewritten),
+        )
         return rewritten
     except Exception as e:
-        logger.warning(f"[sufficiency] rewrite_query LLM call failed: {e}, fallback to original")
+        logger.warning(
+            "[sufficiency] rewrite_query LLM call failed; fallback to original: "
+            "error_type=%s",
+            type(e).__name__,
+        )
         return description

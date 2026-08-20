@@ -37,13 +37,19 @@ async def diagnostic_worker(state: TutorState) -> dict:
         update["difficulty_score"] = base.get("difficulty_score", state.get("difficulty_score", 0.5))
         update["weak_points"] = base.get("weak_points", []) or []
     except Exception as e:
-        logger.warning(f"[diagnostic_worker] adapt_reader 失败，沿用现有难度: {e}")
+        logger.warning(
+            "[diagnostic_worker] adapt_reader 失败，沿用现有难度: error_type=%s",
+            type(e).__name__,
+        )
 
     # ② 跨会话记忆：returning_context（欢迎回来）+ profile_card（栅栏注入素材）
     try:
         rc = await build_returning_context(user_id, document_id)
     except Exception as e:
-        logger.warning(f"[diagnostic_worker] build_returning_context 失败: {e}")
+        logger.warning(
+            "[diagnostic_worker] build_returning_context 失败: error_type=%s",
+            type(e).__name__,
+        )
         rc = {"is_returning": False}
     try:
         card = await build_profile_card(user_id)
@@ -61,6 +67,9 @@ async def diagnostic_worker(state: TutorState) -> dict:
             "rationale": rc.get("welcome_msg") or "cold start（新用户，无历史记忆）",
         })
     except Exception as e:
-        logger.warning(f"[diagnostic_worker] append_decision 失败（忽略）: {e}")
+        logger.warning(
+            "[diagnostic_worker] append_decision 失败（忽略）: error_type=%s",
+            type(e).__name__,
+        )
 
     return update

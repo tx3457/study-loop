@@ -79,7 +79,7 @@ source .venv/bin/activate
 pip install -r requirements.txt -r requirements-dev.txt
 cp .env.example .env
 # 编辑 .env，配置模型服务
-python -m uvicorn main:app --reload --port 8001
+python -m uvicorn main:app --reload --port 8001 --no-access-log
 ```
 
 如需启用本地 Cross-Encoder 精排，改用
@@ -150,6 +150,10 @@ curl -i http://localhost:8001/health/providers
 `/health/live` 只检查进程存活，不访问外部服务。`/health/providers` 调用 Provider 的 `models.list`，不会发起 Chat、Structured Output 或 Embedding 请求；结果默认缓存 30 秒。全部模型在目录中可见时返回 200，否则返回 503 和稳定的诊断码。目录可达只代表凭据、地址和模型可见性正常，不代表 Structured Output、Tool Calling 或 Embedding 能力已经实际验证。
 
 统一的 `llm_chat`、`llm_parse` 和 Embedding 重试链路默认各有 60 秒端到端预算（含退避等待），可通过 `PROVIDER_REQUEST_DEADLINE_SECONDS` 调整。HTTP 边界会返回稳定错误码：限流为 `provider_rate_limited`（429）、超时为 `provider_timeout`（504）、其他上游故障为 `provider_unavailable`（503），未配置则为 `provider_not_configured`（503）；前端不需要解析 Provider 原始异常。
+每个 HTTP 响应都会带服务端生成或严格校验后的 `X-Request-ID`；浏览器的通用 API 与
+流式错误提示会显示该请求编号，用于把用户看到的故障与服务端安全日志关联。未预期异常、流式
+执行中断、评测失败、实验 Tutor 失败与 MCP 远端错误只公开固定错误码和文案，不会把
+Provider 响应正文、持久化路径或原始异常文本返回给客户端。
 
 首次接入真实 Provider 时，再显式运行一次能力检查：
 

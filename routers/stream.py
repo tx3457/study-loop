@@ -33,6 +33,7 @@ from fastapi.responses import StreamingResponse
 from agents.orchestrator import orchestrator
 from routers.orchestrator import RunRequest
 from services.tracing import build_trace_config
+from services.request_context import current_request_id, safe_sse_error
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 logger = logging.getLogger(__name__)
@@ -144,8 +145,15 @@ async def stream_agent(req: RunRequest):
             yield _sse({"type": "done", "result": result})
 
         except Exception as exc:
-            logger.exception("[stream_agent] execution error")
-            yield _sse({"type": "error", "detail": str(exc)})
+            logger.error(
+                "[stream_agent] execution failed request_id=%s error_type=%s",
+                current_request_id(),
+                type(exc).__name__,
+            )
+            yield safe_sse_error(
+                detail="Agent 执行失败，请稍后重试",
+                code="agent_stream_failed",
+            )
 
     return StreamingResponse(
         _event_generator(),

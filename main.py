@@ -30,6 +30,15 @@ from services.provider_config import (
 from services.retry import RetryExhausted
 from services.tool_registry import SideEffectAmbiguousError
 from services.quiz_sessions import QuizSessionApiError
+from services.request_context import (
+    RequestContextMiddleware,
+    SafeErrorMiddleware,
+    current_request_id,
+    public_error_payload,
+)
+
+
+logger = logging.getLogger(__name__)
 
 
 async def _load_memory_snapshot():
@@ -37,18 +46,22 @@ async def _load_memory_snapshot():
     try:
         n = load_snapshot()
         if n:
-            logging.getLogger(__name__).info(f"[startup] 跨会话记忆：从本机快照恢复 {n} 条")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"[startup] load_snapshot 失败（忽略）: {e}")
+            logger.info("[startup] 跨会话记忆：从本机快照恢复 %s 条", n)
+    except Exception as exc:
+        logger.warning(
+            "[startup] load_snapshot failed; continuing error_type=%s",
+            type(exc).__name__,
+        )
 
 
 async def _save_memory_snapshot():
     """正常退出前刷新本机记忆快照；PostgreSQL 后端自动 no-op。"""
     try:
         await persist_snapshot()
-    except Exception as e:
-        logging.getLogger(__name__).warning(
-            f"[shutdown] persist_snapshot 失败（忽略）: {e}"
+    except Exception as exc:
+        logger.warning(
+            "[shutdown] persist_snapshot failed; continuing error_type=%s",
+            type(exc).__name__,
         )
 
 
@@ -58,9 +71,12 @@ async def _connect_mcp_live_servers():
         from services.mcp_servers import connect_and_register_all
         names = await connect_and_register_all()
         if names:
-            logging.getLogger(__name__).info(f"[startup] MCP live 工具接入: {names}")
-    except Exception as e:
-        logging.getLogger(__name__).warning(f"[startup] MCP live 接入失败（降级，无联网）: {e}")
+            logger.info("[startup] MCP live tools connected: count=%d", len(names))
+    except Exception as exc:
+        logger.warning(
+            "[startup] MCP live unavailable; continuing error_type=%s",
+            type(exc).__name__,
+        )
 
 
 async def _cleanup_mcp_live_servers():
@@ -106,6 +122,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(SafeErrorMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -116,7 +133,9 @@ app.add_middleware(
     ],
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Request-ID"],
 )
+app.add_middleware(RequestContextMiddleware)
 
 app.include_router(chat_router)
 app.include_router(document_router)
@@ -143,7 +162,20 @@ async def root():
 
 @app.exception_handler(ValueError)
 async def deal(request: Request, exc: ValueError):
-    return JSONResponse(status_code=400, content={"error": "参数错误", "detail": str(exc)})
+    logger.warning(
+        "request value rejected request_id=%s error_type=%s",
+        current_request_id(),
+        type(exc).__name__,
+    )
+    return JSONResponse(
+        status_code=400,
+        content=public_error_payload(
+            error="参数错误",
+            detail="请求参数无效",
+            code="invalid_request",
+            include_request_id=True,
+        ),
+    )
 
 
 @app.exception_handler(QuizSessionApiError)
@@ -193,7 +225,11 @@ async def idempotency_conflict_handler(
 
 @app.exception_handler(RetryExhausted)
 async def retry_exhausted_handler(request: Request, exc: RetryExhausted):
-    logging.getLogger(__name__).warning("provider retries exhausted: %s", exc)
+    logger.warning(
+        "provider retries exhausted request_id=%s error_type=%s",
+        current_request_id(),
+        type(exc).__name__,
+    )
     return _provider_failure_response(exc)
 
 

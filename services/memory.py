@@ -865,7 +865,10 @@ async def persist_memory_snapshot() -> bool:
     try:
         return await persist_snapshot()
     except Exception as exc:
-        logger.warning("[memory] persist snapshot 失败（保留进程内状态）: %s", exc)
+        logger.warning(
+            "[memory] persist snapshot 失败（保留进程内状态）: error_type=%s",
+            type(exc).__name__,
+        )
         return False
 
 
@@ -915,8 +918,11 @@ def _track_background_memory_commit(task: asyncio.Task) -> None:
             completed.result()
         except asyncio.CancelledError:
             logger.warning("background learner-memory commit was cancelled")
-        except Exception:
-            logger.exception("background learner-memory commit failed")
+        except Exception as exc:
+            logger.error(
+                "background learner-memory commit failed: error_type=%s",
+                type(exc).__name__,
+            )
 
     task.add_done_callback(on_done)
 
@@ -945,9 +951,8 @@ async def commit_learning_memory(
                 await after_write()
             except Exception as exc:
                 logger.warning(
-                    "learner-memory optional audit write failed user=%s: %s",
-                    user_id,
-                    exc,
+                    "learner-memory optional audit write failed: error_type=%s",
+                    type(exc).__name__,
                 )
         await maybe_archive_session_briefs(user_id)
         snapshot_written = await persist_memory_snapshot()
@@ -1018,7 +1023,10 @@ async def consolidate_session_extras(user_id: str, report: GradingReport, docume
             if patch:
                 await update_preferences(user_id, patch)
     except Exception as e:
-        logger.warning(f"[consolidate] infer/update preferences 失败: {e}")
+        logger.warning(
+            "[consolidate] infer/update preferences 失败: error_type=%s",
+            type(e).__name__,
+        )
 
     if not applied:
         return patch
@@ -1029,7 +1037,10 @@ async def consolidate_session_extras(user_id: str, report: GradingReport, docume
         if card:
             await update_preferences(user_id, {"profile_card": card})
     except Exception as e:
-        logger.warning(f"[consolidate] build/store profile_card 失败: {e}")
+        logger.warning(
+            "[consolidate] build/store profile_card 失败: error_type=%s",
+            type(e).__name__,
+        )
 
     # ③ 本机快照落盘（原子写；Postgres 后端 no-op）
     await persist_memory_snapshot()
@@ -1195,4 +1206,7 @@ async def maybe_archive_session_briefs(user_id: str) -> None:
     except Exception as exc:
         # 归档是有界压缩，不应让一次锁连接故障破坏已经写入的学习结果；
         # raw brief 会保留，并由后续请求或下次归档继续处理。
-        logger.warning("session brief 归档跳过 user=%s: %s", user_id, exc)
+        logger.warning(
+            "session brief 归档跳过: error_type=%s",
+            type(exc).__name__,
+        )

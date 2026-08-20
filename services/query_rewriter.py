@@ -94,7 +94,10 @@ async def hyde_rewrite(query: str, *, client: Optional[AsyncOpenAI] = None) -> s
         logger.info(f"[query_rewriter] HyDE expanded: {len(query)} → {len(hypothesis)} chars")
         return hypothesis
     except Exception as e:
-        logger.warning(f"[query_rewriter] HyDE failed, fallback to original: {e}")
+        logger.warning(
+            "[query_rewriter] HyDE failed; fallback to original: error_type=%s",
+            type(e).__name__,
+        )
         return query
 
 
@@ -150,7 +153,10 @@ async def multi_query_rewrite(
         logger.info(f"[query_rewriter] multi-query generated {len(variants)} variants")
         return [query] + variants
     except Exception as e:
-        logger.warning(f"[query_rewriter] multi-query failed, fallback to [original]: {e}")
+        logger.warning(
+            "[query_rewriter] multi-query failed; fallback to original: error_type=%s",
+            type(e).__name__,
+        )
         return [query]
 
 

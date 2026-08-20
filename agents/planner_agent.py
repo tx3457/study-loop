@@ -195,7 +195,11 @@ async def _node_path_reviser(state: PlannerState) -> dict:
         )
         return {"learning_path": revised.model_dump()}
     except Exception as e:
-        logger.warning(f"[planner.path_reviser] LLM call failed: {e}, return path unchanged")
+        logger.warning(
+            "[planner.path_reviser] LLM call failed; return path unchanged: "
+            "error_type=%s",
+            type(e).__name__,
+        )
         return {}  # 不更新 learning_path,critique 下一轮会基于原 path 决定是否继续
 
 
@@ -260,5 +264,8 @@ async def planner_agent(state: OrchestratorState) -> dict:
         result = await planner_subgraph.ainvoke(planner_input)
         return {"learning_path": result.get("learning_path")}
     except Exception as e:
-        logger.exception(f"[planner_agent] subgraph invoke failed: {e}")
+        logger.error(
+            "[planner_agent] subgraph invoke failed: error_type=%s",
+            type(e).__name__,
+        )
         return {"learning_path": None}

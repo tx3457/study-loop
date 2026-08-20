@@ -122,7 +122,10 @@ async def _analyze(state: CriticState) -> dict:
         report_text = resp.choices[0].message.content or "{}"
         report_dict = json.loads(report_text)
     except Exception as e:
-        logger.warning(f"[critic] analyze failed: {e}, fallback to neutral scores")
+        logger.warning(
+            "[critic] analyze failed; fallback to neutral scores: error_type=%s",
+            type(e).__name__,
+        )
         report_dict = {
             "difficulty": {"score": 0.5, "reasoning": "analyze fallback"},
             "relevance": {"score": 0.5, "reasoning": "analyze fallback"},
@@ -156,9 +159,12 @@ async def _reinforce_evidence(state: CriticState) -> dict:
         )
         result = json.loads(result_json)
         new_chunks = result.get("chunks", [])
-        logger.info(f"[critic] reinforce_evidence: got {len(new_chunks)} new chunks for query={query[:50]}")
+        logger.info("[critic] reinforce_evidence: chunks=%d", len(new_chunks))
     except Exception as e:
-        logger.warning(f"[critic] reinforce_evidence failed: {e}")
+        logger.warning(
+            "[critic] reinforce_evidence failed: error_type=%s",
+            type(e).__name__,
+        )
         new_chunks = []
 
     return {"reinforce_chunks": new_chunks, "triggered_search": True}
@@ -188,7 +194,10 @@ async def _produce_report(state: CriticState) -> dict:
         )
         finalize_dict = json.loads(resp.choices[0].message.content or "{}")
     except Exception as e:
-        logger.warning(f"[critic] produce_report failed: {e}, neutral fallback")
+        logger.warning(
+            "[critic] produce_report failed; neutral fallback: error_type=%s",
+            type(e).__name__,
+        )
         finalize_dict = {"overall_score": 0.5, "suggestions": []}
 
     # 拼装 CritiqueReport（使用 Pydantic 校验）
@@ -206,7 +215,10 @@ async def _produce_report(state: CriticState) -> dict:
             evidence_chunks_count=len(reinforce_chunks),
         )
     except Exception as e:
-        logger.warning(f"[critic] CritiqueReport assembly failed: {e}, returning neutral")
+        logger.warning(
+            "[critic] CritiqueReport assembly failed; returning neutral: error_type=%s",
+            type(e).__name__,
+        )
         report = CritiqueReport(
             difficulty=DimensionScore(score=0.5, reasoning="assembly fallback"),
             relevance=DimensionScore(score=0.5, reasoning="assembly fallback"),

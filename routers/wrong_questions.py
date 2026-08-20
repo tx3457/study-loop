@@ -99,7 +99,7 @@ async def repractice(
     try:
         session = await prepare_repractice_session(document_id, user_id=user_id)
     except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        raise HTTPException(status_code=404, detail="该文档暂无可重练错题") from exc
 
     aggregate = QuizSessionAggregate(origin="wrong_question", session=session)
     try:

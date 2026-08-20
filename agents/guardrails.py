@@ -104,7 +104,10 @@ async def _check_injection(state: OrchestratorState) -> None:
             continue
         is_injection, reason = await check_injection(value)
         if is_injection:
-            logger.warning(f"[guardrail] Injection detected in {field_name}: {reason}")
+            logger.warning(
+                "[guardrail] injection detected: field=%s",
+                field_name,
+            )
             raise GuardrailError(f"输入安全检查未通过（{field_name}）：{reason}")
 
 
@@ -118,7 +121,11 @@ def _check_output_leak(state: OrchestratorState) -> None:
                 text = q.get(field, "")
                 is_leak, reason = check_output_leak(text)
                 if is_leak:
-                    logger.warning(f"[guardrail] Output leak in question {i+1}.{field}: {reason}")
+                    logger.warning(
+                        "[guardrail] output leak in question: index=%d field=%s",
+                        i + 1,
+                        field,
+                    )
                     raise GuardrailError(f"输出安全检查未通过：第 {i+1} 题 {field} {reason}")
 
     # 检查 learning_path 输出
@@ -127,7 +134,7 @@ def _check_output_leak(state: OrchestratorState) -> None:
         text = str(path)
         is_leak, reason = check_output_leak(text)
         if is_leak:
-            logger.warning(f"[guardrail] Output leak in learning_path: {reason}")
+            logger.warning("[guardrail] output leak in learning_path")
             raise GuardrailError(f"输出安全检查未通过：学习路径 {reason}")
 
 

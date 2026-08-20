@@ -75,7 +75,10 @@ async def extract_brief(document_id: str, user_intent: str = "") -> PathBrief:
         brief.keywords = brief.keywords[:6] or [document_id]
         return brief
     except Exception as e:
-        logger.warning(f"[planner] brief 提取失败，fallback: {e}")
+        logger.warning(
+            "[planner] brief 提取失败，fallback: error_type=%s",
+            type(e).__name__,
+        )
         return PathBrief(
             title=f"{document_id} 学习路径",
             scope="基于文档内容的通用学习",
@@ -100,7 +103,10 @@ async def explore(document_id: str, brief: PathBrief) -> ExplorationReport:
     failures: list[Exception] = []
     for q, r in zip(queries, results):
         if isinstance(r, Exception):
-            logger.warning(f"[planner] explore query='{q}' failed: {r}")
+            logger.warning(
+                "[planner] explore query failed: error_type=%s",
+                type(r).__name__,
+            )
             failures.append(r)
             continue
         for doc in r.get("documents", [[]])[0] or []:
@@ -167,7 +173,10 @@ async def compress(report: ExplorationReport, brief: PathBrief) -> CompressedRep
         )
         return resp.choices[0].message.parsed
     except Exception as e:
-        logger.warning(f"[planner] compress 失败，fallback 直接截断: {e}")
+        logger.warning(
+            "[planner] compress 失败，fallback 直接截断: error_type=%s",
+            type(e).__name__,
+        )
         return CompressedReport(
             summary=chunks_text[:2000],
             key_concepts=brief.keywords,
@@ -258,7 +267,10 @@ async def critique(path: LearningPath, compressed: CompressedReport) -> PathCrit
         )
         return resp.choices[0].message.parsed
     except Exception as e:
-        logger.warning(f"[planner] critique 失败，默认通过: {e}")
+        logger.warning(
+            "[planner] critique 失败，默认通过: error_type=%s",
+            type(e).__name__,
+        )
         return PathCritique(
             overall_score=1.0,
             issues=[],
@@ -279,13 +291,11 @@ async def generate_learning_path(
       A brief → B explore → C compress → D synthesize → E critique →（不通过则 revise）
     """
     await ensure_document_available(document_id)
-    logger.info(
-        f"[planner] start pipeline for doc={document_id}, intent={user_intent!r}"
-    )
+    logger.info("[planner] start pipeline")
 
     # A
     brief = await extract_brief(document_id, user_intent)
-    logger.info(f"[planner] brief: {brief.title}, keywords={brief.keywords}")
+    logger.info("[planner] brief extracted: keywords=%d", len(brief.keywords))
 
     # B
     report = await explore(document_id, brief)
@@ -314,7 +324,7 @@ async def generate_learning_path(
 
     # E' - revise (max 1 轮)
     if crit.needs_revision and crit.revision_hints:
-        logger.info(f"[planner] revising with hint: {crit.revision_hints[:80]}")
+        logger.info("[planner] revising path")
         path = await synthesize(
             document_id, brief, compressed, revise_hint=crit.revision_hints
         )

@@ -240,8 +240,11 @@ async def _release(session_id: str, token: str | None) -> None:
         return
     try:
         await adaptive_sessions.release(session_id, token)
-    except Exception:
-        logger.exception("durable adaptive claim release failed")
+    except Exception as exc:
+        logger.error(
+            "durable adaptive claim release failed: error_type=%s",
+            type(exc).__name__,
+        )
 
 
 async def _checkpoint(
@@ -646,7 +649,10 @@ async def adaptive_start(
     except NotFoundError as exc:
         raise HTTPException(status_code=404, detail="文档不存在") from exc
     except ChromaError as exc:
-        logger.exception("adaptive start document lookup failed")
+        logger.error(
+            "adaptive start document lookup failed: error_type=%s",
+            type(exc).__name__,
+        )
         raise HTTPException(status_code=503, detail="文档存储暂时不可用") from exc
     except (InvalidQuizResponseError, ValidationError) as exc:
         logger.warning("adaptive provider returned invalid structured output")

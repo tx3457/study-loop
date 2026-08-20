@@ -56,7 +56,10 @@ def _reranker_device() -> str:
         if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
             return "mps"
     except Exception as e:
-        logger.debug(f"[reranker] torch device probe failed: {e}, fallback cpu")
+        logger.debug(
+            "[reranker] torch device probe failed; fallback cpu: error_type=%s",
+            type(e).__name__,
+        )
     return "cpu"
 
 

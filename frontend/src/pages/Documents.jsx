@@ -6,6 +6,10 @@ import './Documents.css'
    Documents Page — 文档上传 + 文档列表管理
    ═══════════════════════════════════════════════════════════════════ */
 
+function withRequestNumber(message, error) {
+  return error?.requestId ? `${message}（请求编号：${error.requestId}）` : message
+}
+
 export default function Documents() {
   const [documents, setDocuments] = useState([])
   const [loading, setLoading] = useState(true)
@@ -148,7 +152,10 @@ export default function Documents() {
           err.status && err.status < 500
             ? err.message
             : authoritative === null
-            ? '上传状态暂时无法确认，请重新加载文档列表后再决定是否重试'
+            ? withRequestNumber(
+              '上传状态暂时无法确认，请重新加载文档列表后再决定是否重试',
+              err,
+            )
             : err.message,
         )
       }
@@ -298,9 +305,15 @@ export default function Documents() {
     }
     setDeleteError(
       observed === null
-        ? '删除状态尚未确认，且文档列表暂不可用；请再次确认以安全重试。'
+        ? withRequestNumber(
+          '删除状态尚未确认，且文档列表暂不可用；请再次确认以安全重试。',
+          requestError,
+        )
         : materialHidden
-          ? '删除状态尚未确认。材料已停止显示，请再次确认以安全重试。'
+          ? withRequestNumber(
+            '删除状态尚未确认。材料已停止显示，请再次确认以安全重试。',
+            requestError,
+          )
         : requestError?.message || '删除失败，请稍后重试',
     )
     setDeleting(null)

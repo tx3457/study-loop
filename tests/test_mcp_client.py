@@ -11,6 +11,7 @@
 跑法:
   python -m pytest tests/test_mcp_client.py -q
 """
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -86,6 +87,57 @@ class TestMCPClientCore(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, "hello world")
         session.call_tool.assert_awaited_once_with("greet", {"who": "x"})
 
+    async def test_error_result_fails_closed_without_exposing_remote_content(self):
+        from services.mcp_client import (
+            MCPClient,
+            MCPToolExecutionError,
+            StdioMCPServerConfig,
+        )
+
+        secret = "SENSITIVE_MCP_RESULT_SENTINEL_d2f9"
+        client = MCPClient(
+            StdioMCPServerConfig(server_name="test", command="echo", args=[])
+        )
+        session = MagicMock()
+        session.call_tool = AsyncMock(return_value=SimpleNamespace(
+            content=[SimpleNamespace(text=f"remote traceback: {secret}")],
+            isError=True,
+        ))
+        client._session = session
+        client._initialized = True
+
+        with self.assertLogs("services.mcp_client", level="WARNING") as captured:
+            with self.assertRaises(MCPToolExecutionError) as raised:
+                await client.call_tool("explode", {})
+
+        self.assertEqual(str(raised.exception), MCPToolExecutionError.code)
+        observable = str(raised.exception) + "\n" + "\n".join(captured.output)
+        self.assertNotIn(secret, observable)
+
+    async def test_transport_exception_is_wrapped_without_exposing_remote_message(self):
+        from services.mcp_client import (
+            MCPClient,
+            MCPToolExecutionError,
+            StdioMCPServerConfig,
+        )
+
+        secret = "SENSITIVE_MCP_TRANSPORT_SENTINEL_b73c"
+        client = MCPClient(
+            StdioMCPServerConfig(server_name="test", command="echo", args=[])
+        )
+        session = MagicMock()
+        session.call_tool = AsyncMock(side_effect=RuntimeError(f"transport: {secret}"))
+        client._session = session
+        client._initialized = True
+
+        with self.assertLogs("services.mcp_client", level="WARNING") as captured:
+            with self.assertRaises(MCPToolExecutionError) as raised:
+                await client.call_tool("explode", {})
+
+        self.assertEqual(str(raised.exception), MCPToolExecutionError.code)
+        observable = str(raised.exception) + "\n" + "\n".join(captured.output)
+        self.assertNotIn(secret, observable)
+
 
 class TestRegisterMCPToolsToRegistry(unittest.IsolatedAsyncioTestCase):
     """ToolRegistry 桥接:批量注册 + 闭包正确性"""
@@ -129,6 +181,64 @@ class TestRegisterMCPToolsToRegistry(unittest.IsolatedAsyncioTestCase):
             "unknown",
         )
 
+    async def test_only_locally_allowlisted_tool_is_read_only(self):
+        from services.mcp_client import (
+            MCPClient,
+            MCPToolExecutionError,
+            StdioMCPServerConfig,
+            register_mcp_tools_to_registry,
+        )
+        from services.tool_registry import tool_registry
+
+        client = MCPClient(StdioMCPServerConfig(
+            server_name="ddg",
+            command="echo",
+            read_only_tools=frozenset({"search"}),
+        ))
+        session = MagicMock()
+        session.list_tools = AsyncMock(return_value=SimpleNamespace(
+            tools=[_make_mock_tool("search"), _make_mock_tool("write")]
+        ))
+        session.call_tool = AsyncMock(return_value=SimpleNamespace(
+            content=[SimpleNamespace(text="remote failure")],
+            isError=True,
+        ))
+        client._session = session
+        client._initialized = True
+
+        await register_mcp_tools_to_registry(client)
+
+        search = tool_registry.get("mcp_ddg_search")
+        write = tool_registry.get("mcp_ddg_write")
+        self.assertEqual(search.metadata.effect_mode.value, "read_only")
+        self.assertEqual(write.metadata.effect_mode.value, "unknown")
+        with self.assertRaises(MCPToolExecutionError):
+            await tool_registry.invoke("mcp_ddg_search", {})
+
+    async def test_invalid_remote_tool_name_is_rejected_before_registration(self):
+        from services.mcp_client import (
+            MCPClient,
+            StdioMCPServerConfig,
+            register_mcp_tools_to_registry,
+        )
+        from services.tool_registry import tool_registry
+
+        secret = "forged-log-entry"
+        client = MCPClient(
+            StdioMCPServerConfig(server_name="ddg", command="echo")
+        )
+        client._session = _make_mock_session([
+            _make_mock_tool("search"),
+            _make_mock_tool(f"bad\n{secret}"),
+        ])
+        client._initialized = True
+
+        with self.assertRaisesRegex(ValueError, "invalid MCP tool definition"):
+            await register_mcp_tools_to_registry(client)
+
+        self.assertFalse(tool_registry.has("mcp_ddg_search"))
+        self.assertFalse(tool_registry.has(f"mcp_ddg_bad\n{secret}"))
+
     async def test_closure_routes_to_correct_mcp_tool_name(self):
         """关键:多 tool 注册后,各自 handler 调对应 MCP name 而不是最后一个"""
         from services.mcp_client import (
@@ -168,6 +278,41 @@ class TestRegisterMCPToolsToRegistry(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([log[0] for log in call_log], ["read", "write", "ls"])
         self.assertEqual(call_log[0][1], {"path": "/x"})
         self.assertEqual(call_log[1][1], {"path": "/y", "content": "z"})
+
+    async def test_remote_error_content_never_reaches_registry_audit_or_logs(self):
+        from services.mcp_client import (
+            MCPClient,
+            StdioMCPServerConfig,
+            register_mcp_tools_to_registry,
+        )
+        from services.tool_registry import SideEffectAmbiguousError, tool_registry
+
+        secret = "SENSITIVE_MCP_AUDIT_SENTINEL_035e"
+        run_id = "mcp-error-redaction"
+        client = MCPClient(
+            StdioMCPServerConfig(server_name="fs", command="echo", args=[])
+        )
+        session = MagicMock()
+        session.list_tools = AsyncMock(
+            return_value=SimpleNamespace(tools=[_make_mock_tool("read")])
+        )
+        session.call_tool = AsyncMock(return_value=SimpleNamespace(
+            content=[SimpleNamespace(text=f"remote traceback: {secret}")],
+            isError=True,
+        ))
+        client._session = session
+        client._initialized = True
+        await register_mcp_tools_to_registry(client)
+
+        with self.assertLogs(level="WARNING") as captured:
+            with self.assertRaises(SideEffectAmbiguousError):
+                await tool_registry.invoke("mcp_fs_read", {}, run_id=run_id)
+
+        audit = [record.to_dict() for record in tool_registry.get_audit(run_id=run_id)]
+        observable = json.dumps(audit, ensure_ascii=False) + "\n" + "\n".join(captured.output)
+        self.assertNotIn(secret, observable)
+        self.assertEqual(audit[0]["error_message"], "handler_error:MCPToolExecutionError")
+        self.assertIsNone(audit[0]["output_preview"])
 
     async def test_cleanup_unregisters_tools_owned_by_client(self):
         from services.mcp_client import (

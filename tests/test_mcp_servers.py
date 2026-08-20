@@ -39,6 +39,10 @@ class TestServerConfigs(unittest.TestCase):
         self.assertEqual(len(cfgs), 1)
         self.assertEqual(cfgs[0].server_name, "ddg")
         self.assertIn("duckduckgo-mcp-server", cfgs[0].args)
+        self.assertEqual(
+            cfgs[0].read_only_tools,
+            frozenset({"search", "fetch_content"}),
+        )
 
 
 class TestConnectRegister(unittest.IsolatedAsyncioTestCase):

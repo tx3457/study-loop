@@ -84,13 +84,16 @@ async def judge_question(
             raise ValueError("judge returned no parsed score")
         score = JudgeScore.model_validate(score)
         return JudgeVerdict.model_validate(score.model_dump())
-    except Exception as e:
-        logger.warning(f"[judge] 评分失败，标记为无效样本: {e}")
+    except Exception as exc:
+        logger.warning(
+            "[judge] 评分失败，标记为无效样本: error_type=%s",
+            type(exc).__name__,
+        )
         return JudgeVerdict(
             status="error",
             reasoning="judge 调用失败，本样本不计入质量指标",
-            error_type=type(e).__name__,
-            error_message=str(e)[:500],
+            error_type=type(exc).__name__,
+            error_message=None,
         )
 
 

@@ -89,7 +89,10 @@ class TesseractBackend(OCRBackend):
             self.available = True
             logger.info("[parser] TesseractBackend ready")
         except Exception as e:
-            logger.warning(f"[parser] TesseractBackend unavailable: {e}")
+            logger.warning(
+                "[parser] TesseractBackend unavailable: error_type=%s",
+                type(e).__name__,
+            )
 
     def recognize(self, image) -> str:
         if not self.available:
@@ -115,7 +118,10 @@ class TesseractBackend(OCRBackend):
                 if text:
                     return text
             except Exception as e:
-                logger.debug(f"[parser] OCR lang={lang} failed: {e}")
+                logger.debug(
+                    "[parser] OCR attempt failed: error_type=%s",
+                    type(e).__name__,
+                )
         return ""
 
 
@@ -176,14 +182,18 @@ def _ocr_image_bytes(
             },
         )
     except Exception as e:
-        logger.exception(f"[parser] OCR fatal error on {source} (page={page}): {e}")
+        logger.error(
+            "[parser] OCR fatal error: page=%s error_type=%s",
+            page,
+            type(e).__name__,
+        )
         return Document(
-            page_content=f"图片 OCR 失败：{e}",
+            page_content="图片 OCR 失败，未提取到文本",
             metadata={
                 "source": source,
                 "file_type": "image",
                 "ocr_backend": _ocr_backend.name,
-                "error": str(e),
+                "error": "ocr_failed",
                 **({"page": page} if page is not None else {}),
             },
         )
@@ -232,11 +242,18 @@ def _ocr_scanned_pdf(file_bytes: bytes, filename: str) -> list[Document]:
             last_page=OCR_MAX_PAGES,
         )
     except Exception as e:
-        logger.exception(f"[parser] pdf2image conversion failed: {e}")
+        logger.error(
+            "[parser] pdf2image conversion failed: error_type=%s",
+            type(e).__name__,
+        )
         return [
             Document(
-                page_content=f"PDF 转图失败：{e}",
-                metadata={"source": filename, "file_type": "pdf", "error": str(e)},
+                page_content="PDF 转图失败，未提取到文本",
+                metadata={
+                    "source": filename,
+                    "file_type": "pdf",
+                    "error": "pdf_conversion_failed",
+                },
             )
         ]
 
@@ -348,10 +365,11 @@ async def parse_upload(file_bytes: bytes, filename: str) -> list[Document]:
     except UnsupportedFileError:
         raise
     except Exception as exc:
-        logger.exception(
-            "[parser] document parsing failed (type=%s, bytes=%d)",
+        logger.error(
+            "[parser] document parsing failed: type=%s bytes=%d error_type=%s",
             Path(filename).suffix.lower() or "unknown",
             len(file_bytes),
+            type(exc).__name__,
         )
         raise DocumentParseError from exc
 

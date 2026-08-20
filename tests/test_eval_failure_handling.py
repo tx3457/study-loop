@@ -1,6 +1,7 @@
 """Regression tests for fail-closed LLM-as-Judge aggregation."""
 
 import asyncio
+import logging
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -33,23 +34,29 @@ def _error_verdict(error_type: str = "RuntimeError") -> JudgeVerdict:
         status="error",
         reasoning="judge failed",
         error_type=error_type,
-        error_message="provider unavailable",
+        error_message=None,
     )
 
 
-def test_judge_exception_returns_explicit_error_without_fake_scores():
+def test_judge_exception_returns_explicit_safe_error_without_fake_scores(caplog):
+    secret = "SENSITIVE_JUDGE_SENTINEL_7f3b"
     client = MagicMock()
     client.beta.chat.completions.parse = AsyncMock(
-        side_effect=RuntimeError("provider unavailable")
+        side_effect=RuntimeError(f"provider unavailable: {secret}")
     )
 
-    with patch.object(eval_service, "_client", client):
-        verdict = asyncio.run(eval_service.judge_question("q", "a", "source", []))
+    with caplog.at_level(logging.WARNING, logger=eval_service.__name__):
+        with patch.object(eval_service, "_client", client):
+            verdict = asyncio.run(eval_service.judge_question("q", "a", "source", []))
 
     assert verdict.status == "error"
     assert verdict.error_type == "RuntimeError"
+    assert verdict.error_message is None
     assert verdict.faithfulness is None
     assert verdict.relevance is None
+    assert secret not in verdict.model_dump_json()
+    assert secret not in caplog.text
+    assert "error_type=RuntimeError" in caplog.text
 
 
 def test_successful_judge_call_preserves_flat_valid_verdict():
