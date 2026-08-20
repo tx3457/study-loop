@@ -59,6 +59,7 @@ from services.react_controls import (
 from services.tools import get_tool_definitions
 from services.tool_registry import SideEffectAmbiguousError, tool_registry
 from services.tool_loop import run_tool_round
+from services.tool_scope import build_business_tool_scope_guard
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -1039,19 +1040,11 @@ async def _run_react_loop(
     final_answer = ""
     finalize_reason: Optional[str] = None
 
-    def guard_business_tool(name: str, arguments: dict) -> str | None:
-        """Pin model-supplied identity and document arguments before dispatch."""
-        if not isinstance(arguments, dict):
-            return "invalid_tool_arguments"
-        if "user_id" in arguments and arguments["user_id"] != user_id:
-            return "user_scope_mismatch"
-        if (
-            document_id is not None
-            and "document_id" in arguments
-            and arguments["document_id"] != document_id
-        ):
-            return "document_scope_mismatch"
-        return None
+    guard_business_tool = build_business_tool_scope_guard(
+        user_id=user_id,
+        document_id=document_id,
+        allow_unbound_document_selection=True,
+    )
 
     for round_idx in range(starting_round, MAX_AUTONOMOUS_ROUNDS):
         if on_before_round is not None:
