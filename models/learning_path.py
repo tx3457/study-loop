@@ -8,6 +8,7 @@ Learning Path 数据模型
   - LearningPath      : synthesize 阶段产出（保留原结构兼容下游）
   - PathCritique      : critique 阶段产出（决定是否 revise）
 """
+
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -90,7 +91,7 @@ class LearningPathResource(BaseModel):
 
     schema_version: Literal[1] = 1
     learning_path_id: str = Field(pattern=r"^lp_[0-9a-f]{32}$")
-    user_id: Literal["default_user"]
+    user_id: str = Field(min_length=1, max_length=128)
     path: LearningPath
     progress: LearningPathProgress
     created_at: float = Field(ge=0, allow_inf_nan=False)
@@ -132,6 +133,7 @@ class LearningPathWire(BaseModel):
 # ── 多阶段中间数据 ──────────────────────────────────────────────────────────
 class PathBrief(BaseModel):
     """brief_extraction 阶段：把用户 query 改写成结构化意图。"""
+
     title: str = Field(description="规划标题，例如 '掌握 RAG 系统基础'")
     scope: str = Field(description="学习范围一句话描述")
     level: str = Field(description="目标水平：beginner / intermediate / advanced")
@@ -141,13 +143,17 @@ class PathBrief(BaseModel):
 
 class ExplorationReport(BaseModel):
     """explore 阶段：并行 RAG sweep 后汇总的原始 chunks + 候选概念。"""
+
     queries_used: list[str]
     chunks: list[str] = Field(description="去重后的 chunks，按 query 分组拼接")
-    candidate_concepts: list[str] = Field(default_factory=list, description="LLM 从 chunks 抽出的候选概念，供 synthesize 排序")
+    candidate_concepts: list[str] = Field(
+        default_factory=list, description="LLM 从 chunks 抽出的候选概念，供 synthesize 排序"
+    )
 
 
 class CompressedReport(BaseModel):
     """compress 阶段：把 ExplorationReport 压缩到固定 token 内。"""
+
     summary: str = Field(description="500-1000 字的整体内容摘要")
     key_concepts: list[str] = Field(description="按重要度排序的核心概念")
     suggested_stage_count: int = Field(description="建议阶段数，与 brief.target_count 可能不同")
@@ -155,6 +161,7 @@ class CompressedReport(BaseModel):
 
 class PathCritique(BaseModel):
     """critique 阶段：评估 LearningPath 质量，决定是否 revise。"""
+
     overall_score: float = Field(ge=0.0, le=1.0, description="整体评分")
     issues: list[str] = Field(default_factory=list, description="发现的问题清单")
     needs_revision: bool = Field(description="是否需要重新生成")

@@ -109,6 +109,59 @@ class TestPostgresLearningPathStore(unittest.IsolatedAsyncioTestCase):
             created,
         )
 
+    async def test_source_time_orders_current_and_path_id_breaks_ties(self) -> None:
+        path_ids = iter(
+            [
+                "lp_" + "a" * 32,
+                "lp_" + "b" * 32,
+                "lp_" + "c" * 32,
+                "lp_" + "d" * 32,
+            ]
+        )
+        store = LearningPathStore(
+            database_url=TEST_DATABASE_URL,
+            postgres_connect_timeout_seconds=5,
+            postgres_lock_timeout_ms=5_000,
+            postgres_statement_timeout_ms=15_000,
+            path_id_factory=lambda: next(path_ids),
+        )
+        newer = await store.create(
+            "default_user",
+            "notes.md",
+            _path("Newer source"),
+            idempotency_key=f"learning-path-{uuid.uuid4().hex}",
+            request_fingerprint=hashlib.sha256(b"newer-source").hexdigest(),
+            source_created_at=200.0,
+        )
+        await store.create(
+            "default_user",
+            "notes.md",
+            _path("Delayed older source"),
+            idempotency_key=f"learning-path-{uuid.uuid4().hex}",
+            request_fingerprint=hashlib.sha256(b"older-source").hexdigest(),
+            source_created_at=100.0,
+        )
+        self.assertEqual(await store.get_current("default_user"), newer)
+
+        tied_first = await store.create(
+            "default_user",
+            "notes.md",
+            _path("Tie C"),
+            idempotency_key=f"learning-path-{uuid.uuid4().hex}",
+            request_fingerprint=hashlib.sha256(b"tie-c").hexdigest(),
+            source_created_at=300.0,
+        )
+        tied_second = await store.create(
+            "default_user",
+            "notes.md",
+            _path("Tie D"),
+            idempotency_key=f"learning-path-{uuid.uuid4().hex}",
+            request_fingerprint=hashlib.sha256(b"tie-d").hexdigest(),
+            source_created_at=300.0,
+        )
+        self.assertLess(tied_first.path_id, tied_second.path_id)
+        self.assertEqual(await self._new_store().get_current("default_user"), tied_second)
+
     async def test_concurrent_same_key_selects_one_canonical_record(self) -> None:
         key = f"learning-path-{uuid.uuid4().hex}"
         first, second = await asyncio.gather(

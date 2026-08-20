@@ -76,28 +76,16 @@ function safeStages(path) {
   ))
 }
 
-function LearningPathSummary({ path, fallbackDocumentId }) {
-  const [launch] = useState(() => {
-    try {
-      return { id: createIdempotencyKey(), error: null }
-    } catch (err) {
-      return { id: null, error: err.message }
-    }
-  })
+function LearningPathSummary({
+  path,
+  confirmedLearningPathId,
+  pathConfirmationComplete,
+}) {
   const stages = safeStages(path)
-  const documentId = typeof path?.document_id === 'string' && path.document_id.trim()
-    ? path.document_id.trim()
-    : fallbackDocumentId
-  const firstStage = stages[0]
-  const firstTopic = Array.isArray(firstStage?.topics)
-    ? firstStage.topics.find(topic => typeof topic === 'string' && topic.trim())
-    : null
-  const query = new URLSearchParams()
-  if (documentId) query.set('document_id', documentId)
-  if (firstTopic || firstStage?.title) query.set('topic', firstTopic || firstStage.title)
-  if (firstStage && documentId && launch.id) query.set('launch_id', launch.id)
-  const quizHref = firstStage && documentId && launch.id
-    ? '/quiz?' + query.toString()
+  const pathHref = confirmedLearningPathId
+    ? `/learning-path?${new URLSearchParams({
+        path_id: confirmedLearningPathId,
+      })}`
     : '/learning-path'
   const totalMinutes = stages.reduce((sum, stage) => (
     Number.isFinite(stage.estimated_minutes)
@@ -129,12 +117,15 @@ function LearningPathSummary({ path, fallbackDocumentId }) {
           ))}
         </ol>
       )}
-      {launch.error && firstStage ? (
-        <p className="load-error-state" role="alert">{launch.error}</p>
+      {!pathConfirmationComplete ? (
+        <p className="decision-meta" role="status">正在确认持久学习路径...</p>
+      ) : confirmedLearningPathId ? (
+        <Link className="btn-primary" to={pathHref}>查看学习路径</Link>
       ) : (
-        <Link className="btn-primary" to={quizHref}>
-          {firstStage ? '从第一阶段开始练习' : '前往学习路径'}
-        </Link>
+        <>
+          <p className="decision-meta">这是旧版路径预览，阶段进度尚未绑定。</p>
+          <Link className="btn-primary" to={pathHref}>前往学习路径重新生成</Link>
+        </>
       )}
     </div>
   )
@@ -149,6 +140,8 @@ export default function Adaptive() {
   const recoveryEpoch = useRef(0)
   const recoveryRetryTimer = useRef(null)
   const mountedRef = useRef(true)
+  const [confirmedLearningPathId, setConfirmedLearningPathId] = useState(null)
+  const [pathConfirmationComplete, setPathConfirmationComplete] = useState(false)
 
   const [phase, setPhase] = useState(() => recovery ? 'recovering' : 'idle')
   const [req, setReq] = useState(() => recovery?.intent || {
@@ -190,6 +183,8 @@ export default function Adaptive() {
   const supersedeRequests = useCallback(() => {
     recoveryEpoch.current += 1
     recoveryInFlight.current = false
+    setConfirmedLearningPathId(null)
+    setPathConfirmationComplete(false)
     clearTimeout(recoveryRetryTimer.current)
     recoveryRetryTimer.current = null
   }, [])
@@ -257,6 +252,8 @@ export default function Adaptive() {
     if (!stored) {
       throw new Error('浏览器无法保存自适应学习进度，请检查存储权限后重试')
     }
+    setConfirmedLearningPathId(snapshot.learning_path_id)
+    setPathConfirmationComplete(true)
     renderSnapshot(snapshot, stored)
     setRecoveryReady(true)
     return stored
@@ -296,8 +293,6 @@ export default function Adaptive() {
     assertCurrent()
     if (!snapshot) throw new Error('服务端返回的自适应学习快照无效，请稍后重试')
 
-    record = persistRecovery({ ...record, snapshot })
-    if (!record) throw new Error('浏览器无法更新自适应学习进度，请检查存储权限后重试')
     if (snapshot.busy) {
       const busyError = new Error('上一轮仍在处理中，稍后会自动恢复')
       busyError.status = 409
@@ -319,6 +314,8 @@ export default function Adaptive() {
       return
     }
 
+    record = persistRecovery({ ...record, snapshot })
+    if (!record) throw new Error('浏览器无法更新自适应学习进度，请检查存储权限后重试')
     renderSnapshot(snapshot, record)
     setPhase('submitting')
     const submitted = normalizeAdaptiveSnapshot(await submitAdaptive({
@@ -744,7 +741,15 @@ export default function Adaptive() {
           <h3>🏁 辅导结束</h3>
           <div className="done-summary">{r.summary}</div>
           {r.learning_path && (
-            <LearningPathSummary path={r.learning_path} fallbackDocumentId={req.document_id} />
+            <LearningPathSummary
+              path={r.learning_path}
+              confirmedLearningPathId={
+                r.learning_path_id === confirmedLearningPathId
+                  ? confirmedLearningPathId
+                  : null
+              }
+              pathConfirmationComplete={pathConfirmationComplete}
+            />
           )}
         </section>
       )}

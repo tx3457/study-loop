@@ -120,9 +120,7 @@ class LearningPathStore:
         self._postgres_lock_timeout_ms = postgres_lock_timeout_ms
         self._postgres_statement_timeout_ms = postgres_statement_timeout_ms
         self._clock = clock
-        self._path_id_factory = path_id_factory or (
-            lambda: f"lp_{uuid.uuid4().hex}"
-        )
+        self._path_id_factory = path_id_factory or (lambda: f"lp_{uuid.uuid4().hex}")
         self._schema_ready = False
         self._schema_lock = threading.Lock()
 
@@ -130,18 +128,12 @@ class LearningPathStore:
     def from_environment(cls) -> "LearningPathStore":
         return cls(
             database_url=os.getenv("DATABASE_URL") or None,
-            max_payload_bytes=int(
-                os.getenv("LEARNING_PATH_MAX_PAYLOAD_BYTES", str(1024 * 1024))
-            ),
-            sqlite_busy_timeout_ms=int(
-                os.getenv("LEARNING_PATH_SQLITE_BUSY_TIMEOUT_MS", "10000")
-            ),
+            max_payload_bytes=int(os.getenv("LEARNING_PATH_MAX_PAYLOAD_BYTES", str(1024 * 1024))),
+            sqlite_busy_timeout_ms=int(os.getenv("LEARNING_PATH_SQLITE_BUSY_TIMEOUT_MS", "10000")),
             postgres_connect_timeout_seconds=int(
                 os.getenv("LEARNING_PATH_PG_CONNECT_TIMEOUT_SECONDS", "5")
             ),
-            postgres_lock_timeout_ms=int(
-                os.getenv("LEARNING_PATH_PG_LOCK_TIMEOUT_MS", "5000")
-            ),
+            postgres_lock_timeout_ms=int(os.getenv("LEARNING_PATH_PG_LOCK_TIMEOUT_MS", "5000")),
             postgres_statement_timeout_ms=int(
                 os.getenv("LEARNING_PATH_PG_STATEMENT_TIMEOUT_MS", "15000")
             ),
@@ -155,17 +147,22 @@ class LearningPathStore:
         *,
         idempotency_key: str,
         request_fingerprint: str,
+        source_created_at: float | None = None,
     ) -> LearningPathRecord:
         """Create once, or replay the canonical row for the same request.
 
         A concurrent caller may have generated a different candidate response.
         The idempotency binding, rather than that candidate response, chooses
-        the one canonical immutable record.
+        the one canonical immutable record. ``source_created_at`` is reserved
+        for trusted server-side projections whose business event predates the
+        physical publish; ordinary Web creation continues to use this Store's
+        clock by leaving it unset.
         """
         user_id = self._normalize_identifier(user_id, "user_id", 128)
         document_id = self._normalize_identifier(document_id, "document_id", 512)
         key_hash = self._key_hash(idempotency_key)
         request_fingerprint = self._validate_fingerprint(request_fingerprint)
+        source_created_at = self._validate_source_created_at(source_created_at)
         if self._storage_may_have_records():
             existing = await self._run_thread(
                 self._find_by_creation_sync,
@@ -202,6 +199,7 @@ class LearningPathStore:
             payload_json,
             key_hash,
             request_fingerprint,
+            source_created_at,
         )
 
     async def find_by_creation(
@@ -236,9 +234,7 @@ class LearningPathStore:
     ) -> LearningPathRecord | None:
         user_id = self._normalize_identifier(user_id, "user_id", 128)
         if document_id is not None:
-            document_id = self._normalize_identifier(
-                document_id, "document_id", 512
-            )
+            document_id = self._normalize_identifier(document_id, "document_id", 512)
         return await self._run_thread(
             self._get_current_sync,
             user_id,
@@ -297,11 +293,7 @@ class LearningPathStore:
             raise cancelled
 
     def _storage_may_have_records(self) -> bool:
-        return bool(
-            self._database_url
-            or self._schema_ready
-            or Path(self._sqlite_path).exists()
-        )
+        return bool(self._database_url or self._schema_ready or Path(self._sqlite_path).exists())
 
     @staticmethod
     def _normalize_identifier(value: str, field: str, max_length: int) -> str:
@@ -327,6 +319,17 @@ class LearningPathStore:
         if not LearningPathStore._is_sha256(request_fingerprint):
             raise ValueError("request_fingerprint must be a lowercase SHA-256 hex digest")
         return request_fingerprint
+
+    @staticmethod
+    def _validate_source_created_at(value: float | None) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise TypeError("source_created_at must be a finite number")
+        normalized = float(value)
+        if not math.isfinite(normalized) or normalized < 0:
+            raise ValueError("source_created_at must be finite and non-negative")
+        return normalized
 
     @staticmethod
     def _is_sha256(value) -> bool:
@@ -563,6 +566,7 @@ class LearningPathStore:
         payload_json: str,
         key_hash: str,
         request_fingerprint: str,
+        source_created_at: float | None,
     ) -> LearningPathRecord:
         self._ensure_schema()
         p = self._placeholder
@@ -578,7 +582,7 @@ class LearningPathStore:
                 )
                 return self._record_with_progress(connection, existing)
 
-            now = self._now()
+            created_at = self._now() if source_created_at is None else source_created_at
             immutable_hash = self._immutable_hash(
                 path_id,
                 user_id,
@@ -586,7 +590,7 @@ class LearningPathStore:
                 payload_json,
                 key_hash,
                 request_fingerprint,
-                now,
+                created_at,
             )
             cursor = connection.execute(
                 f"""
@@ -609,7 +613,7 @@ class LearningPathStore:
                     immutable_hash,
                     key_hash,
                     request_fingerprint,
-                    now,
+                    created_at,
                 ),
             )
             if cursor.rowcount == 1:
@@ -774,9 +778,7 @@ class LearningPathStore:
                         or receipt[5] != document_id
                         or not hmac.compare_digest(receipt[6], grading_report_hash)
                     ):
-                        raise LearningPathStageConflictError(
-                            "completion_binding_mismatch"
-                        )
+                        raise LearningPathStageConflictError("completion_binding_mismatch")
                 stage_row = connection.execute(
                     f"""
                     SELECT path_id, schema_version, stage_id, quiz_session_id,
@@ -857,9 +859,7 @@ class LearningPathStore:
             ValidationError,
             ValueError,
         ) as exc:
-            raise LearningPathCorruptError(
-                "invalid durable LearningPath payload"
-            ) from exc
+            raise LearningPathCorruptError("invalid durable LearningPath payload") from exc
 
     def _row_to_record(self, row) -> LearningPathRecord:
         try:
@@ -898,9 +898,7 @@ class LearningPathStore:
         except LearningPathCorruptError:
             raise
         except (TypeError, ValueError, OverflowError) as exc:
-            raise LearningPathCorruptError(
-                "invalid durable LearningPath record"
-            ) from exc
+            raise LearningPathCorruptError("invalid durable LearningPath record") from exc
 
         return LearningPathRecord(
             path_id=path_id,
@@ -934,9 +932,7 @@ class LearningPathStore:
                 or completion[5] != base.document_id
                 or completion[2] > base.path.total_stages
             ):
-                raise LearningPathCorruptError(
-                    "learning path completion history is inconsistent"
-                )
+                raise LearningPathCorruptError("learning path completion history is inconsistent")
         completed_through = len(rows)
         return LearningPathRecord(
             path_id=base.path_id,
@@ -996,9 +992,7 @@ class LearningPathStore:
             if not hmac.compare_digest(immutable_hash, expected_hash):
                 raise ValueError("completion event hash mismatch")
         except (TypeError, ValueError, OverflowError) as exc:
-            raise LearningPathCorruptError(
-                "invalid durable Learning Path completion"
-            ) from exc
+            raise LearningPathCorruptError("invalid durable Learning Path completion") from exc
 
     @staticmethod
     def _stored_identifier(value, field: str, max_length: int) -> str:

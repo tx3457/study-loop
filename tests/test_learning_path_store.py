@@ -173,9 +173,9 @@ class TestLearningPathStore(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(raised.exception.reason, "payload_mismatch")
 
         with closing(sqlite3.connect(self.db_path)) as connection:
-            count = connection.execute(
-                "SELECT COUNT(*) FROM studyloop_learning_paths"
-            ).fetchone()[0]
+            count = connection.execute("SELECT COUNT(*) FROM studyloop_learning_paths").fetchone()[
+                0
+            ]
         self.assertEqual(count, 1)
 
     async def test_current_is_scoped_by_user_and_optional_document(self) -> None:
@@ -210,6 +210,117 @@ class TestLearningPathStore(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.store.get_current("missing-user"))
         self.assertIsNone(await self.store.get_current("u-1", "missing.md"))
 
+    async def test_delayed_source_creation_does_not_replace_a_newer_current_path(
+        self,
+    ) -> None:
+        self.now[0] = 2_000.0
+        newer = await self.store.create(
+            "u-1",
+            "notes.md",
+            _path("notes.md", "Newer source path"),
+            idempotency_key="source-order-newer",
+            request_fingerprint=_fingerprint({"source": "newer"}),
+            source_created_at=200.0,
+        )
+
+        # This Adaptive result is published later in physical time, but its
+        # source terminal state predates the already-created Web path.
+        self.now[0] = 3_000.0
+        older = await self.store.create(
+            "u-1",
+            "notes.md",
+            _path("notes.md", "Older delayed source path"),
+            idempotency_key="source-order-older",
+            request_fingerprint=_fingerprint({"source": "older"}),
+            source_created_at=100.0,
+        )
+
+        self.assertEqual(newer.created_at, 200.0)
+        self.assertEqual(older.created_at, 100.0)
+        self.assertEqual(await self.store.get_current("u-1"), newer)
+        self.assertEqual(
+            await self.store.get_current("u-1", "notes.md"),
+            newer,
+        )
+
+    async def test_equal_source_times_use_path_id_as_a_stable_tie_breaker(
+        self,
+    ) -> None:
+        path_ids = iter(["lp_" + "a" * 32, "lp_" + "b" * 32])
+        deterministic = LearningPathStore(
+            sqlite_path=self.db_path,
+            clock=lambda: self.now[0],
+            path_id_factory=lambda: next(path_ids),
+        )
+        first = await deterministic.create(
+            "u-1",
+            "notes.md",
+            _path("notes.md", "Tie A"),
+            idempotency_key="source-tie-a",
+            request_fingerprint=_fingerprint({"source": "tie-a"}),
+            source_created_at=500.0,
+        )
+        second = await deterministic.create(
+            "u-1",
+            "notes.md",
+            _path("notes.md", "Tie B"),
+            idempotency_key="source-tie-b",
+            request_fingerprint=_fingerprint({"source": "tie-b"}),
+            source_created_at=500.0,
+        )
+
+        self.assertLess(first.path_id, second.path_id)
+        self.assertEqual(await deterministic.get_current("u-1"), second)
+        reopened = LearningPathStore(sqlite_path=self.db_path)
+        self.assertEqual(await reopened.get_current("u-1"), second)
+
+    async def test_source_created_at_is_strict_and_replay_keeps_canonical_time(
+        self,
+    ) -> None:
+        key = "source-time-replay"
+        fingerprint = _fingerprint({"source": "replay"})
+        first = await self.store.create(
+            "u-1",
+            "notes.md",
+            _path("notes.md", "Canonical source time"),
+            idempotency_key=key,
+            request_fingerprint=fingerprint,
+            source_created_at=123.5,
+        )
+        replay = await self.store.create(
+            "u-1",
+            "notes.md",
+            _path("notes.md", "Ignored replay candidate"),
+            idempotency_key=key,
+            request_fingerprint=fingerprint,
+            source_created_at=999.0,
+        )
+        self.assertEqual(replay, first)
+        self.assertEqual(replay.created_at, 123.5)
+
+        cases = [True, "123", -1.0, float("nan"), float("inf")]
+        for index, value in enumerate(cases):
+            with self.subTest(value=value):
+                with self.assertRaises((TypeError, ValueError)):
+                    await self.store.create(
+                        "u-1",
+                        "notes.md",
+                        _path("notes.md"),
+                        idempotency_key=f"invalid-source-time-{index}",
+                        request_fingerprint=_fingerprint({"invalid": index}),
+                        source_created_at=value,
+                    )
+
+        self.now[0] = 777.0
+        web = await self.store.create(
+            "u-1",
+            "notes.md",
+            _path("notes.md", "Web clock path"),
+            idempotency_key="source-time-web-default",
+            request_fingerprint=_fingerprint({"source": "web"}),
+        )
+        self.assertEqual(web.created_at, 777.0)
+
     async def test_two_store_instances_concurrently_choose_one_canonical_record(self) -> None:
         peer = LearningPathStore(sqlite_path=self.db_path, clock=lambda: self.now[0])
         key = "learning-path-concurrent-key"
@@ -235,9 +346,9 @@ class TestLearningPathStore(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first, second)
         self.assertIn(first.path.title, {"candidate one", "candidate two"})
         with closing(sqlite3.connect(self.db_path)) as connection:
-            count = connection.execute(
-                "SELECT COUNT(*) FROM studyloop_learning_paths"
-            ).fetchone()[0]
+            count = connection.execute("SELECT COUNT(*) FROM studyloop_learning_paths").fetchone()[
+                0
+            ]
         self.assertEqual(count, 1)
 
     async def test_stage_completion_is_sequential_durable_and_idempotent(self) -> None:
@@ -540,18 +651,20 @@ class TestLearningPathStore(unittest.IsolatedAsyncioTestCase):
             ("request_fingerprint", "2" * 64),
             ("created_at", original[6] + 1),
         ]
-        originals = dict(zip(
-            (
-                "payload_json",
-                "schema_version",
-                "immutable_hash",
-                "status",
-                "idempotency_key_hash",
-                "request_fingerprint",
-                "created_at",
-            ),
-            original,
-        ))
+        originals = dict(
+            zip(
+                (
+                    "payload_json",
+                    "schema_version",
+                    "immutable_hash",
+                    "status",
+                    "idempotency_key_hash",
+                    "request_fingerprint",
+                    "created_at",
+                ),
+                original,
+            )
+        )
         for column, corrupt_value in corruptions:
             with self.subTest(column=column):
                 with closing(sqlite3.connect(self.db_path)) as connection:
