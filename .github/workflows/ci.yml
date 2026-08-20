@@ -44,7 +44,11 @@ jobs:
       MULTIQUERY_ENABLED: "false"
       RERANKER_ENABLED: "false"
       MCP_LIVE_ENABLED: "false"
+      LANGSMITH_TRACING_V2: "false"
       LANGCHAIN_TRACING_V2: "false"
+      LANGSMITH_TRACING: "false"
+      LANGCHAIN_TRACING: "false"
+      LANGFUSE_TRACING_ENABLED: "false"
       TEST_DATABASE_URL: postgresql://studyloop_ci:ci-password@127.0.0.1:5432/studyloop_ci
     steps:
       - uses: actions/checkout@v7
