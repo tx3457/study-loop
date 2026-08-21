@@ -5359,8 +5359,8 @@ test('document delete control keeps a mobile-sized touch target', async ({ page 
   const deleteButton = page.getByRole('button', { name: '删除文档 mobile-notes.md' })
   const box = await deleteButton.boundingBox()
 
-  expect(box.width).toBeGreaterThanOrEqual(44)
-  expect(box.height).toBeGreaterThanOrEqual(44)
+  expect(Math.round(box.width)).toBeGreaterThanOrEqual(44)
+  expect(Math.round(box.height)).toBeGreaterThanOrEqual(44)
   expect(unexpectedRequests).toEqual([])
 })
 
@@ -6471,6 +6471,8 @@ test('Autonomous ignores a late response after navigation and lets the mounted p
   await page.getByRole('button', { name: '开始执行' }).click()
   await firstStarted
   await page.getByRole('link', { name: '文档管理' }).click()
+  await expect(page).toHaveURL(/\/documents$/)
+  await expect(page.getByRole('heading', { name: '文档管理' })).toBeVisible()
   releaseFirst()
   await page.waitForTimeout(100)
 

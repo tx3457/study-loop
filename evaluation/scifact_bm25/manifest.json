@@ -5,7 +5,7 @@
   "scope": "english_retrieval_component_only",
   "studyloop_source": {
     "evaluation_commit": "b0e4cc24892e4fceaaa8917b846df825b3483fe8",
-    "source_binding_commit": "7346a2bc8429af56b9f569dc18987e2ba39012ba",
+    "source_binding_commit": "507965d383242e1813c472cf2eefcb696c00af63",
     "tokenizer_id": "nfkc_casefold_ascii_words_cjk_unigram_bigram_v1",
     "files": {
       "tokenizer": {
@@ -18,8 +18,8 @@
       },
       "vectorstore": {
         "path": "services/vectorstore.py",
-        "sha256": "dfb31686be1372bedebeaae8e0232f752b64521bfaaa6409c916e56c1bc07559",
-        "hash_refresh_note": "Refreshed after comment cleanup and embedding deadline changes outside the evaluated BM25 ranking path."
+        "sha256": "437a5a5222d2e6be8ce821dd7337a698b1aecd7003a5f42b3f5ae430c1855d45",
+        "hash_refresh_note": "Compatibility binding refreshed without recomputing the artifact after production-only storage lifecycle, readiness, error handling, serialized Chroma I/O, cancellation/deadline, and BM25-cache fencing changes. The evaluated tokenizer, BM25 build/rank functions, corpus-position tie-break, runner, and published results are unchanged."
       }
     }
   },

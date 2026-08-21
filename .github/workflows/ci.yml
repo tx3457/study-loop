@@ -177,8 +177,8 @@ jobs:
           test "$stale_store_status" = "503"
           grep -q '"code":"postgres_unavailable"' /tmp/stale-store-readiness.json
           docker compose restart backend
-          curl --fail --silent --show-error --retry 20 --retry-delay 2 --retry-connrefused --connect-timeout 2 --max-time 6 http://127.0.0.1:8001/health/ready
-          curl --fail --silent --show-error --retry 20 --retry-delay 2 --retry-connrefused --connect-timeout 2 --max-time 6 http://127.0.0.1:4001/api/health/ready
+          curl --fail --silent --show-error --retry 20 --retry-delay 2 --retry-all-errors --connect-timeout 2 --max-time 6 http://127.0.0.1:8001/health/ready
+          curl --fail --silent --show-error --retry 20 --retry-delay 2 --retry-all-errors --connect-timeout 2 --max-time 6 http://127.0.0.1:4001/api/health/ready
       - name: Show container diagnostics
         if: ${{ failure() }}
         run: |
