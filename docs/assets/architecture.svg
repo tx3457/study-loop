@@ -1,0 +1,167 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900" role="img" aria-labelledby="title desc">
+  <title id="title">StudyLoop system architecture</title>
+  <desc id="desc">StudyLoop connects a React web interface to FastAPI, document retrieval, a bounded tool-using agent, adaptive learning workflows, persistent state, learner memory, and OpenAI-compatible model providers.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f8f5ee"/>
+      <stop offset="1" stop-color="#eef3fb"/>
+    </linearGradient>
+    <linearGradient id="navy" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#172a43"/>
+      <stop offset="1" stop-color="#0f1f34"/>
+    </linearGradient>
+    <linearGradient id="blue" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#3b82f6"/>
+      <stop offset="1" stop-color="#1d4ed8"/>
+    </linearGradient>
+    <linearGradient id="green" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#10b981"/>
+      <stop offset="1" stop-color="#047857"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#172a43" flood-opacity="0.10"/>
+    </filter>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#718096"/>
+    </marker>
+    <style>
+      .title { font: 700 38px 'Segoe UI','Microsoft YaHei',sans-serif; fill: #14213d; }
+      .subtitle { font: 400 17px 'Segoe UI','Microsoft YaHei',sans-serif; fill: #617086; }
+      .lane { font: 700 14px 'Segoe UI','Microsoft YaHei',sans-serif; letter-spacing: 1.5px; fill: #8290a3; }
+      .card-title { font: 700 22px 'Segoe UI','Microsoft YaHei',sans-serif; fill: #172a43; }
+      .card-title-light { font: 700 22px 'Segoe UI','Microsoft YaHei',sans-serif; fill: #ffffff; }
+      .card-copy { font: 400 15px 'Segoe UI','Microsoft YaHei',sans-serif; fill: #64748b; }
+      .card-copy-light { font: 400 15px 'Segoe UI','Microsoft YaHei',sans-serif; fill: #dbeafe; }
+      .pill { font: 600 13px 'Segoe UI','Microsoft YaHei',sans-serif; }
+      .store-title { font: 700 18px 'Segoe UI','Microsoft YaHei',sans-serif; fill: #172a43; }
+      .store-copy { font: 400 13px 'Segoe UI','Microsoft YaHei',sans-serif; fill: #64748b; }
+      .flow { fill: none; stroke: #718096; stroke-width: 2.5; marker-end: url(#arrow); }
+      .flow-dashed { fill: none; stroke: #c79c37; stroke-width: 2.5; stroke-dasharray: 8 7; marker-end: url(#arrow); }
+    </style>
+  </defs>
+
+  <rect width="1600" height="900" rx="28" fill="url(#bg)"/>
+  <circle cx="1500" cy="80" r="190" fill="#dbeafe" opacity="0.42"/>
+  <circle cx="110" cy="850" r="170" fill="#fef3c7" opacity="0.42"/>
+
+  <text x="74" y="72" class="title">StudyLoop 架构概览</text>
+  <text x="74" y="105" class="subtitle">文档驱动的学习闭环，与有界、可恢复的工具调用 Agent</text>
+
+  <text x="74" y="168" class="lane">EXPERIENCE</text>
+  <text x="420" y="168" class="lane">APPLICATION</text>
+  <text x="420" y="480" class="lane">DATA &amp; STATE</text>
+  <text x="1310" y="168" class="lane">MODEL PROVIDER</text>
+
+  <g filter="url(#shadow)">
+    <rect x="74" y="198" width="268" height="214" rx="22" fill="url(#navy)"/>
+    <rect x="102" y="228" width="50" height="50" rx="14" fill="#d4ad4f"/>
+    <path d="M116 240h9c5 0 9 4 9 9v17c-2-3-5-4-9-4h-9zM138 240h9v22h-9c-4 0-7 1-9 4v-17c0-5 4-9 9-9z" fill="none" stroke="#14213d" stroke-width="2" stroke-linejoin="round"/>
+    <text x="102" y="315" class="card-title-light">React Web</text>
+    <text x="102" y="346" class="card-copy-light">文档 · 学习路径 · Quiz</text>
+    <text x="102" y="372" class="card-copy-light">Autonomous · Adaptive · Dashboard</text>
+  </g>
+
+  <path d="M342 305 H405" class="flow"/>
+
+  <g filter="url(#shadow)">
+    <rect x="420" y="198" width="220" height="214" rx="22" fill="#ffffff" stroke="#dce3ed"/>
+    <rect x="448" y="228" width="164" height="38" rx="19" fill="#e8f0ff"/>
+    <text x="530" y="253" text-anchor="middle" class="pill" fill="#1d4ed8">FastAPI API</text>
+    <text x="448" y="311" class="card-title">统一应用入口</text>
+    <text x="448" y="343" class="card-copy">请求校验与稳定错误码</text>
+    <text x="448" y="369" class="card-copy">幂等 receipt 与会话恢复</text>
+  </g>
+
+  <path d="M640 305 H690" class="flow"/>
+  <path d="M640 305 C665 305 665 236 690 236" class="flow"/>
+  <path d="M640 305 C665 305 665 374 690 374" class="flow"/>
+
+  <g filter="url(#shadow)">
+    <rect x="690" y="188" width="250" height="112" rx="20" fill="#ffffff" stroke="#dce3ed"/>
+    <circle cx="728" cy="226" r="18" fill="#e8f0ff"/>
+    <path d="M719 226h18M728 217v18" stroke="#2563eb" stroke-width="2.5" stroke-linecap="round"/>
+    <text x="760" y="226" class="card-title">文档流水线</text>
+    <text x="716" y="270" class="card-copy">解析 · OCR · 切分 · 建库</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="690" y="318" width="250" height="128" rx="20" fill="url(#blue)"/>
+    <text x="716" y="355" class="card-title-light">有界工具 Agent</text>
+    <text x="716" y="384" class="card-copy-light">模型选择业务工具并观察结果</text>
+    <rect x="716" y="401" width="68" height="25" rx="12" fill="#ffffff" opacity="0.18"/>
+    <rect x="791" y="401" width="64" height="25" rx="12" fill="#ffffff" opacity="0.18"/>
+    <rect x="862" y="401" width="52" height="25" rx="12" fill="#ffffff" opacity="0.18"/>
+    <text x="750" y="419" text-anchor="middle" class="pill" fill="#ffffff">白名单</text>
+    <text x="823" y="419" text-anchor="middle" class="pill" fill="#ffffff">≤ 8 轮</text>
+    <text x="888" y="419" text-anchor="middle" class="pill" fill="#ffffff">HITL</text>
+  </g>
+
+  <g filter="url(#shadow)">
+    <rect x="970" y="188" width="268" height="258" rx="22" fill="#ffffff" stroke="#dce3ed"/>
+    <text x="998" y="229" class="card-title">自适应学习闭环</text>
+    <g>
+      <rect x="998" y="256" width="94" height="42" rx="14" fill="#eff6ff"/>
+      <rect x="1110" y="256" width="92" height="42" rx="14" fill="#fff7df"/>
+      <rect x="998" y="319" width="94" height="42" rx="14" fill="#ecfdf5"/>
+      <rect x="1110" y="319" width="92" height="42" rx="14" fill="#f2ecff"/>
+      <text x="1045" y="283" text-anchor="middle" class="pill" fill="#1d4ed8">学习路径</text>
+      <text x="1156" y="283" text-anchor="middle" class="pill" fill="#8a6514">Quiz</text>
+      <text x="1045" y="346" text-anchor="middle" class="pill" fill="#047857">AI 批改</text>
+      <text x="1156" y="346" text-anchor="middle" class="pill" fill="#6d28d9">下一步</text>
+      <path d="M1092 277 H1102" class="flow"/>
+      <path d="M1156 298 V309" class="flow"/>
+      <path d="M1110 340 H1102" class="flow"/>
+      <path d="M1045 319 V308" class="flow"/>
+    </g>
+    <text x="998" y="401" class="card-copy">掌握度与薄弱点持续反馈给下一轮决策</text>
+  </g>
+
+  <path d="M1238 317 H1290" class="flow"/>
+
+  <g filter="url(#shadow)">
+    <rect x="1290" y="198" width="236" height="214" rx="22" fill="#ffffff" stroke="#dce3ed"/>
+    <rect x="1318" y="228" width="180" height="38" rx="19" fill="#f2ecff"/>
+    <text x="1408" y="253" text-anchor="middle" class="pill" fill="#6d28d9">OpenAI-compatible</text>
+    <text x="1318" y="311" class="card-title">模型能力</text>
+    <text x="1318" y="343" class="card-copy">Chat / Tool Calling</text>
+    <text x="1318" y="369" class="card-copy">Structured Output / Embeddings</text>
+  </g>
+
+  <path d="M815 446 V514" class="flow"/>
+  <path d="M1104 446 V514" class="flow"/>
+  <path d="M815 318 C815 300 965 300 965 317" class="flow-dashed"/>
+
+  <g filter="url(#shadow)">
+    <rect x="420" y="514" width="1118" height="270" rx="24" fill="#ffffff" stroke="#dce3ed"/>
+
+    <rect x="452" y="550" width="310" height="192" rx="18" fill="#f8fafc" stroke="#dbe4ef"/>
+    <circle cx="490" cy="590" r="18" fill="#dbeafe"/>
+    <ellipse cx="490" cy="585" rx="10" ry="5" fill="none" stroke="#2563eb" stroke-width="2"/>
+    <path d="M480 585v12c0 3 4 5 10 5s10-2 10-5v-12M480 591c0 3 4 5 10 5s10-2 10-5" fill="none" stroke="#2563eb" stroke-width="2"/>
+    <text x="522" y="596" class="store-title">检索数据面</text>
+    <text x="478" y="636" class="store-copy">Chroma 向量索引 + BM25 语料</text>
+    <text x="478" y="663" class="store-copy">文档作用域检索与片段 ID 注册</text>
+    <rect x="478" y="692" width="112" height="27" rx="13" fill="#e8f0ff"/>
+    <text x="534" y="711" text-anchor="middle" class="pill" fill="#1d4ed8">Grounding</text>
+
+    <rect x="788" y="550" width="340" height="192" rx="18" fill="#f8fafc" stroke="#dbe4ef"/>
+    <circle cx="826" cy="590" r="18" fill="#dcfce7"/>
+    <path d="M818 590h16M826 582v16" stroke="#047857" stroke-width="2.5" stroke-linecap="round"/>
+    <text x="858" y="596" class="store-title">持久化状态</text>
+    <text x="814" y="636" class="store-copy">PostgreSQL / SQLite</text>
+    <text x="814" y="663" class="store-copy">会话、checkpoint、幂等 receipt</text>
+    <rect x="814" y="692" width="116" height="27" rx="13" fill="#dcfce7"/>
+    <text x="872" y="711" text-anchor="middle" class="pill" fill="#047857">Resume-safe</text>
+
+    <rect x="1154" y="550" width="352" height="192" rx="18" fill="#f8fafc" stroke="#dbe4ef"/>
+    <circle cx="1192" cy="590" r="18" fill="#f2ecff"/>
+    <path d="M1184 592c5-12 15-12 16 0M1187 584a5 5 0 1 1 10 0" fill="none" stroke="#6d28d9" stroke-width="2" stroke-linecap="round"/>
+    <text x="1224" y="596" class="store-title">Learner Memory</text>
+    <text x="1180" y="636" class="store-copy">掌握度、薄弱点、偏好与学习事件</text>
+    <text x="1180" y="663" class="store-copy">作为下一轮自适应决策的观察</text>
+    <rect x="1180" y="692" width="112" height="27" rx="13" fill="#f2ecff"/>
+    <text x="1236" y="711" text-anchor="middle" class="pill" fill="#6d28d9">Feedback</text>
+  </g>
+
+  <text x="800" y="846" text-anchor="middle" class="subtitle">一次学习行为被检索证据、业务边界与可恢复状态共同约束</text>
+</svg>
