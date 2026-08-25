@@ -24,6 +24,15 @@ content when enabled. Review the provider's data policy before uploading
 sensitive material. Tracing and live MCP integrations are disabled in the
 example configuration.
 
+Deleting a document uses **material-only deletion**. It removes the source
+material and retrieval index from StudyLoop, but intentionally retains learning
+history, learner profiles, wrong questions, quizzes, and saved Agent-session
+artifacts. Previously saved questions or cited snippets may therefore remain
+visible inside their original session. A tombstone also reserves the deleted
+document name so newly uploaded content cannot be confused with old learning
+records; rename the file before uploading it again. This action is not a full
+privacy erasure workflow.
+
 Public HTTP and SSE failures use fixed error codes and do not serialize raw
 provider, parser, MCP, or storage exception text. Every HTTP response carries a
 strictly validated `X-Request-ID` for correlation; runtime exception logs retain

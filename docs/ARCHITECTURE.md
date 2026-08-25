@@ -3,6 +3,11 @@
 StudyLoop has several execution styles. They share services, but they are not
 all Agents.
 
+The simplified showcase diagram is maintained as
+[`diagrams/architecture.mmd`](diagrams/architecture.mmd) and exported to
+[`assets/architecture.svg`](assets/architecture.svg). The sections below are the
+source of truth for the detailed execution and deployment boundaries.
+
 ## Main learning loop
 
 ```text

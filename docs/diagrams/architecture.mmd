@@ -1,0 +1,22 @@
+flowchart LR
+    U[学习者] --> W[React Web]
+    W --> API[FastAPI API]
+
+    API --> DOC[文档流水线<br/>解析 · 切分 · 建库]
+    API --> AGENT[有界工具 Agent<br/>白名单 · 最多 8 轮]
+    API --> LOOP[自适应学习闭环<br/>路径 · Quiz · 批改]
+
+    DOC --> RETRIEVAL[(Chroma + BM25)]
+    AGENT --> TOOLS[业务工具注册表]
+    TOOLS --> RETRIEVAL
+    AGENT <--> HITL[HITL 中断 / 恢复]
+
+    LOOP --> STATE[(PostgreSQL / SQLite)]
+    AGENT --> STATE
+    LOOP --> MEMORY[(Learner Memory)]
+    MEMORY --> LOOP
+
+    DOC --> MODEL[OpenAI-compatible APIs]
+    AGENT --> MODEL
+    LOOP --> MODEL
+
