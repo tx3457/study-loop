@@ -35,7 +35,7 @@ from services.autonomous_sessions import AutonomousSessionStore
 from services.citations import EvidenceChunk
 from services.idempotency import IdempotencyConflictError
 from services.retry import RetryExhausted
-from services.tool_registry import tool_registry
+from services.tool_registry import SideEffectAmbiguousError, tool_registry
 
 
 def _tool_call(call_id, name, args_json):
@@ -811,6 +811,49 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
             secret, json.dumps(provider_messages, ensure_ascii=False)
         )
 
+    async def test_sensitive_update_snapshot_fails_before_publishing_pause(self):
+        secret = "sk-123456789012345678901234"
+        update = tool_registry.get("update_learning_profile")
+        self.assertIsNotNone(update)
+        update_handler = AsyncMock(return_value=(
+            '{"user_id":"u","document_id":"d","score":0.0,'
+            '"mastery":0.0,"weak_points_added":[]}'
+        ))
+        save = AsyncMock()
+        responses = [
+            _assistant_msg(tool_calls=[_tool_call(
+                "grade-1",
+                "grade_answer",
+                json.dumps({
+                    "question": secret,
+                    "answer": "错误",
+                    "correct_answer": "正确",
+                }),
+            )]),
+            _assistant_msg(tool_calls=[_tool_call(
+                "update-1",
+                "update_learning_profile",
+                '{"user_id":"u","document_id":"d",'
+                '"grade_result":{"score":0.0}}',
+            )]),
+            _assistant_msg(tool_calls=[_tool_call(
+                "ask-1", "ask_user", '{"question":"继续吗？"}'
+            )]),
+        ]
+
+        with patch.object(au, "_client", _mock_client(responses)), patch.object(
+            au, "check_injection", AsyncMock(return_value=(False, ""))
+        ), patch.object(update, "handler", new=update_handler), patch.object(
+            self.session_store, "save", new=save
+        ):
+            with self.assertRaises(SideEffectAmbiguousError):
+                await au.autonomous_agent(
+                    AutonomousRequest(query=SHORT_Q, user_id="u")
+                )
+
+        update_handler.assert_awaited_once()
+        save.assert_not_awaited()
+
     def test_output_leak_log_never_contains_the_matched_secret(self):
         secret = "sk-123456789012345678901234"
         with self.assertLogs(au.logger, level="WARNING") as captured:
@@ -966,6 +1009,101 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(assistant["tool_calls"][0]["id"], "c1")
         self.assertEqual(inspection.payload["pending_ask_call_id"], "c1")
 
+    async def test_duplicate_write_is_suppressed_across_hitl_resume(self):
+        grade_args = '{"question":"1+1","answer":"2","correct_answer":"2"}'
+        update_args = (
+            '{"user_id":"u","document_id":"d",'
+            '"grade_result":{"score":1.0}}'
+        )
+        initial_responses = [
+            _assistant_msg(tool_calls=[
+                _tool_call("grade-1", "grade_answer", grade_args)
+            ]),
+            _assistant_msg(tool_calls=[
+                _tool_call("update-1", "update_learning_profile", update_args)
+            ]),
+            _assistant_msg(tool_calls=[
+                _tool_call("ask-1", "ask_user", '{"question":"继续吗？"}')
+            ]),
+        ]
+        continue_responses = [
+            _assistant_msg(tool_calls=[
+                _tool_call("update-2", "update_learning_profile", update_args)
+            ]),
+            _assistant_msg(tool_calls=[_tool_call(
+                "finish-1",
+                "finalize",
+                '{"final_answer":"重复写入已抑制","reason":"完成"}',
+            )]),
+        ]
+        update = tool_registry.get("update_learning_profile")
+        self.assertIsNotNone(update)
+        handler = AsyncMock(return_value=(
+            '{"user_id":"u","document_id":"d","score":1.0,'
+            '"mastery":1.0,"weak_points_added":[]}'
+        ))
+
+        with patch.object(au, "_client", _mock_client(initial_responses)), \
+             patch.object(
+                 au, "check_injection", AsyncMock(return_value=(False, ""))
+             ), patch.object(update, "handler", new=handler):
+            first = await au.autonomous_agent(
+                AutonomousRequest(query=SHORT_Q, user_id="u")
+            )
+
+        inspection = await self._inspection(first.conversation_id)
+        self.assertFalse(any(
+            run_id.startswith("auto_")
+            for run_id in tool_registry._run_effect_digests
+        ))
+        self.assertTrue(
+            any(
+                entry[0] == "update_learning_profile"
+                for entry in inspection.payload[
+                    "semantic_reservation_digests"
+                ]
+            )
+        )
+        tampered_digest = json.loads(json.dumps(inspection.payload))
+        tampered_digest["semantic_reservation_digests"] = [
+            ["update_learning_profile", "a" * 64]
+        ]
+        with self.assertRaisesRegex(
+            ValueError, "profile update semantic receipt mismatch"
+        ):
+            au._session_from_payload(
+                first.conversation_id, tampered_digest
+            )
+
+        unreconstructable = json.loads(json.dumps(inspection.payload))
+        update_step = next(
+            step for step in unreconstructable["steps"]
+            if step["tool_name"] == "update_learning_profile"
+        )
+        update_step["tool_args"] = None
+        with self.assertRaisesRegex(
+            ValueError, "completed profile update lacks restorable arguments"
+        ):
+            au._session_from_payload(
+                first.conversation_id, unreconstructable
+            )
+        with patch.object(au, "_client", _mock_client(continue_responses)), \
+             patch.object(
+                 au, "check_injection", AsyncMock(return_value=(False, ""))
+             ), patch.object(update, "handler", new=handler):
+            final = await au.continue_autonomous(ContinueRequest(
+                conversation_id=first.conversation_id,
+                user_reply="继续",
+            ))
+
+        handler.assert_awaited_once()
+        self.assertFalse(any(
+            run_id.startswith("auto_cont_")
+            for run_id in tool_registry._run_effect_digests
+        ))
+        self.assertEqual(final.final_answer, "重复写入已抑制")
+        self.assertEqual(final.steps[-2].blocked_reason, "duplicate_within_run")
+
     async def test_session_codec_rebuilds_steps_messages_and_evidence(self):
         session = au.AutonomousSession(
             conversation_id="conv-codec",
@@ -1018,6 +1156,8 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
             },
             grounding_required=True,
             pending_ask_call_id="ask-2",
+            registry_sha256=au._current_registry_sha256(),
+            semantic_reservation_digests=(),
         )
 
         await self.session_store.save(
@@ -1026,7 +1166,7 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
         inspection = await AutonomousSessionStore(
             sqlite_path=self.session_db_path
         ).inspect(session.conversation_id)
-        self.assertEqual(inspection.payload["schema_version"], 2)
+        self.assertEqual(inspection.payload["schema_version"], 3)
         restored = au._session_from_payload(
             session.conversation_id, inspection.payload
         )
@@ -1039,6 +1179,48 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restored.plan, session.plan)
         self.assertEqual(restored.tools_called, session.tools_called)
         self.assertEqual(restored.pending_ask_call_id, "ask-2")
+        self.assertEqual(restored.registry_sha256, session.registry_sha256)
+        self.assertEqual(
+            restored.semantic_reservation_digests,
+            session.semantic_reservation_digests,
+        )
+
+        for schema_version in (1, 2):
+            legacy_update = json.loads(json.dumps(inspection.payload))
+            legacy_update["schema_version"] = schema_version
+            legacy_update.pop("registry_sha256")
+            legacy_update.pop("semantic_reservation_digests")
+            legacy_update["steps"][0]["tool_name"] = "update_learning_profile"
+            legacy_update["steps"][0]["blocked_reason"] = None
+            with self.subTest(legacy_schema_version=schema_version):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "legacy session contains an update without a semantic receipt",
+                ):
+                    au._session_from_payload(
+                        session.conversation_id, legacy_update
+                    )
+
+        missing_v3_hash = json.loads(json.dumps(inspection.payload))
+        missing_v3_hash.pop("registry_sha256")
+        with self.assertRaisesRegex(
+            ValueError, "v3 session is missing its registry fingerprint"
+        ):
+            au._session_from_payload(session.conversation_id, missing_v3_hash)
+
+        missing_v3_receipt = json.loads(json.dumps(inspection.payload))
+        missing_v3_receipt["steps"][0]["tool_name"] = (
+            "update_learning_profile"
+        )
+        missing_v3_receipt["steps"][0]["blocked_reason"] = None
+        missing_v3_receipt["semantic_reservation_digests"] = []
+        with self.assertRaisesRegex(
+            ValueError,
+            "profile update semantic receipt mismatch",
+        ):
+            au._session_from_payload(
+                session.conversation_id, missing_v3_receipt
+            )
 
         tampered_payload = inspection.payload.copy()
         tampered_payload["evidence_registry"] = {
@@ -1091,6 +1273,8 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
             with self.subTest(schema_version=schema_version):
                 candidate = json.loads(json.dumps(unsafe_payload))
                 candidate["schema_version"] = schema_version
+                candidate.pop("registry_sha256")
+                candidate.pop("semantic_reservation_digests")
                 migrated = au._session_from_payload(
                     session.conversation_id, candidate
                 )
@@ -1126,6 +1310,43 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
         inspection = await self._inspection(cid)
         self.assertEqual(inspection.state, "completed")
         self.assertEqual(inspection.outcome, out.model_dump(mode="json"))
+
+    async def test_continue_rejects_registry_security_metadata_drift(self):
+        with patch.object(
+            au,
+            "_client",
+            _mock_client([_assistant_msg(tool_calls=[
+                _tool_call("c1", "ask_user", '{"question":"继续?"}')
+            ])]),
+        ), patch.object(
+            au, "check_injection", AsyncMock(return_value=(False, ""))
+        ):
+            first = await au.autonomous_agent(
+                AutonomousRequest(query=SHORT_Q, user_id="u")
+            )
+
+        tool = tool_registry.get("search_document")
+        self.assertIsNotNone(tool)
+        drifted = dict(tool.metadata.security_contract_payload())
+        drifted["effect_mode"] = "non_idempotent"
+        continue_client = _mock_client([
+            _assistant_msg(content="must not reach provider")
+        ])
+        with patch.object(
+            tool.metadata,
+            "security_contract_payload",
+            return_value=drifted,
+        ), patch.object(au, "_client", continue_client), patch.object(
+            au, "check_injection", AsyncMock(return_value=(False, ""))
+        ):
+            with self.assertRaises(HTTPException) as raised:
+                await au.continue_autonomous(ContinueRequest(
+                    conversation_id=first.conversation_id,
+                    user_reply="继续",
+                ))
+
+        self.assertEqual(raised.exception.status_code, 410)
+        continue_client.chat.completions.create.assert_not_awaited()
 
     async def test_continue_can_pause_again_without_leaving_old_session(self):
         self.session_store = AutonomousSessionStore(
@@ -1398,6 +1619,78 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
         ).inspect(cid)
         self.assertIsNotNone(restored)
         self.assertEqual(restored.payload, original.payload)
+
+    async def test_historical_update_receipt_does_not_make_clean_resume_ambiguous(self):
+        update = tool_registry.get("update_learning_profile")
+        self.assertIsNotNone(update)
+        update_handler = AsyncMock(return_value=(
+            '{"user_id":"u","document_id":"d","score":1.0,'
+            '"mastery":1.0,"weak_points_added":[]}'
+        ))
+        initial_responses = [
+            _assistant_msg(tool_calls=[_tool_call(
+                "grade-1",
+                "grade_answer",
+                '{"question":"1+1","answer":"2","correct_answer":"2"}',
+            )]),
+            _assistant_msg(tool_calls=[_tool_call(
+                "update-1",
+                "update_learning_profile",
+                '{"user_id":"u","document_id":"d",'
+                '"grade_result":{"score":1.0}}',
+            )]),
+            _assistant_msg(tool_calls=[_tool_call(
+                "ask-1", "ask_user", '{"question":"继续吗？"}'
+            )]),
+        ]
+        with patch.object(
+            au, "_client", _mock_client(initial_responses)
+        ), patch.object(
+            au, "check_injection", AsyncMock(return_value=(False, ""))
+        ), patch.object(update, "handler", new=update_handler):
+            first = await au.autonomous_agent(
+                AutonomousRequest(query=SHORT_Q, user_id="u")
+            )
+
+        cid = first.conversation_id
+        original = await self._inspection(cid)
+        self.assertTrue(any(
+            entry[0] == "update_learning_profile"
+            for entry in original.payload["semantic_reservation_digests"]
+        ))
+
+        with patch.object(
+            au, "check_injection", AsyncMock(return_value=(False, ""))
+        ), patch.object(
+            au,
+            "run_tool_round",
+            AsyncMock(side_effect=RetryExhausted("provider down")),
+        ):
+            with self.assertRaises(RetryExhausted):
+                await au.continue_autonomous(ContinueRequest(
+                    conversation_id=cid,
+                    user_reply="继续",
+                ))
+
+        released = await self._inspection(cid)
+        self.assertEqual(released.state, "paused")
+        self.assertEqual(released.payload, original.payload)
+
+        retry_client = _mock_client([_assistant_msg(tool_calls=[_tool_call(
+            "finish-1",
+            "finalize",
+            '{"final_answer":"已安全恢复","reason":"完成"}',
+        )])])
+        with patch.object(au, "_client", retry_client), patch.object(
+            au, "check_injection", AsyncMock(return_value=(False, ""))
+        ):
+            retried = await au.continue_autonomous(ContinueRequest(
+                conversation_id=cid,
+                user_reply="继续",
+            ))
+
+        update_handler.assert_awaited_once()
+        self.assertEqual(retried.final_answer, "已安全恢复")
 
     async def test_continue_failure_after_tool_progress_does_not_replay_session(self):
         ask_responses = [

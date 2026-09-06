@@ -21,7 +21,13 @@ from services.memory import (
     update_mastery,
 )
 from services.rag import generate_question
-from services.tool_registry import EffectMode, Tool, ToolMetadata, tool_registry
+from services.tool_registry import (
+    EffectMode,
+    Tool,
+    ToolArgumentBinding,
+    ToolMetadata,
+    tool_registry,
+)
 from services.vectorstore import retrieve_with_rewrite
 
 logger = logging.getLogger(__name__)
@@ -47,14 +53,15 @@ async def _search_document(document_id: str, query: str) -> str:
 
 async def _generate_quiz(
     document_id: str,
-    topic: str,
+    topic: str = "",
     count: int = 3,
     difficulty: str = "medium",
     type: str = "choice",
 ) -> str:
+    effective_topic = str(topic or "").strip() or "文档综合内容"
     quiz = await generate_question(
         document_id=document_id,
-        description=topic,
+        description=effective_topic,
         count=count,
         difficulty=difficulty,
         type=type,
@@ -62,9 +69,41 @@ async def _generate_quiz(
     return quiz.model_dump_json(ensure_ascii=False)
 
 
-async def _get_user_profile(user_id: str) -> str:
+async def _get_user_profile(
+    user_id: str,
+    document_id: str | None = None,
+) -> str:
     profile = await get_user_profile(user_id)
-    return json.dumps(profile, ensure_ascii=False, default=str)
+    if not isinstance(profile, dict):
+        return json.dumps(profile, ensure_ascii=False, default=str)
+
+    topic_mastery = profile.get("topic_mastery")
+    mastery_values = {
+        str(topic): float(value)
+        for topic, value in (
+            topic_mastery.items() if isinstance(topic_mastery, dict) else []
+        )
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    }
+    if document_id and document_id in mastery_values:
+        mastery = mastery_values[document_id]
+        mastery_scope = document_id
+    elif mastery_values:
+        mastery = sum(mastery_values.values()) / len(mastery_values)
+        mastery_scope = "all_topics"
+    else:
+        mastery = None
+        mastery_scope = document_id or "all_topics"
+
+    return json.dumps(
+        {
+            **profile,
+            "mastery": round(mastery, 3) if mastery is not None else None,
+            "mastery_scope": mastery_scope,
+        },
+        ensure_ascii=False,
+        default=str,
+    )
 
 
 async def _get_learning_path(document_id: str) -> str:
@@ -87,6 +126,44 @@ def _coerce_dict(value: Any) -> dict:
 
 def _norm_answer(value: str) -> str:
     return "".join(str(value or "").strip().lower().split())
+
+
+def _profile_update_values(grade_result: dict | str) -> tuple[dict, float, list[str]]:
+    """Return the exact score/gap semantics applied by the profile handler."""
+    result = _coerce_dict(grade_result)
+    raw_score = result.get("score")
+    if isinstance(raw_score, (int, float)) and not isinstance(raw_score, bool):
+        score = float(raw_score)
+    else:
+        score = 1.0 if result.get("is_correct") else 0.0
+
+    if score == 0:
+        score = 0.0
+
+    gaps: list[str] = []
+    gap = result.get("knowledge_gap")
+    if gap:
+        gaps.append(str(gap))
+    for item in result.get("knowledge_gaps", []) or []:
+        if item:
+            gaps.append(str(item))
+    return result, score, gaps
+
+
+def _normalize_profile_update_event(arguments: dict) -> dict:
+    """Canonical identity for one learner-profile mutation event."""
+    result, score, gaps = _profile_update_values(arguments.get("grade_result", {}))
+    return {
+        "user_id": arguments.get("user_id"),
+        "document_id": arguments.get("document_id"),
+        "grade_result": {
+            "question": result.get("question"),
+            "user_answer": result.get("user_answer"),
+            "correct_answer": result.get("correct_answer"),
+            "score": score,
+            "knowledge_gaps": gaps,
+        },
+    }
 
 
 async def _grade_answer(
@@ -136,19 +213,8 @@ async def _grade_answer(
 
 async def _update_learning_profile(user_id: str, document_id: str, grade_result: dict | str) -> str:
     """Write a single-question grade result into the learner memory banks."""
-    result = _coerce_dict(grade_result)
-    score = result.get("score")
-    if not isinstance(score, (int, float)):
-        score = 1.0 if result.get("is_correct") else 0.0
-
-    mastery = await update_mastery(user_id, document_id, float(score))
-    gaps: list[str] = []
-    gap = result.get("knowledge_gap")
-    if gap:
-        gaps.append(str(gap))
-    for item in result.get("knowledge_gaps", []) or []:
-        if item:
-            gaps.append(str(item))
+    _, score, gaps = _profile_update_values(grade_result)
+    mastery = await update_mastery(user_id, document_id, score)
     if gaps:
         await append_weak_points(user_id, gaps, document_id)
     await persist_memory_snapshot()
@@ -163,7 +229,10 @@ async def _update_learning_profile(user_id: str, document_id: str, grade_result:
     }, ensure_ascii=False)
 
 
-async def _plan_next_step(profile: dict | str, last_result: dict | str) -> str:
+async def _plan_next_step(
+    profile: dict | str | None = None,
+    last_result: dict | str | None = None,
+) -> str:
     """Deterministic next-step planner for trace display."""
     profile_data = _coerce_dict(profile)
     result = _coerce_dict(last_result)
@@ -222,12 +291,19 @@ def _register_all() -> None:
 
     tool_registry.register(Tool(
         name="generate_quiz",
-        description="根据文档内容生成测验题目",
+        description=(
+            "根据文档内容生成测验题目。topic 可选；用户未指定主题时直接覆盖"
+            "文档综合内容，不要先调用 search_document 来补造 topic。"
+        ),
         parameters_schema={
             "type": "object",
             "properties": {
                 "document_id": {"type": "string", "description": "文档 ID"},
-                "topic": {"type": "string", "description": "出题主题或关键词"},
+                "topic": {
+                    "type": "string",
+                    "description": "可选的出题主题；省略时覆盖文档综合内容",
+                    "default": "",
+                },
                 "count": {"type": "integer", "description": "题目数量", "default": 3},
                 "difficulty": {
                     "type": "string",
@@ -242,7 +318,7 @@ def _register_all() -> None:
                     "default": "choice",
                 },
             },
-            "required": ["document_id", "topic"],
+            "required": ["document_id"],
         },
         handler=_generate_quiz,
         # 生成涉及 LLM thinking + 结构化输出，慢；重试一次防止累积成本
@@ -255,11 +331,18 @@ def _register_all() -> None:
 
     tool_registry.register(Tool(
         name="get_user_profile",
-        description="获取用户学习画像：掌握度、薄弱知识点、历史会话数",
+        description=(
+            "获取当前会话用户的学习画像：总体/指定文档掌握度、薄弱知识点、历史会话数。"
+            "只能读取当前用户，禁止指定或访问其他用户。"
+        ),
         parameters_schema={
             "type": "object",
             "properties": {
                 "user_id": {"type": "string", "description": "用户 ID"},
+                "document_id": {
+                    "type": "string",
+                    "description": "可选文档 ID；提供时优先返回该文档的 mastery",
+                },
             },
             "required": ["user_id"],
         },
@@ -269,6 +352,7 @@ def _register_all() -> None:
             timeout_sec=5.0,
             max_retries=0,
             effect_mode=EffectMode.UNKNOWN,
+            owner_argument="user_id",
         ),
     ))
 
@@ -300,7 +384,10 @@ def _register_all() -> None:
         parameters_schema={
             "type": "object",
             "properties": {
-                "question": {"type": "string", "description": "题目文本"},
+                "question": {
+                    "type": "string",
+                    "description": "题目文本；数学表达式和字段值必须保持为一个原子参数",
+                },
                 "answer": {"type": "string", "description": "用户答案"},
                 "correct_answer": {"type": "string", "description": "参考答案"},
                 "evidence": {"type": "string", "description": "检索证据或课程材料片段", "default": ""},
@@ -324,7 +411,10 @@ def _register_all() -> None:
 
     tool_registry.register(Tool(
         name="update_learning_profile",
-        description="把单题批改结果写回学习画像 memory bank，更新 mastery 和 weak_points",
+        description=(
+            "把单题批改结果写回当前会话用户的学习画像 memory bank，更新 mastery "
+            "和 weak_points。只能写当前用户；同一批改结果在一次运行中最多写入一次。"
+        ),
         parameters_schema={
             "type": "object",
             "properties": {
@@ -344,19 +434,34 @@ def _register_all() -> None:
             timeout_sec=5.0,
             max_retries=0,
             effect_mode=EffectMode.NON_IDEMPOTENT,
+            owner_argument="user_id",
+            dedupe_within_run=True,
+            dedupe_normalizer=_normalize_profile_update_event,
+            dedupe_normalizer_id="update_learning_profile_event_v1",
+            argument_bindings=(
+                ToolArgumentBinding(
+                    source_tool="grade_answer",
+                    source_path="$",
+                    target_argument="grade_result",
+                ),
+            ),
         ),
     ))
 
     tool_registry.register(Tool(
         name="plan_next_step",
-        description="根据学习画像和最近批改结果给出下一步复习建议",
+        description=(
+            "根据最近结果给出下一步复习建议；已有画像时可以结合，但不要为了填写"
+            "可选 profile 单独调用 get_user_profile。服务器会补齐已产生的可信工具结果。"
+        ),
         parameters_schema={
             "type": "object",
             "properties": {
                 "profile": {
                     "type": "object",
-                    "description": "用户画像对象，可来自 get_user_profile 或 update_learning_profile",
+                    "description": "可选的用户画像对象，可来自 get_user_profile 或 update_learning_profile",
                     "additionalProperties": True,
+                    "default": {},
                 },
                 "last_result": {
                     "type": "object",
@@ -364,13 +469,35 @@ def _register_all() -> None:
                     "additionalProperties": True,
                 },
             },
-            "required": ["profile", "last_result"],
+            "required": ["last_result"],
         },
         handler=_plan_next_step,
         metadata=ToolMetadata(
             timeout_sec=5.0,
             max_retries=0,
             effect_mode=EffectMode.READ_ONLY,
+            argument_bindings=(
+                ToolArgumentBinding(
+                    source_tool="update_learning_profile",
+                    source_path="$",
+                    target_argument="profile",
+                ),
+                ToolArgumentBinding(
+                    source_tool="get_user_profile",
+                    source_path="$",
+                    target_argument="profile",
+                ),
+                ToolArgumentBinding(
+                    source_tool="grade_answer",
+                    source_path="$",
+                    target_argument="last_result",
+                ),
+                ToolArgumentBinding(
+                    source_tool="get_user_profile",
+                    source_path="mastery",
+                    target_argument="last_result.score",
+                ),
+            ),
         ),
     ))
 

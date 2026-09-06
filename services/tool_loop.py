@@ -16,6 +16,7 @@ white-list 默认来自 services.tools.allowed_tool_names()（registry 派生）
 interrupt-capable 调用方可传更窄的 business_tool_allowlist。
 LLM 调用统一走 services.llm.llm_chat（带 retry 横切）。
 """
+import copy
 import json
 import logging
 from dataclasses import dataclass, field
@@ -23,10 +24,129 @@ from typing import Awaitable, Callable, Optional
 
 from services.llm import llm_chat
 from services.idempotency import IdempotencyConflictError
-from services.tool_registry import EffectMode, SideEffectAmbiguousError, tool_registry
+from services.tool_registry import (
+    EffectMode,
+    SideEffectAmbiguousError,
+    ToolPolicyViolation,
+    tool_registry,
+)
 from services.tools import allowed_tool_names, dispatch_tool
 
 logger = logging.getLogger(__name__)
+
+_MISSING = object()
+
+
+def _field(value, name: str, default=None):
+    if isinstance(value, dict):
+        return value.get(name, default)
+    return getattr(value, name, default)
+
+
+def _path_parts(path: str) -> list[str]:
+    if path == "$":
+        return []
+    normalized = path[2:] if path.startswith("$.") else path
+    return [part for part in normalized.split(".") if part]
+
+
+def _path_get(value, path: str):
+    current = value
+    for part in _path_parts(path):
+        if isinstance(current, dict):
+            if part not in current:
+                return _MISSING
+            current = current[part]
+        elif isinstance(current, list) and part.isdigit():
+            index = int(part)
+            if index >= len(current):
+                return _MISSING
+            current = current[index]
+        else:
+            return _MISSING
+    return current
+
+
+def _path_set(target: dict, path: str, value) -> bool:
+    parts = _path_parts(path)
+    if not parts:
+        return False
+    current = target
+    for part in parts[:-1]:
+        child = current.get(part)
+        if not isinstance(child, dict):
+            child = {}
+            current[part] = child
+        current = child
+    current[parts[-1]] = copy.deepcopy(value)
+    return True
+
+
+def _successful_tool_results(messages: list) -> dict[str, object]:
+    """Resolve successful JSON results in transcript order, failing closed."""
+    call_tools: dict[str, str] = {}
+    invalid_call_ids: set[str] = set()
+    results: dict[str, object] = {}
+    for message in messages:
+        role = _field(message, "role")
+        if role == "assistant":
+            for call in _field(message, "tool_calls", []) or []:
+                call_id = _field(call, "id")
+                function = _field(call, "function", {})
+                name = _field(function, "name")
+                if not call_id or not name:
+                    continue
+                if call_id in call_tools or call_id in invalid_call_ids:
+                    previous_name = call_tools.pop(call_id, None)
+                    invalid_call_ids.add(call_id)
+                    if previous_name:
+                        results.pop(previous_name, None)
+                    results.pop(name, None)
+                else:
+                    call_tools[call_id] = name
+            continue
+        if role != "tool":
+            continue
+
+        name = call_tools.get(_field(message, "tool_call_id"))
+        if not name:
+            continue
+        content = _field(message, "content")
+        if not isinstance(content, str):
+            results.pop(name, None)
+            continue
+        try:
+            parsed = json.loads(content)
+        except (json.JSONDecodeError, TypeError):
+            results.pop(name, None)
+            continue
+        if isinstance(parsed, dict) and "error" in parsed:
+            results.pop(name, None)
+            continue
+        results[name] = copy.deepcopy(parsed)
+    return results
+
+
+def _apply_argument_bindings(args: dict, metadata, results: dict[str, object]) -> bool:
+    """Apply authoritative bindings; the first conflicting target path wins."""
+    bound_paths: list[tuple[str, ...]] = []
+    for binding in metadata.argument_bindings:
+        source = results.get(binding.source_tool, _MISSING)
+        if source is _MISSING:
+            continue
+        value = _path_get(source, binding.source_path)
+        if value is _MISSING:
+            continue
+        target_parts = tuple(_path_parts(binding.target_argument))
+        if not target_parts or any(
+            target_parts[:len(bound)] == bound
+            or bound[:len(target_parts)] == target_parts
+            for bound in bound_paths
+        ):
+            continue
+        if _path_set(args, binding.target_argument, value):
+            bound_paths.append(target_parts)
+    return bool(bound_paths)
 
 
 @dataclass
@@ -102,6 +222,9 @@ async def run_tool_round(
         if business_tool_allowlist is None
         else set(business_tool_allowlist)
     )
+    # Snapshot lineage before the provider request. Current-batch tool results
+    # must never become implicit inputs to later calls in that parallel batch.
+    prior_tool_results = _successful_tool_results(list(messages))
     replay_safe_bindings = None
     if business_tool_allowlist is not None:
         safe_modes = {EffectMode.READ_ONLY, EffectMode.IDEMPOTENT}
@@ -129,6 +252,40 @@ async def run_tool_round(
             assistant_message=msg, has_tool_calls=False, content=msg.content or "",
         )
 
+    current_call_ids = [_field(tc, "id") for tc in msg.tool_calls]
+    if (
+        any(
+            not isinstance(call_id, str) or not call_id
+            for call_id in current_call_ids
+        )
+        or len(current_call_ids) != len(set(current_call_ids))
+    ):
+        reason = "duplicate_tool_call_id"
+        result = json.dumps({
+            "error": "同一批工具调用必须使用唯一且非空的 call_id",
+            "reason": reason,
+        }, ensure_ascii=False)
+        logger.warning("[tool_loop] rejected batch with invalid tool call ids")
+        return ToolRoundResult(
+            assistant_message=msg,
+            has_tool_calls=True,
+            outcomes=[
+                ToolCallOutcome(
+                    call_id=(
+                        _field(tc, "id")
+                        if isinstance(_field(tc, "id"), str)
+                        else ""
+                    ),
+                    name=_field(_field(tc, "function", {}), "name", ""),
+                    arguments={},
+                    kind="blocked",
+                    result=result,
+                    blocked_reason=reason,
+                )
+                for tc in msg.tool_calls
+            ],
+        )
+
     parsed_calls = []
     for tc in msg.tool_calls:
         name = tc.function.name
@@ -146,27 +303,58 @@ async def run_tool_round(
             logger.warning("[tool_loop] non-object tool arguments blocked")
             args = {}
             args_error = True
-        parsed_calls.append((tc, name, args, args_error, None))
+        parsed_calls.append((tc, name, args, args_error, None, None))
 
     outcomes: list[ToolCallOutcome] = []
 
     # OpenAI 的同轮 tool_calls 是一个并行决策批次，数组顺序不表示执行依赖。
     # control 与任何其他调用混用时整批拒绝，避免把 [write, ask_user/finalize]
     # 误解为“先写后暂停/结束”，也避免最终回答声称未实际发生的副作用。
-    has_control = any(name in control_tools for _, name, _, _, _ in parsed_calls)
+    has_control = any(
+        name in control_tools for _, name, _, _, _, _ in parsed_calls
+    )
     guarded_calls = []
-    for tc, name, args, args_error, _ in parsed_calls:
+    for tc, name, args, args_error, _, _ in parsed_calls:
+        binding_reason = None
+        metadata_tool = None
+        bindings_applied = False
+        can_bind = (
+            not args_error
+            and name not in control_tools
+            and name in allowed
+        )
+        if can_bind and replay_safe_bindings is not None:
+            replay_binding = replay_safe_bindings.get(name)
+            current = tool_registry.get(name)
+            if (
+                replay_binding is None
+                or current is not replay_binding[0]
+                or current.handler is not replay_binding[1]
+                or current.metadata.effect_mode is not replay_binding[2]
+            ):
+                binding_reason = "replay_safety_binding_changed"
+            else:
+                metadata_tool = replay_binding[0]
+        elif can_bind:
+            metadata_tool = tool_registry.get(name)
+
         guard_reason = None
         can_reach_guard = (
             not (has_control and len(parsed_calls) > 1)
             and not args_error
             and name not in control_tools
             and name in allowed
+            and binding_reason is None
             and business_tool_guard is not None
         )
         if can_reach_guard:
             try:
-                guard_reason = business_tool_guard(name, args)
+                # Check the model-authored scope before authoritative bindings
+                # can replace an attempted cross-user/document argument.
+                guard_reason = business_tool_guard(
+                    name,
+                    copy.deepcopy(args),
+                )
             except Exception as exc:
                 logger.warning(
                     "[tool_loop] business tool guard failed closed: "
@@ -175,7 +363,36 @@ async def run_tool_round(
                     type(exc).__name__,
                 )
                 guard_reason = "business_tool_guard_error"
-        guarded_calls.append((tc, name, args, args_error, guard_reason))
+        if guard_reason is None and metadata_tool is not None:
+            bindings_applied = _apply_argument_bindings(
+                args,
+                metadata_tool.metadata,
+                prior_tool_results,
+            )
+        if can_reach_guard and guard_reason is None and bindings_applied:
+            try:
+                # Re-check the effective server-bound arguments so neither the
+                # model nor transcript lineage can bypass request scope.
+                guard_reason = business_tool_guard(
+                    name,
+                    copy.deepcopy(args),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[tool_loop] effective business tool guard failed closed: "
+                    "tool=%s error_type=%s",
+                    name,
+                    type(exc).__name__,
+                )
+                guard_reason = "business_tool_guard_error"
+        guarded_calls.append((
+            tc,
+            name,
+            args,
+            args_error,
+            guard_reason,
+            binding_reason,
+        ))
     parsed_calls = guarded_calls
     dispatch_may_start = (
         not (has_control and len(parsed_calls) > 1)
@@ -184,7 +401,8 @@ async def run_tool_round(
             and name not in control_tools
             and name in allowed
             and guard_reason is None
-            for _, name, _, args_error, guard_reason in parsed_calls
+            and binding_reason is None
+            for _, name, _, args_error, guard_reason, binding_reason in parsed_calls
         )
     )
     if dispatch_may_start and on_before_tool_calls is not None:
@@ -208,7 +426,7 @@ async def run_tool_round(
     if has_control and len(parsed_calls) > 1:
         reason = "mixed_control_batch_rejected"
         logger.warning("[tool_loop] rejected multi-call batch containing control tool")
-        for tc, name, args, _, _ in parsed_calls:
+        for tc, name, args, _, _, _ in parsed_calls:
             result = json.dumps({
                 "error": "控制工具必须单独调用，本轮所有工具均未执行",
                 "reason": reason,
@@ -230,7 +448,14 @@ async def run_tool_round(
             outcomes=outcomes,
         )
 
-    for tc, name, args, args_error, precomputed_guard_reason in parsed_calls:
+    for (
+        tc,
+        name,
+        args,
+        args_error,
+        precomputed_guard_reason,
+        precomputed_binding_reason,
+    ) in parsed_calls:
         if args_error:
             reason = "invalid_tool_arguments"
             result = json.dumps({
@@ -267,6 +492,25 @@ async def run_tool_round(
             outcomes.append(ToolCallOutcome(
                 call_id=tc.id, name=name, arguments=args,
                 kind="blocked", blocked_reason="not_in_whitelist",
+            ))
+            continue
+
+        if precomputed_binding_reason:
+            reason = precomputed_binding_reason
+            result = json.dumps({
+                "error": f"工具 {name} 的安全绑定已变化，本轮未执行",
+                "reason": reason,
+            }, ensure_ascii=False)
+            messages.append({
+                "role": "tool", "tool_call_id": tc.id, "content": result,
+            })
+            outcomes.append(ToolCallOutcome(
+                call_id=tc.id,
+                name=name,
+                arguments=args,
+                kind="blocked",
+                result=result,
+                blocked_reason=reason,
             ))
             continue
 
@@ -345,6 +589,28 @@ async def run_tool_round(
             # Ownership loss is a request-level fencing event, not a tool
             # result that may be fed back to the model and ignored.
             raise
+        except ToolPolicyViolation as exc:
+            result = json.dumps({
+                "error": "工具调用违反安全策略",
+                "reason": exc.reason,
+            }, ensure_ascii=False)
+            logger.warning(
+                "[tool_loop] policy blocked: tool=%s reason=%s",
+                name,
+                exc.reason,
+            )
+            messages.append({
+                "role": "tool", "tool_call_id": tc.id, "content": result,
+            })
+            outcomes.append(ToolCallOutcome(
+                call_id=tc.id,
+                name=name,
+                arguments=args,
+                kind="blocked",
+                result=result,
+                blocked_reason=exc.reason,
+            ))
+            continue
         except SideEffectAmbiguousError:
             logger.warning(
                 "[tool_loop] side effect result ambiguous: tool=%s", name
