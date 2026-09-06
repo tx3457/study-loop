@@ -20,6 +20,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import uuid
 from copy import deepcopy
 from dataclasses import dataclass
@@ -65,9 +66,12 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 MAX_AUTONOMOUS_ROUNDS = 8
-_SESSION_SCHEMA_VERSION = 2
+_SESSION_SCHEMA_VERSION = 3
 _RESPONSE_SCHEMA_VERSION = 2
 PLAN_SKIP_QUERY_LEN = 80               # 短于此长度的 query 跳过 plan 阶段
+PLAN_TOTAL_TIMEOUT_SECONDS = 20.0
+PLAN_TRANSPORT_RETRIES = 1
+PLAN_SEMANTIC_ATTEMPTS = 2
 _GROUNDING_ABSTENTION = "现有检索证据不足，无法提供满足完整引用约束的回答。"
 
 # 业务工具白名单由 run_tool_round 从 ToolRegistry 派生，不在路由中硬编码。
@@ -105,6 +109,8 @@ class AutonomousSession:
     evidence_registry: EvidenceRegistry
     grounding_required: bool
     pending_ask_call_id: str                        # 待回答的 ask_user 工具 call_id
+    registry_sha256: str = ""
+    semantic_reservation_digests: tuple[tuple[str, str], ...] = ()
 
 
 autonomous_sessions = AutonomousSessionStore.from_environment()
@@ -319,7 +325,7 @@ class _AutonomousSessionPayload(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[1, 2]
+    schema_version: Literal[1, 2, 3]
     messages: list[dict[str, object]] = Field(min_length=3, max_length=256)
     plan: list[str] = Field(max_length=6)
     steps: list[StepRecord] = Field(min_length=1, max_length=128)
@@ -330,9 +336,24 @@ class _AutonomousSessionPayload(BaseModel):
     evidence_registry: dict[str, _EvidenceChunkPayload]
     grounding_required: bool
     pending_ask_call_id: str = Field(min_length=1, max_length=256)
+    registry_sha256: str = Field(default="", pattern=r"^[0-9a-f]{64}$|^$")
+    semantic_reservation_digests: list[tuple[str, str]] = Field(
+        default_factory=list,
+        max_length=256,
+    )
 
     @model_validator(mode="after")
     def validate_pause_boundary(self):
+        if self.schema_version == 3 and not self.registry_sha256:
+            raise ValueError("v3 session is missing its registry fingerprint")
+        if self.schema_version in {1, 2} and (
+            self.registry_sha256 or self.semantic_reservation_digests
+        ):
+            raise ValueError("legacy session contains unsupported security state")
+        for tool_name, digest in self.semantic_reservation_digests:
+            if not tool_name or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                raise ValueError("semantic reservation digest is invalid")
+
         if (
             self.steps[-1].tool_name != "ask_user"
             or self.steps[-1].round_index != self.rounds_used - 1
@@ -368,6 +389,70 @@ class _AutonomousSessionPayload(BaseModel):
                 "pending ask_user question failed the safety boundary"
             )
         return self
+
+
+def _current_registry_sha256() -> str:
+    """Fingerprint schemas and security metadata governing business dispatch."""
+    contracts = []
+    for name in sorted(tool_registry.list_tools()):
+        tool = tool_registry.get(name)
+        if tool is None:
+            continue
+        contracts.append({
+            "name": tool.name,
+            "parameters_schema": tool.parameters_schema,
+            "metadata": tool.metadata.security_contract_payload(),
+        })
+    canonical = json.dumps(
+        contracts,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _has_completed_profile_update(steps: list[StepRecord]) -> bool:
+    return any(
+        step.tool_name == "update_learning_profile"
+        and step.blocked_reason is None
+        for step in steps
+    )
+
+
+def _validate_profile_update_reservations(
+    steps: list[StepRecord],
+    reservations: list[tuple[str, str]],
+) -> None:
+    """Bind every durable update receipt to its persisted effective arguments."""
+    expected: set[tuple[str, str]] = set()
+    for step in steps:
+        if (
+            step.tool_name != "update_learning_profile"
+            or step.blocked_reason is not None
+        ):
+            continue
+        if not isinstance(step.tool_args, dict):
+            raise ValueError(
+                "completed profile update lacks restorable arguments"
+            )
+        try:
+            expected.add(tool_registry.semantic_reservation(
+                "update_learning_profile",
+                step.tool_args,
+            ))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "completed profile update receipt cannot be reconstructed"
+            ) from exc
+
+    persisted = {
+        reservation
+        for reservation in reservations
+        if reservation[0] == "update_learning_profile"
+    }
+    if persisted != expected:
+        raise ValueError("profile update semantic receipt mismatch")
 
 
 def _sanitize_snapshot_messages(
@@ -484,6 +569,10 @@ def _session_to_payload(session: AutonomousSession) -> dict:
     )
 
     snapshot_steps = _public_steps(session.steps)
+    _validate_profile_update_reservations(
+        snapshot_steps,
+        list(session.semantic_reservation_digests),
+    )
     payload = _AutonomousSessionPayload(
         schema_version=_SESSION_SCHEMA_VERSION,
         messages=messages,
@@ -504,6 +593,10 @@ def _session_to_payload(session: AutonomousSession) -> dict:
         },
         grounding_required=session.grounding_required,
         pending_ask_call_id=pending_ask_call_id,
+        registry_sha256=(session.registry_sha256 or _current_registry_sha256()),
+        semantic_reservation_digests=list(
+            session.semantic_reservation_digests
+        ),
     )
     return payload.model_dump(mode="json")
 
@@ -512,11 +605,25 @@ def _session_from_payload(
     conversation_id: str, payload: dict
 ) -> AutonomousSession:
     snapshot = _AutonomousSessionPayload.model_validate(payload)
+    source_schema_version = snapshot.schema_version
+    completed_profile_update = _has_completed_profile_update(snapshot.steps)
+    if completed_profile_update and source_schema_version in {1, 2}:
+        raise ValueError(
+            "legacy session contains an update without a semantic receipt"
+        )
+    if source_schema_version == 3:
+        _validate_profile_update_reservations(
+            snapshot.steps,
+            snapshot.semantic_reservation_digests,
+        )
     # V1 predated at-rest control-message redaction. Reapply the same
     # sanitization to every restored version so a tampered V2 row cannot turn
     # historical control text back into provider input.
     migrated = snapshot.model_dump(mode="json")
     migrated["schema_version"] = _SESSION_SCHEMA_VERSION
+    if source_schema_version in {1, 2}:
+        migrated["registry_sha256"] = _current_registry_sha256()
+        migrated["semantic_reservation_digests"] = []
     migrated["messages"], migrated["pending_ask_call_id"] = _sanitize_snapshot_messages(
         snapshot.messages, snapshot.pending_ask_call_id
     )
@@ -542,6 +649,10 @@ def _session_from_payload(
         evidence_registry=evidence_registry,
         grounding_required=snapshot.grounding_required,
         pending_ask_call_id=snapshot.pending_ask_call_id,
+        registry_sha256=snapshot.registry_sha256,
+        semantic_reservation_digests=tuple(
+            snapshot.semantic_reservation_digests
+        ),
     )
 
 
@@ -974,41 +1085,131 @@ def _build_state_summary(
 # ═══════════════════════════════════════════════════════════════════════════
 # Plan 阶段（可选）
 # ═══════════════════════════════════════════════════════════════════════════
+_NUMBERED_PLAN_LINE = re.compile(r"^(\d+)\s*[.)）、]\s*(.+)$")
+_NAMED_PLAN_LINE = re.compile(r"^步骤\s*(\d+)\s*[:：]\s*(.+)$")
+_BULLET_PLAN_LINE = re.compile(r"^[-*+•]\s+(.+)$")
+_BARE_TOOL_CALL = re.compile(
+    r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*\([^\n]*\)\s*;?$"
+)
+
+
+def _strip_inline_markdown(text: str) -> str:
+    value = text.strip()
+    for marker in ("**", "__", "`"):
+        if (
+            value.startswith(marker)
+            and value.endswith(marker)
+            and len(value) > 2 * len(marker)
+        ):
+            value = value[len(marker):-len(marker)].strip()
+    return value
+
+
 def _parse_plan(plan_text: str) -> list[str]:
+    """Parse only an explicit 2-5 item plan, never prose or tool payloads."""
+    raw = plan_text.strip()
+    if not raw or raw[0] in "[{":
+        return []
+
     steps: list[str] = []
-    for line in plan_text.splitlines():
-        stripped = line.strip()
-        if not stripped:
+    numbered_indexes: list[int] = []
+    marker_kinds: set[str] = set()
+    for raw_line in raw.splitlines():
+        line = re.sub(r"^#{1,6}\s+", "", raw_line.strip())
+        if not line:
             continue
-        if stripped[0].isdigit():
-            parts = stripped.split(".", 1) if "." in stripped[:4] else stripped.split(")", 1)
-            if len(parts) == 2:
-                steps.append(parts[1].strip())
-        elif stripped.startswith(("-", "*", "•")):
-            steps.append(stripped.lstrip("-*• ").strip())
-    return steps[:6]
+
+        match = _NUMBERED_PLAN_LINE.fullmatch(line)
+        if match:
+            marker_kinds.add("numbered")
+            numbered_indexes.append(int(match.group(1)))
+            body = match.group(2)
+        else:
+            match = _NAMED_PLAN_LINE.fullmatch(line)
+            if match:
+                marker_kinds.add("numbered")
+                numbered_indexes.append(int(match.group(1)))
+                body = match.group(2)
+            else:
+                match = _BULLET_PLAN_LINE.fullmatch(line)
+                if not match:
+                    return []
+                marker_kinds.add("bullet")
+                body = match.group(1)
+
+        step = _strip_inline_markdown(body)
+        if not step or step[0] in "[{" or _BARE_TOOL_CALL.fullmatch(step):
+            return []
+        steps.append(step)
+
+    if not 2 <= len(steps) <= 5 or len(marker_kinds) != 1:
+        return []
+    if numbered_indexes and numbered_indexes != list(range(1, len(steps) + 1)):
+        return []
+    return steps
 
 
-async def _generate_plan(query: str, context_hint: str) -> list[str]:
-    try:
-        resp = await llm_chat(
+def _plan_diagnostic(finish_reason: object, steps: list[str]) -> str:
+    if finish_reason != "stop":
+        return "invalid_finish_reason"
+    return "valid" if steps else "invalid_format"
+
+
+async def _generate_plan_within_budget(query: str) -> list[str]:
+    for attempt in range(1, PLAN_SEMANTIC_ATTEMPTS + 1):
+        system_prompt = _PLAN_SYSTEM
+        if attempt > 1:
+            system_prompt += (
+                "\n上次响应结构无效。重新输出完整的 2-5 步编号列表，"
+                "不要输出解释、JSON 或裸工具调用。"
+            )
+        response = await llm_chat(
             [
-                {"role": "system", "content": _PLAN_SYSTEM + context_hint},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": query},
             ],
             client=_client,
+            max_retries=PLAN_TRANSPORT_RETRIES,
+            total_timeout=PLAN_TOTAL_TIMEOUT_SECONDS,
         )
-        raw_plan = resp.choices[0].message.content or ""
+        choice = response.choices[0]
+        raw_plan = choice.message.content or ""
         if check_output_leak(raw_plan)[0]:
             logger.warning("[autonomous] plan output blocked by safety policy")
             return []
-        return _parse_plan(raw_plan)
-    except Exception as e:
-        logger.warning(
-            "[autonomous] plan generation failed: error_type=%s; skip plan",
-            type(e).__name__,
+        steps = _parse_plan(raw_plan)
+        diagnostic = _plan_diagnostic(
+            getattr(choice, "finish_reason", None), steps
         )
-        return []
+        if diagnostic == "valid":
+            logger.info(
+                "[autonomous] plan accepted: attempt=%s step_count=%s",
+                attempt,
+                len(steps),
+            )
+            return steps
+        logger.warning(
+            "[autonomous] plan rejected: attempt=%s diagnostic=%s step_count=%s",
+            attempt,
+            diagnostic,
+            len(steps),
+        )
+    return []
+
+
+async def _generate_plan(query: str) -> list[str]:
+    """Generate an isolated plan under one total deadline."""
+    try:
+        return await asyncio.wait_for(
+            _generate_plan_within_budget(query),
+            timeout=PLAN_TOTAL_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        logger.warning(
+            "[autonomous] plan generation failed: error_type=%s",
+            type(exc).__name__,
+        )
+    return []
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1206,6 +1407,10 @@ async def _run_react_loop(
                     evidence_registry=evidence_registry,
                     grounding_required=grounding_required,
                     pending_ask_call_id=oc.call_id,
+                    registry_sha256=_current_registry_sha256(),
+                    semantic_reservation_digests=(
+                        tool_registry.snapshot_run_policy_state(run_id)
+                    ),
                 )
                 response = AutonomousResponse(
                     plan=_public_plan(plan),
@@ -1456,7 +1661,7 @@ async def _execute_autonomous(
         plan: list[str] = []
         logger.info(f"[autonomous] skip plan (query len={len(req.query.strip())})")
     else:
-        plan = await _generate_plan(req.query, context_hint)
+        plan = await _generate_plan(req.query)
         logger.info("[autonomous] plan generated: steps=%d", len(plan))
 
     # 构造初始 messages；工具调用由 ReAct 自主决策
@@ -1643,6 +1848,8 @@ async def autonomous_agent(
         ):
             raise SideEffectAmbiguousError("autonomous_request") from exc
         raise
+    finally:
+        tool_registry.clear_run_policy_state(run_id)
 
 
 @router.delete("/agent/autonomous/{conversation_id}")
@@ -1846,6 +2053,25 @@ async def continue_autonomous(
         return response
 
     run_id = f"auto_cont_{uuid.uuid4().hex[:12]}"
+    try:
+        if session.registry_sha256 != _current_registry_sha256():
+            raise ValueError("persisted tool registry fingerprint is stale")
+        tool_registry.restore_run_policy_state(
+            run_id,
+            session.semantic_reservation_digests,
+        )
+    except ValueError as exc:
+        await autonomous_sessions.consume(req.conversation_id, claim_token)
+        await _abort_receipt(receipt_lease)
+        tool_registry.clear_run_policy_state(run_id)
+        logger.warning(
+            "[autonomous] invalid persisted tool policy state: cid_prefix=%s",
+            req.conversation_id[:13],
+        )
+        raise HTTPException(
+            status_code=410,
+            detail="暂停会话安全状态无效，已终止；请重新开始",
+        ) from exc
     baseline = (
         len(resume_messages),
         len(resume_steps),
@@ -2016,3 +2242,5 @@ async def continue_autonomous(
                 ),
             ) from exc
         raise
+    finally:
+        tool_registry.clear_run_policy_state(run_id)

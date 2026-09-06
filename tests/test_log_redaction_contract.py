@@ -96,7 +96,9 @@ def test_runtime_logs_never_serialize_caught_exception_text_or_tracebacks() -> N
 
 def test_documented_servers_disable_raw_url_access_logs() -> None:
     dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
-    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    development = (REPO_ROOT / "docs" / "DEVELOPMENT.md").read_text(
+        encoding="utf-8"
+    )
     nginx = (REPO_ROOT / "frontend" / "nginx.conf").read_text(encoding="utf-8")
     api_location = nginx.split("location /api/ {", maxsplit=1)[1].split(
         "}", maxsplit=1
@@ -105,6 +107,6 @@ def test_documented_servers_disable_raw_url_access_logs() -> None:
     assert '"--no-access-log"' in dockerfile
     assert (
         "uvicorn main:app --reload --port 8001 --workers 1 --no-access-log"
-        in readme
+        in development
     )
     assert "access_log off;" in api_location

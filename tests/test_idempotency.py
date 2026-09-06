@@ -548,6 +548,7 @@ class TestIdempotencyStore(unittest.IsolatedAsyncioTestCase):
                         "document_id": "d",
                         "grade_result": {"score": 1.0},
                     },
+                    user_id="u",
                     idempotency_key=key,
                     idempotency_lease=decision.lease,
                 )
