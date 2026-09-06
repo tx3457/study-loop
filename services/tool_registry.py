@@ -17,6 +17,8 @@ Tool Registry + Audit Trail
      fail closed，避免在同一进程内静默重放副作用
 """
 import asyncio
+import copy
+import hashlib
 import inspect
 import json
 import logging
@@ -59,6 +61,24 @@ class SideEffectAmbiguousError(RuntimeError):
         super().__init__(f"工具 {tool_name} 的执行结果不确定，禁止自动重试")
 
 
+class ToolPolicyViolation(RuntimeError):
+    """A tool call rejected by a registry-enforced safety policy."""
+
+    def __init__(self, reason: str, tool_name: Optional[str] = None):
+        self.reason = reason
+        self.tool_name = tool_name
+        super().__init__(f"tool policy violation: {reason}")
+
+
+@dataclass(frozen=True)
+class ToolArgumentBinding:
+    """Authoritatively bind an upstream tool result to a downstream argument."""
+
+    source_tool: str
+    source_path: str
+    target_argument: str
+
+
 @dataclass
 class ToolMetadata:
     """工具元数据：每个 tool 自己声明 SLO、重试、权限和副作用语义。"""
@@ -67,6 +87,30 @@ class ToolMetadata:
     base_delay: float = 1.0         # 重试 backoff 基础秒数
     permission: str = "public"      # 权限标签，预留扩展
     effect_mode: EffectMode = EffectMode.UNKNOWN
+    owner_argument: Optional[str] = None
+    dedupe_within_run: bool = False
+    dedupe_argument_paths: tuple[str, ...] = ()
+    dedupe_normalizer: Optional[Callable[[dict], object]] = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    dedupe_normalizer_id: Optional[str] = None
+    argument_bindings: tuple[ToolArgumentBinding, ...] = ()
+
+    def security_contract_payload(self) -> dict:
+        """Stable JSON payload for binding/fingerprinting enforced semantics."""
+        return {
+            "version": 1,
+            "effect_mode": self.effect_mode.value,
+            "owner_argument": self.owner_argument,
+            "dedupe_within_run": self.dedupe_within_run,
+            "dedupe_argument_paths": list(self.dedupe_argument_paths),
+            "dedupe_normalizer_id": self.dedupe_normalizer_id,
+            "argument_bindings": [
+                asdict(binding) for binding in self.argument_bindings
+            ],
+        }
 
 
 @dataclass
@@ -80,6 +124,16 @@ class Tool:
     _handler_signature: inspect.Signature = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        has_normalizer = self.metadata.dedupe_normalizer is not None
+        has_normalizer_id = bool(self.metadata.dedupe_normalizer_id)
+        if has_normalizer != has_normalizer_id:
+            raise ValueError(
+                "dedupe_normalizer and dedupe_normalizer_id must be configured together"
+            )
+        if has_normalizer and self.metadata.dedupe_argument_paths:
+            raise ValueError(
+                "dedupe_normalizer cannot be combined with dedupe_argument_paths"
+            )
         self._handler_signature = inspect.signature(self.handler)
 
     def to_openai_schema(self) -> dict:
@@ -120,12 +174,18 @@ class ToolRegistry:
 
     _instance: Optional["ToolRegistry"] = None
     _AUDIT_MAX = 1000               # audit 内存上限
+    _POLICY_MAX_RESERVATIONS = 256
+    _POLICY_TOOL_NAME_MAX_BYTES = 128
 
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._instance._tools: dict[str, Tool] = {}
             cls._instance._audit_log: list[ToolCallRecord] = []
+            cls._instance._run_effect_digests: dict[
+                str, set[tuple[str, str]]
+            ] = {}
+            cls._instance._run_effect_attempts: set[str] = set()
         return cls._instance
 
     # ── 注册 / 查询 ──────────────────────────────────────────────────────
@@ -239,12 +299,65 @@ class ToolRegistry:
                 ensure_ascii=False,
             )
 
+        def reject_policy(reason: str) -> None:
+            self._record(ToolCallRecord(
+                tool_call_id=tool_call_id,
+                tool_name=name,
+                arguments=arguments,
+                status="blocked",
+                duration_ms=0.0,
+                timestamp=datetime.now().isoformat(),
+                effect_mode=effect_mode.value,
+                run_id=run_id,
+                user_id=user_id,
+                error_message=reason,
+                retry_attempts=0,
+            ))
+            raise ToolPolicyViolation(reason, name)
+
+        owner_argument = tool.metadata.owner_argument
+        if owner_argument:
+            if user_id is None:
+                reject_policy("owner_context_missing")
+            if arguments.get(owner_argument) != user_id:
+                reject_policy("owner_mismatch")
+
+        reservation: tuple[str, str] | None = None
+        if (
+            tool.metadata.dedupe_within_run
+            and effect_mode in _NON_REPLAYABLE_EFFECTS
+            and run_id is not None
+        ):
+            try:
+                reservation = self.semantic_reservation(tool, arguments)
+            except ValueError:
+                reject_policy("invalid_dedupe_arguments")
+            run_reservations = self._run_effect_digests.setdefault(run_id, set())
+            if reservation in run_reservations:
+                reject_policy("duplicate_within_run")
+            if len(run_reservations) >= self._POLICY_MAX_RESERVATIONS:
+                reject_policy("run_policy_reservation_limit")
+            # No await occurs between lookup and insertion, so concurrent tasks
+            # in this event loop cannot both acquire the semantic effect marker.
+            run_reservations.add(reservation)
+
         # The durable progress boundary belongs immediately before a validated
         # handler invocation.  Putting it in the outer tool loop would mark
         # schema/signature-invalid calls as having started a side effect even
         # though no handler can run.
         if on_before_handler is not None:
-            await on_before_handler()
+            try:
+                await on_before_handler()
+            except BaseException:
+                if reservation is not None and run_id is not None:
+                    self._release_effect_digest(run_id, reservation)
+                raise
+
+        # This marker is deliberately independent from the bounded audit LRU
+        # and covers every potentially non-replayable tool, including UNKNOWN
+        # tools that are not configured for semantic deduplication.
+        if effect_mode in _NON_REPLAYABLE_EFFECTS and run_id is not None:
+            self._run_effect_attempts.add(run_id)
 
         if idempotency_key and effect_mode in _NON_REPLAYABLE_EFFECTS:
             try:
@@ -370,6 +483,158 @@ class ToolRegistry:
             record.status = status
 
     # ── Audit 查询 ───────────────────────────────────────────────────────
+    @staticmethod
+    def _argument_path(arguments: dict, path: str) -> tuple[bool, object]:
+        if path in {"", "$"}:
+            return True, arguments
+        current: object = arguments
+        for segment in path.split("."):
+            if isinstance(current, dict) and segment in current:
+                current = current[segment]
+            elif isinstance(current, list) and segment.isdigit():
+                index = int(segment)
+                if index >= len(current):
+                    return False, None
+                current = current[index]
+            else:
+                return False, None
+        return True, current
+
+    @classmethod
+    def _semantic_arguments_payload(
+        cls, arguments: dict, paths: tuple[str, ...]
+    ) -> object:
+        if not paths:
+            return arguments
+        return [
+            {"path": path, "present": present, "value": value}
+            for path in paths
+            for present, value in [cls._argument_path(arguments, path)]
+        ]
+
+    def semantic_reservation(
+        self,
+        tool: Tool | str,
+        arguments: dict,
+    ) -> tuple[str, str]:
+        """Return the stable digest-only reservation for a configured tool."""
+        resolved = self._tools.get(tool) if isinstance(tool, str) else tool
+        if resolved is None or self._tools.get(resolved.name) is not resolved:
+            raise ValueError("tool is not registered")
+        metadata = resolved.metadata
+        if (
+            not metadata.dedupe_within_run
+            or metadata.effect_mode not in _NON_REPLAYABLE_EFFECTS
+        ):
+            raise ValueError("tool is not configured for semantic dedupe")
+        try:
+            if metadata.dedupe_normalizer is not None:
+                payload = metadata.dedupe_normalizer(copy.deepcopy(arguments))
+            else:
+                payload = self._semantic_arguments_payload(
+                    arguments,
+                    metadata.dedupe_argument_paths,
+                )
+        except Exception as exc:
+            raise ValueError("dedupe normalization failed") from exc
+        if not isinstance(payload, (dict, list)):
+            raise ValueError("dedupe normalizer must return an object or list")
+        try:
+            canonical = json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        except (TypeError, ValueError, RecursionError) as exc:
+            raise ValueError("normalized dedupe payload is not canonical JSON") from exc
+        digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        return resolved.name, digest
+
+    def _release_effect_digest(
+        self,
+        run_id: str,
+        reservation: tuple[str, str],
+    ) -> None:
+        run_reservations = self._run_effect_digests.get(run_id)
+        if run_reservations is None:
+            return
+        run_reservations.discard(reservation)
+        if not run_reservations:
+            self._run_effect_digests.pop(run_id, None)
+
+    def snapshot_run_policy_state(
+        self,
+        run_id: str,
+    ) -> tuple[tuple[str, str], ...]:
+        """Return deterministic digest-only state safe for JSON persistence."""
+        self._validate_policy_run_id(run_id)
+        reservations = self._run_effect_digests.get(run_id, set())
+        if len(reservations) > self._POLICY_MAX_RESERVATIONS:
+            raise ValueError("run policy reservation limit exceeded")
+        return tuple(sorted(reservations))
+
+    def restore_run_policy_state(
+        self,
+        run_id: str,
+        reservations: object,
+    ) -> None:
+        """Atomically union a strictly validated digest-only snapshot."""
+        self._validate_policy_run_id(run_id)
+        if not isinstance(reservations, (list, tuple)):
+            raise ValueError("run policy reservations must be a sequence")
+        if len(reservations) > self._POLICY_MAX_RESERVATIONS:
+            raise ValueError("run policy reservation limit exceeded")
+
+        validated: set[tuple[str, str]] = set()
+        for entry in reservations:
+            if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                raise ValueError("invalid run policy reservation entry")
+            tool_name, digest = entry
+            if not isinstance(tool_name, str) or not tool_name:
+                raise ValueError("invalid reservation tool name")
+            if (
+                len(tool_name.encode("utf-8"))
+                > self._POLICY_TOOL_NAME_MAX_BYTES
+            ):
+                raise ValueError("reservation tool name too long")
+            tool = self._tools.get(tool_name)
+            if (
+                tool is None
+                or not tool.metadata.dedupe_within_run
+                or tool.metadata.effect_mode not in _NON_REPLAYABLE_EFFECTS
+            ):
+                raise ValueError("reservation tool is not dedupe-enabled")
+            if (
+                not isinstance(digest, str)
+                or len(digest) != 64
+                or any(char not in "0123456789abcdef" for char in digest)
+            ):
+                raise ValueError("invalid semantic argument digest")
+            reservation = (tool_name, digest)
+            if reservation in validated:
+                raise ValueError("duplicate reservation entry")
+            validated.add(reservation)
+
+        current = self._run_effect_digests.get(run_id, set())
+        if len(current | validated) > self._POLICY_MAX_RESERVATIONS:
+            raise ValueError("combined run policy reservation limit exceeded")
+        self._run_effect_digests.setdefault(run_id, set()).update(validated)
+
+    def clear_run_policy_state(self, run_id: str) -> None:
+        self._run_effect_digests.pop(run_id, None)
+        self._run_effect_attempts.discard(run_id)
+
+    @staticmethod
+    def _validate_policy_run_id(run_id: str) -> None:
+        if (
+            not isinstance(run_id, str)
+            or not run_id
+            or len(run_id.encode("utf-8")) > 256
+        ):
+            raise ValueError("invalid policy run id")
+
     def _record(self, record: ToolCallRecord) -> None:
         """写一条审计记录，超出上限丢最旧的（FIFO）。"""
         self._audit_log.append(record)
@@ -395,15 +660,7 @@ class ToolRegistry:
 
     def has_effect_attempt(self, run_id: str) -> bool:
         """Whether a non-replayable tool started during this in-process run."""
-        return any(
-            record.run_id == run_id
-            and record.status in {"started", "ok", "ambiguous"}
-            and record.effect_mode in {
-                EffectMode.NON_IDEMPOTENT.value,
-                EffectMode.UNKNOWN.value,
-            }
-            for record in self._audit_log
-        )
+        return run_id in self._run_effect_attempts
 
     def audit_summary(self) -> dict:
         """整体审计摘要：tool 调用计数、平均时长、错误率。"""

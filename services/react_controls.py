@@ -126,6 +126,18 @@ def build_react_system_prompt(
                 "update_learning_profile → plan_next_step → finalize"
             )
     principles.extend([
+        "使用完成请求所需的最小充分工具集；用户已提供工具必填参数时，不要额外检索文档或读取画像来补充背景",
+        "解析『字段标签 + 值』时，默认把值保留为一个原子参数；只有用户明确枚举多项时才能拆分",
+        "画像读取和写入只能访问和更新当前用户；若用户要求操作其他用户，拒绝该部分且不要调用画像工具",
+    ])
+    if replay_safe_only:
+        principles.append("当前循环不暴露画像写入能力；画像副作用只能由循环外的安全节点处理")
+    else:
+        principles.append(
+            "update_learning_profile 是非幂等写入；同一批改结果最多写入一次，"
+            "即使用户要求重复也只写一次并说明已抑制重复"
+        )
+    principles.extend([
         "如果使用 search_document 的内容回答，finalize 时必须把实际 observation 中的 chunk_ids 放入 citation_ids；不得编造 ID",
         "简单概念问题（如『什么是 RAG』）如果你知道答案，直接 finalize 给答案，不需要调工具",
         "不要输出空 message 或 '执行完毕' 这种废话——要么调工具要么调 finalize",
