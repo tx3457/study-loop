@@ -83,20 +83,58 @@ def assert_close(actual: float, expected: float, label: str) -> None:
         raise ValueError(f"{label}: expected {expected!r}, found {actual!r}")
 
 
+# Behavioural invariants available to invariant-bound sources. The manifest says
+# WHICH invariants a file must satisfy; this table says HOW each one is checked.
+# A manifest entry naming an invariant that is absent here fails verification, so
+# a declaration can never silently go unenforced.
+INVARIANT_CHECKS = {
+    "vectorstore imports pure BM25 helpers": (
+        "services/vectorstore.py",
+        lambda text: "from services.bm25 import build_bm25_index, rank_bm25" in text,
+    ),
+    "legacy query character split is absent": (
+        "services/vectorstore.py",
+        lambda text: "get_scores(list(query))" not in text,
+    ),
+}
+
+
 def verify_sources(manifest: dict) -> None:
-    for name, source in manifest["studyloop_source"]["files"].items():
-        path = REPO_ROOT / source["path"]
+    """Check the two source-binding tiers described by studyloop_source.binding_policy.
+
+    Tier 1 (`files`) is hash-pinned: the evaluated ranking path is reproduced from
+    those bytes, so any change invalidates the published numbers.
+
+    Tier 2 (`invariant_bound_files`) is not hash-pinned. run.py never imports those
+    modules, so their contents cannot move a metric; they are recorded to evidence
+    that production retrieval uses the same pure BM25 helpers. Pinning a digest
+    there bound the experiment to a file under active development and produced
+    failures that said nothing about the measurement.
+    """
+    source = manifest["studyloop_source"]
+    pinned = source["files"]
+    invariant_bound = source.get("invariant_bound_files", {})
+
+    pinned_paths = {entry["path"] for entry in pinned.values()}
+    invariant_paths = {entry["path"] for entry in invariant_bound.values()}
+    both = pinned_paths & invariant_paths
+    if both:
+        raise ValueError(
+            f"sources cannot be both hash-pinned and invariant-bound: {sorted(both)}"
+        )
+
+    for name, entry in pinned.items():
+        path = REPO_ROOT / entry["path"]
         if not path.is_file():
-            raise ValueError(f"missing recorded source {name}: {source['path']}")
+            raise ValueError(f"missing recorded source {name}: {entry['path']}")
         actual = file_digest(path)
-        if actual != source["sha256"]:
+        if actual != entry["sha256"]:
             raise ValueError(
-                f"source hash mismatch for {source['path']}: "
-                f"expected {source['sha256']}, found {actual}"
+                f"source hash mismatch for {entry['path']}: "
+                f"expected {entry['sha256']}, found {actual}"
             )
 
     bm25_text = (REPO_ROOT / "services/bm25.py").read_text(encoding="utf-8")
-    vectorstore_text = (REPO_ROOT / "services/vectorstore.py").read_text(encoding="utf-8")
     checks = {
         "bm25 imports the shared tokenizer": (
             "from services.tokenization import tokenize_for_bm25" in bm25_text
@@ -107,13 +145,34 @@ def verify_sources(manifest: dict) -> None:
         "BM25 queries use the shared tokenizer": (
             "query_tokens = tokenize_for_bm25(query)" in bm25_text
         ),
-        "vectorstore imports pure BM25 helpers": (
-            "from services.bm25 import build_bm25_index, rank_bm25" in vectorstore_text
-        ),
-        "legacy query character split is absent": (
-            "get_scores(list(query))" not in vectorstore_text
-        ),
     }
+
+    for name, entry in invariant_bound.items():
+        path = REPO_ROOT / entry["path"]
+        if not path.is_file():
+            raise ValueError(f"missing recorded source {name}: {entry['path']}")
+        declared = entry.get("invariants") or []
+        if not declared:
+            raise ValueError(
+                f"invariant-bound source {name} declares no invariants; it would be "
+                "recorded without being checked at all"
+            )
+        text = path.read_text(encoding="utf-8")
+        for label in declared:
+            check = INVARIANT_CHECKS.get(label)
+            if check is None:
+                raise ValueError(
+                    f"manifest declares invariant {label!r} for {name}, but verify.py "
+                    "implements no check for it"
+                )
+            expected_path, predicate = check
+            if expected_path != entry["path"]:
+                raise ValueError(
+                    f"invariant {label!r} is defined for {expected_path}, "
+                    f"not {entry['path']}"
+                )
+            checks[label] = predicate(text)
+
     failed = [label for label, passed in checks.items() if not passed]
     if failed:
         raise ValueError(f"business-source binding checks failed: {failed}")

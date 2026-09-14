@@ -29,6 +29,24 @@ recompute BM25 rankings.  It verifies that the published query-level metrics
 match the manifest and that the manifest is bound to the current business
 source files.
 
+Source binding has two tiers, described by `studyloop_source.binding_policy`:
+
+- **Hash-pinned** (`files`): `services/tokenization.py` and `services/bm25.py`.
+  `run.py` reproduces the evaluated ranking from these bytes, so any change to
+  them invalidates the published numbers and verification fails.
+- **Invariant-bound** (`invariant_bound_files`): `services/vectorstore.py`.
+  `run.py` never imports this module, so its contents cannot move a metric. It
+  is recorded to evidence that production retrieval uses the same pure BM25
+  helpers, and that property is asserted behaviourally rather than by a digest.
+  Pinning its digest previously bound a frozen experiment to a file under active
+  feature development, so unrelated changes broke verification without saying
+  anything about the measurement.
+
+The manifest declares which invariants each invariant-bound file must satisfy
+and `verify.py` implements them. A declared invariant with no implementation, an
+empty invariant list, or a file listed in both tiers all fail verification, so a
+file can never be recorded as bound while going unchecked.
+
 ## Full recomputation with user-supplied data
 
 The repository does not redistribute the SciFact archive or extracted corpus.

@@ -29,7 +29,11 @@ a general Chinese word segmenter.
 
 The checked-in evidence under [`evaluation/scifact_bm25/`](../evaluation/scifact_bm25/)
 contains a sanitized 300-query metric artifact, a manifest with dataset/source
-hashes, and a standard-library verifier.  The verifier requires neither the
+bindings, and a standard-library verifier.  The evaluated ranking path
+(`services/tokenization.py`, `services/bm25.py`) is hash-pinned;
+`services/vectorstore.py` is bound by behavioural invariants instead, because
+the runner never imports it and pinning its digest only coupled a frozen
+experiment to unrelated feature work.  The verifier requires neither the
 dataset nor a model and recomputes the aggregate metrics and paired bootstrap
 interval from the published query-level rows:
 

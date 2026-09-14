@@ -15,11 +15,21 @@
       "bm25": {
         "path": "services/bm25.py",
         "sha256": "ff9fd4cc5abc86c36264ed9bd3cf2fc10f6762bbd7ba21ad924e23a7dd8eb7d6"
-      },
+      }
+    },
+    "binding_policy": "Two tiers. files[] are hash-pinned because the evaluated ranking path is reproduced from them. invariant_bound_files[] are not hash-pinned: evaluation/scifact_bm25/run.py does not import them, so their byte content cannot change this experiment's numbers. They are recorded to evidence that the production retrieval path uses the same pure BM25 helpers, and that property is asserted behaviourally by verify.py instead of by a digest.",
+    "invariant_bound_files": {
       "vectorstore": {
         "path": "services/vectorstore.py",
-        "sha256": "437a5a5222d2e6be8ce821dd7337a698b1aecd7003a5f42b3f5ae430c1855d45",
-        "hash_refresh_note": "Compatibility binding refreshed without recomputing the artifact after production-only storage lifecycle, readiness, error handling, serialized Chroma I/O, cancellation/deadline, and BM25-cache fencing changes. The evaluated tokenizer, BM25 build/rank functions, corpus-position tie-break, runner, and published results are unchanged."
+        "binding": "behavioural",
+        "reason": "Context evidence only: the runner imports services.bm25 and services.tokenization, never this module. Pinning its digest bound the experiment to a file under active feature development, so unrelated changes (per-owner document scoping, embedding deadlines, comment cleanup) repeatedly broke verification without any change to the measured BM25 ranking path.",
+        "invariants": [
+          "vectorstore imports pure BM25 helpers",
+          "legacy query character split is absent"
+        ],
+        "sha256_at_source_binding_commit": "437a5a5222d2e6be8ce821dd7337a698b1aecd7003a5f42b3f5ae430c1855d45",
+        "previous_hash_refresh_note": "Repeatedly refreshed without recomputing the artifact — after comment cleanup, embedding deadlines, and then storage lifecycle, readiness, error handling, serialized Chroma I/O, cancellation/deadline and BM25-cache fencing changes. Every one of those was outside the evaluated BM25 ranking path, which is what motivated the narrowing below.",
+        "narrowing_note": "Narrowed from a pinned digest to behavioural invariants. The evaluated path (services/tokenization.py, services/bm25.py) stays hash-pinned and its digests are unchanged, so no published number is affected."
       }
     }
   },
