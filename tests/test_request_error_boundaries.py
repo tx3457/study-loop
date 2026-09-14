@@ -135,18 +135,20 @@ class TestRequestErrorBoundaries(unittest.TestCase):
 
         with patch.object(
             health_router, "provider_health_checker", checker
-        ), self.assertLogs(main.logger, level="WARNING") as captured:
+        ), self.assertLogs(main.logger, level="ERROR") as captured:
             response = self.client.get(
                 "/health/providers", headers={"X-Request-ID": request_id}
             )
 
-        self.assertEqual(response.status_code, 400)
+        # 逃到边界的 ValueError 是服务端契约破了，不是调用方发错了：报 400 会
+        # 把真实的 5xx 藏在客户端错误里，错误预算和告警都看不见。脱敏要求不变。
+        self.assertEqual(response.status_code, 500)
         self.assertEqual(
             response.json(),
             {
-                "error": "参数错误",
-                "detail": "请求参数无效",
-                "code": "invalid_request",
+                "error": "服务内部错误",
+                "detail": "请求处理失败，请稍后重试",
+                "code": "internal_error",
                 "request_id": request_id,
             },
         )

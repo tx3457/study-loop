@@ -21,7 +21,10 @@ from routers.adaptive import router as adaptive_router
 from routers.audit import router as audit_router
 from routers.health import router as health_router
 from services.memory_persist import load_snapshot, persist_snapshot
-from services.idempotency import IdempotencyConflictError
+from services.idempotency import (
+    IdempotencyConflictError,
+    InvalidIdempotencyKeyError,
+)
 from services.provider_config import (
     ProviderDeadlineExceeded,
     ProviderConfigurationError,
@@ -184,19 +187,48 @@ async def root():
 
 
 
+@app.exception_handler(InvalidIdempotencyKeyError)
+async def invalid_idempotency_key_handler(
+    request: Request, exc: InvalidIdempotencyKeyError
+):
+    return JSONResponse(
+        status_code=400,
+        content={
+            "error": "参数错误",
+            "detail": str(exc),
+            "code": "invalid_idempotency_key",
+        },
+    )
+
+
 @app.exception_handler(ValueError)
-async def deal(request: Request, exc: ValueError):
-    logger.warning(
-        "request value rejected request_id=%s error_type=%s",
+async def value_error_handler(request: Request, exc: ValueError):
+    """Unhandled ValueError means an internal contract broke, not a bad request.
+
+    Client-side validation already fails earlier: FastAPI raises
+    RequestValidationError (422) for malformed bodies, and routers raise explicit
+    HTTPException for domain errors (see routers/session.py and
+    routers/wrong_questions.py). Anything still reaching this handler is an
+    internal invariant failure — for example the retrieval alignment assertion in
+    services/tools.py or a pydantic ValidationError on an outbound model, both of
+    which are ValueError subclasses. Reporting those as 400 hid real 500s from
+    error budgets and alerting, so this handler reports 500 and stays opaque both
+    on the wire and in the log.
+    """
+    # 只记类型和 request_id，不带 exc_info：ValueError 的消息可能含 provider
+    # 连接串等凭据（见 tests/test_request_error_boundaries.py 的脱敏用例），
+    # traceback 会把它一起写进日志。定位靠 request_id 关联。
+    logger.error(
+        "unhandled ValueError escaped to the HTTP boundary request_id=%s error_type=%s",
         current_request_id(),
         type(exc).__name__,
     )
     return JSONResponse(
-        status_code=400,
+        status_code=500,
         content=public_error_payload(
-            error="参数错误",
-            detail="请求参数无效",
-            code="invalid_request",
+            error="服务内部错误",
+            detail="请求处理失败，请稍后重试",
+            code="internal_error",
             include_request_id=True,
         ),
     )

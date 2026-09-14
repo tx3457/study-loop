@@ -64,13 +64,25 @@ class BeginDecision:
     lease: ReceiptLease | None = None
 
 
+class InvalidIdempotencyKeyError(ValueError):
+    """The caller sent a malformed Idempotency-Key header.
+
+    This is one of the few genuinely client-caused ValueErrors on the request
+    path, so it carries its own type and its own 400 handler instead of relying
+    on a catch-all ValueError handler that would also swallow internal
+    invariant failures.
+    """
+
+
 def normalize_idempotency_key(value: object) -> str | None:
     """Return a validated key, treating FastAPI's direct-call default as absent."""
     if not isinstance(value, str):
         return None
     key = value.strip()
     if not _KEY_PATTERN.fullmatch(key):
-        raise ValueError("Idempotency-Key 必须为 8-128 位字母、数字或 . _ : -")
+        raise InvalidIdempotencyKeyError(
+            "Idempotency-Key 必须为 8-128 位字母、数字或 . _ : -"
+        )
     return key
 
 
