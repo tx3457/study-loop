@@ -67,6 +67,23 @@ multi-process data plane; `DATABASE_URL` alone does not remove that boundary.
   an independent Pydantic type-validation layer.
 - `ToolMetadata.permission` is descriptive metadata; it is not an authorization
   system.
+- Retrieved document text is untrusted input. `search_document` returns it inside
+  an envelope marked `content_trust: untrusted_document_text`, and a layer-1
+  pattern scan sets `injection_flagged` when the passage contains
+  instruction-shaped text. Detection deliberately does not block retrieval: the
+  corpus is the user's own study material, and a document *about* prompt
+  injection would match. Enforcement happens in the registry instead — once a run
+  observes flagged content, every non-idempotent or unknown-effect tool in that
+  run is rejected with `untrusted_content_taint`, while read-only and idempotent
+  tools keep working. The ReAct system prompt also states that retrieved passages
+  are data, never instructions.
+  Boundaries: the scan is regex-only and can be evaded by rephrasing, so it
+  reduces blast radius rather than preventing injection; the taint is scoped to a
+  single continuous dispatch run and is not carried across a human-in-the-loop
+  pause, so content retrieved before a pause does not re-taint the resumed run
+  unless it is retrieved again. The durable protection against cross-user writes
+  remains `ToolMetadata.owner_argument`, which fails closed when no trusted user
+  context is present.
 - Read-only and idempotent tools may retry automatically. Unknown and
   non-idempotent tools do not. Autonomous, quiz-answer, adaptive-submit, and
   tool-chat clients may send an `Idempotency-Key`; completed responses are

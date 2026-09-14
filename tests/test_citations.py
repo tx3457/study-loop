@@ -132,4 +132,6 @@ def test_search_document_returns_aligned_server_chunk_ids():
         "document_id": "doc",
         "chunks": ["a", "b", "c"],
         "chunk_ids": ["doc_chunk_1", "doc_chunk_2", "doc_chunk_3"],
+        # 检索正文是不可信数据，信封里显式标注来源可信度；正常内容不带 flag。
+        "content_trust": "untrusted_document_text",
     }

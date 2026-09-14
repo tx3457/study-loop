@@ -186,6 +186,7 @@ class ToolRegistry:
                 str, set[tuple[str, str]]
             ] = {}
             cls._instance._run_effect_attempts: set[str] = set()
+            cls._instance._run_untrusted_content: set[str] = set()
         return cls._instance
 
     # ── 注册 / 查询 ──────────────────────────────────────────────────────
@@ -321,6 +322,18 @@ class ToolRegistry:
                 reject_policy("owner_context_missing")
             if arguments.get(owner_argument) != user_id:
                 reject_policy("owner_mismatch")
+
+        # 间接注入的强制点。本次 run 的某条 observation 已被标记为可疑
+        # （检索正文里出现了指令样式的文本，见 services/injection.py），此后
+        # 模型的决策可能是被那段正文操纵的结果，因此不再允许产生外部可见副作用。
+        # 只读/幂等工具继续放行：封死检索和读取会让 agent 直接失能，而真正的
+        # 危害在于写入。
+        if (
+            effect_mode in _NON_REPLAYABLE_EFFECTS
+            and run_id is not None
+            and run_id in self._run_untrusted_content
+        ):
+            reject_policy("untrusted_content_taint")
 
         reservation: tuple[str, str] | None = None
         if (
@@ -564,6 +577,20 @@ class ToolRegistry:
         if not run_reservations:
             self._run_effect_digests.pop(run_id, None)
 
+    def mark_run_untrusted_content(self, run_id: str) -> None:
+        """Record that this run observed suspicious retrieved content.
+
+        Taint is sticky for the rest of the dispatch run: once an observation
+        could have carried instructions, every later model decision in the same
+        run is downstream of it.
+        """
+        self._validate_policy_run_id(run_id)
+        self._run_untrusted_content.add(run_id)
+
+    def has_untrusted_content(self, run_id: str) -> bool:
+        return run_id in self._run_untrusted_content
+
+
     def snapshot_run_policy_state(
         self,
         run_id: str,
@@ -625,6 +652,8 @@ class ToolRegistry:
     def clear_run_policy_state(self, run_id: str) -> None:
         self._run_effect_digests.pop(run_id, None)
         self._run_effect_attempts.discard(run_id)
+        # run 结束才解除注入 taint；不清会随 run_id 复用泄漏到下一次调度。
+        self._run_untrusted_content.discard(run_id)
 
     @staticmethod
     def _validate_policy_run_id(run_id: str) -> None:

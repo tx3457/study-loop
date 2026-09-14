@@ -14,6 +14,7 @@ import logging
 from typing import Any, Awaitable, Callable, Optional
 
 from services.learning_path import generate_learning_path
+from services.injection import scan_untrusted_content
 from services.memory import (
     append_weak_points,
     get_user_profile,
@@ -44,11 +45,22 @@ async def _search_document(document_id: str, query: str) -> str:
     chunk_ids = result["ids"][0][:3]
     if len(chunks) != len(chunk_ids):
         raise ValueError("retrieval returned misaligned documents and ids")
-    return json.dumps({
+
+    # chunks 是用户上传文件的原文，会被 tool_loop 原样回灌给模型。它是数据，
+    # 不是指令：显式标注来源可信度，并在命中注入模式时打标，让 tool_loop 给
+    # 本次 run 上 taint（随后禁止非幂等写入）。这里不拦截，理由见
+    # services/injection.py::scan_untrusted_content。
+    suspicious, reason = scan_untrusted_content("\n".join(chunks))
+    payload = {
         "document_id": document_id,
         "chunks": chunks,
         "chunk_ids": chunk_ids,
-    }, ensure_ascii=False)
+        "content_trust": "untrusted_document_text",
+    }
+    if suspicious:
+        payload["injection_flagged"] = True
+        payload["injection_reason"] = reason
+    return json.dumps(payload, ensure_ascii=False)
 
 
 async def _generate_quiz(

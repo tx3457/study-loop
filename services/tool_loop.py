@@ -170,6 +170,23 @@ class ToolRoundResult:
     outcomes: list[ToolCallOutcome] = field(default_factory=list)
 
 
+def _mark_untrusted_observation(run_id: str, result: str) -> None:
+    """Taint the run when a tool result flags suspicious retrieved content.
+
+    Parsing is best-effort: a tool may legitimately return non-JSON, and a
+    malformed payload must never break the dispatch loop.
+    """
+    try:
+        payload = json.loads(result)
+    except (TypeError, ValueError):
+        return
+    if isinstance(payload, dict) and payload.get("injection_flagged") is True:
+        logger.warning(
+            "[tool_loop] untrusted content flagged; blocking further writes in this run"
+        )
+        tool_registry.mark_run_untrusted_content(run_id)
+
+
 async def run_tool_round(
     messages: list,
     *,
@@ -585,6 +602,11 @@ async def run_tool_round(
                 on_before_handler=on_before_tool_dispatch,
             )
             blocked_reason = None
+            # observation 即将被回灌进 messages。若工具报告这次取回的是可疑的
+            # 不可信正文，就在回灌之前给本次 run 打 taint：之后模型的任何决策
+            # 都可能是被那段正文操纵的，注册表据此拒绝非幂等写入。
+            if run_id is not None:
+                _mark_untrusted_observation(run_id, result)
         except IdempotencyConflictError:
             # Ownership loss is a request-level fencing event, not a tool
             # result that may be fed back to the model and ignored.
