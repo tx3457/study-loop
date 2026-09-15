@@ -66,6 +66,28 @@ class TestTutorNodeOutput(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(entry["score"])
         self.assertIsNone(entry["mastery_after"])
 
+    async def test_teach_turn_claims_no_knowledge_gaps(self):
+        """讲解轮不写 knowledge_gaps，否则会被统计成"反复错同一点"。
+
+        knowledge_gaps 的含义是"学生答错暴露的盲点"。把本轮讲的点填进去，
+        preference_learning._repeated_gap 会在 grader 那条之外再数一次，
+        阈值 2 一次就到 —— 学生只错了一次，却被推断成需要先讲解。
+        """
+        from services.preference_learning import _repeated_gap
+
+        with patch.object(tg, "generate_lesson", AsyncMock(return_value="讲解正文")):
+            out = await tg.tutor_node(_state(
+                weak_points=["Dijkstra"],
+                history=[{"turn": 1, "agent": "grader", "score": 0.5,
+                          "knowledge_gaps": ["Dijkstra"]}],
+            ))
+        entry = out["history"][-1]
+        self.assertNotIn("knowledge_gaps", entry)
+        self.assertFalse(
+            _repeated_gap(out["history"]),
+            "错一次 + 针对它讲一次，不该被算成反复错",
+        )
+
 
 class TestTutorNodeArgumentMapping(unittest.IsolatedAsyncioTestCase):
     """TutorState → generate_lesson 的入参映射"""

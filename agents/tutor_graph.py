@@ -244,7 +244,11 @@ async def tutor_node(state: TutorState) -> dict:
         last_report=last_report,
     )
 
-    # 轨迹回填：讲解轮没有得分，score/mastery_after 留空（字段与 grader_worker 对齐）
+    # 轨迹回填：讲解轮没有得分，score/mastery_after 留空（字段与 grader_worker 对齐）。
+    # 刻意不写 knowledge_gaps —— 那个字段的含义是"学生答错暴露出的盲点"，讲解轮
+    # 没有作答也就没有盲点。把本轮讲的点填进去会让 preference_learning._repeated_gap
+    # 把"错一次 + 针对它讲了一次"数成"反复错同一点"，而它的设计意图恰好是避免
+    # 单轮盲点被算成反复。score=None 则已被 _recent_scores 的类型过滤挡掉。
     history = list(state.get("history", []))
     history.append({
         "turn": state.get("turn", len(history) + 1),
@@ -254,7 +258,6 @@ async def tutor_node(state: TutorState) -> dict:
         "difficulty_score": state.get("difficulty_score", 0.5),
         "score": None,
         "mastery_after": None,
-        "knowledge_gaps": weak_points[:5],
     })
 
     logger.info(f"[tutor_graph.tutor_node] lesson topic={topic!r} chars={len(lesson)}")
