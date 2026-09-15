@@ -7,8 +7,9 @@ tutor_node 讲解节点单测（supervisor MAS 的 teach 轮）
   3) last_report：dict → GradingReport 转换后传给 generate_lesson
   4) last_report 脏数据 → 降级为 None 继续讲，不抛错
   5) grader_worker 批改完一轮后复位 allow_teach=True（否则整个会话只能讲一次）
+  6) 图内联通：supervisor 决策 tutor → Command(goto) 真的命中该节点 → lesson 留在最终 state
 
-全程 mock generate_lesson（不调 LLM / 不检索），3.10 可跑。跑：
+全程 mock generate_lesson / llm_parse（不调 LLM / 不检索），3.10 可跑。跑：
   python -m pytest tests/test_tutor_lesson.py -q
 """
 import sys
@@ -18,8 +19,10 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import agents.supervisor as sup
 import agents.tutor_graph as tg
 from models.grader import GradingReport
+from models.supervisor import SupervisorDecision
 
 _REPORT = {
     "session_id": "s", "total": 2, "correct": 1, "score": 0.5,
@@ -131,6 +134,49 @@ class TestAllowTeachReset(unittest.IsolatedAsyncioTestCase):
             out["allow_teach"],
             "一轮讲→练→批走完后必须解禁；否则 allow_teach 置 False 后无人复位，整个会话只能讲一次",
         )
+
+
+def _llm_returning(*decisions):
+    """按顺序吐出 SupervisorDecision 的假 llm_parse（OpenAI 形状：resp.choices[0].message.parsed）。"""
+    it = iter(decisions)
+
+    async def fake(*a, **kw):
+        msg = type("M", (), {"parsed": next(it)})()
+        return type("R", (), {"choices": [type("C", (), {"message": msg})()]})()
+
+    return fake
+
+
+class TestTutorNodeInGraph(unittest.IsolatedAsyncioTestCase):
+    """图内联通：上面的用例都是直接调 tutor_node，测不出接线错误
+
+    （节点没注册到图上、Command 的 Literal 目标集合漏写 "tutor"、
+    supervisor 的 _AGENT_TO_NODE 映射错），这里走编译后的图补上。
+    """
+
+    async def test_supervisor_dispatch_reaches_tutor_node(self):
+        llm = _llm_returning(
+            SupervisorDecision(next_agent="tutor", action="remediate", topic="Dijkstra",
+                               target_weak_points=["松弛操作"], reason="反复错同一点，先讲"),
+            SupervisorDecision(next_agent="finish", action="finish", topic="Dijkstra",
+                               reason="讲完收尾"),
+        )
+        lesson_mock = AsyncMock(return_value="【讲解】松弛操作是……")
+        with patch.object(sup, "llm_parse", llm), \
+             patch.object(tg, "generate_lesson", lesson_mock):
+            out = await tg.tutor_graph.ainvoke({
+                "user_id": "u1", "document_id": "doc1", "goal": "图论",
+                "description": "Dijkstra", "mode": "guided",
+                "turn": 0, "handoff_count": 0, "history": [],
+            })
+
+        self.assertEqual(out.get("lesson"), "【讲解】松弛操作是……",
+                         "supervisor 派了 tutor，讲解必须留在最终 state 里")
+        self.assertFalse(out.get("allow_teach"))
+        self.assertEqual([h.get("agent") for h in out.get("history", [])], ["tutor"])
+        # supervisor 决策里的薄弱点要透传到讲解，否则讲的不是学生错的那个点
+        self.assertEqual(lesson_mock.await_args.kwargs["weak_points"], ["松弛操作"])
+        self.assertEqual(lesson_mock.await_args.kwargs["topic"], "Dijkstra")
 
 
 if __name__ == "__main__":
