@@ -168,4 +168,8 @@ async def grader_worker(state: TutorState) -> dict:
         "critique_history": [],
         "revision_count": 0,
         "answers": [],
+        # 一轮"讲→练→批"已经走完，解除 tutor_node 置的讲解禁令。
+        # 不复位的话 allow_teach 一旦被置 False 就再没人改回来，
+        # 整个会话只能讲一次——语义要的是"上一步刚讲过"，不是"讲过一次就永久禁讲"。
+        "allow_teach": True,
     }

@@ -39,6 +39,9 @@ from agents.quiz_agent import quiz_agent
 from agents.reviser_agent import reviser_agent
 from agents.state import TutorState
 from agents.supervisor import teaching_supervisor
+from models.grader import GradingReport
+from pydantic import ValidationError
+from services.adaptive_loop import generate_lesson
 from services.injection import check_injection, check_output_leak
 from services.tutor_sessions import ensure_tutor_session, tutor_quiz_view
 from services.tools import dispatch_tool
@@ -205,11 +208,57 @@ async def wait_for_answers(state: TutorState) -> dict:
     }
 
 
-# ── tutor stub：阻止 supervisor 连续只讲不练 ───────────────────────────────
-async def _tutor_stub(state: TutorState) -> dict:
-    """tutor 占位：标记不再连续讲（allow_teach=False），避免 supervisor 连续只讲不练。"""
-    logger.info("[tutor_graph._tutor_stub] stub, mark allow_teach=False")
-    return {"allow_teach": False}
+# ── tutor 节点：纯讲解（不出题）────────────────────────────────────────────
+async def tutor_node(state: TutorState) -> dict:
+    """讲解 worker：检索该知识点材料 → LLM 生成讲解，写 state["lesson"]。
+
+    复用 services.adaptive_loop.generate_lesson —— 与 /agent/adaptive 的 teach 轮
+    是同一份实现，不另起一套讲解 prompt。generate_lesson 自身 fail-soft
+    （检索失败凭通用知识讲、LLM 失败返回降级文本），故这里不再包 try。
+
+    置 allow_teach=False：下一步 supervisor 的观察文本里会出现"上一步已经讲解过了，
+    这一步请用出题验证"，避免连续只讲不练（语义同 adaptive_loop._normalize 的
+    teach→remediate 降级）。grader_worker 批改完一轮后复位为 True。
+    """
+    topic = state.get("description", "") or state.get("goal", "")
+    weak_points = list(state.get("weak_points", []) or [])
+
+    # last_report 在 TutorState 里是 dict（grader_worker 存的 model_dump()），
+    # 而 generate_lesson 要 GradingReport。转不过去就按"没有上轮成绩"讲，不中断闭环。
+    last_report = None
+    raw_report = state.get("last_report")
+    if raw_report:
+        try:
+            last_report = GradingReport.model_validate(raw_report)
+        except ValidationError as exc:
+            logger.warning(
+                "[tutor_graph.tutor_node] last_report 解析失败，按无上轮成绩讲解: %s",
+                type(exc).__name__,
+            )
+
+    lesson = await generate_lesson(
+        document_id=state.get("document_id", ""),
+        topic=topic,
+        weak_points=weak_points,
+        owner_id=state.get("user_id", ""),
+        last_report=last_report,
+    )
+
+    # 轨迹回填：讲解轮没有得分，score/mastery_after 留空（字段与 grader_worker 对齐）
+    history = list(state.get("history", []))
+    history.append({
+        "turn": state.get("turn", len(history) + 1),
+        "agent": "tutor",
+        "action": "teach",
+        "topic": topic,
+        "difficulty_score": state.get("difficulty_score", 0.5),
+        "score": None,
+        "mastery_after": None,
+        "knowledge_gaps": weak_points[:5],
+    })
+
+    logger.info(f"[tutor_graph.tutor_node] lesson topic={topic!r} chars={len(lesson)}")
+    return {"lesson": lesson, "allow_teach": False, "history": history}
 
 
 # ── 编译图 ───────────────────────────────────────────────────────────────────
@@ -225,7 +274,7 @@ _builder.add_node("critic",              _critic_node)        # 题目质量门�
 _builder.add_node("reviser",             reviser_agent)       # 题目精修（critic↔reviser 循环）
 _builder.add_node("grader",              grader_worker)       # 批改 + 画像写回 + 轨迹回填
 _builder.add_node("planner",             planner_agent)       # 学习路径生成
-_builder.add_node("tutor",               _tutor_stub)         # 纯讲解（stub）
+_builder.add_node("tutor",               tutor_node)          # 纯讲解（检索+LLM，不出题）
 _builder.add_node("assistant",           assistant_agent)     # 开放问答 ReAct worker（ask_user→interrupt）
 _builder.add_node("wait_for_answers",    wait_for_answers)    # HITL interrupt：等学生作答
 _builder.add_node("output_guard",        tutor_output_guard)  # guided 轻量输出校验
