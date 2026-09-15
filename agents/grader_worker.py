@@ -172,4 +172,7 @@ async def grader_worker(state: TutorState) -> dict:
         # 不复位的话 allow_teach 一旦被置 False 就再没人改回来，
         # 整个会话只能讲一次——语义要的是"上一步刚讲过"，不是"讲过一次就永久禁讲"。
         "allow_teach": True,
+        # 本轮讲解已经随上一次响应发出去了。lesson 留在 state 里的话，
+        # 后续每一轮的响应都会把它再回显一遍（routers 读的是 state 快照）。
+        "lesson": None,
     }

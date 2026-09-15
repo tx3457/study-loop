@@ -130,6 +130,7 @@ class TutorTurnResponse(BaseModel):
     done: bool = False
     turn: int = 0
     quiz: dict | None = None                       # 待作答题目（awaiting_answers=True 时）
+    lesson: str | None = None                      # 本轮讲解正文（supervisor 派了 tutor 才有）
     grading_report: dict | None = None             # 上一轮批改结果（submit 后）
     mastery: float | None = None
     supervisor_reason: str = ""
@@ -206,6 +207,7 @@ async def tutor_start(req: TutorStartRequest) -> TutorTurnResponse:
             awaiting_answers=True,
             turn=payload.get("turn", 0),
             quiz=payload.get("quiz"),
+            lesson=result.get("lesson"),
             supervisor_reason=payload.get("supervisor_reason", "") or result.get("supervisor_reason", ""),
             returning_context=returning_context,
             welcome_back=welcome_back,
@@ -216,6 +218,7 @@ async def tutor_start(req: TutorStartRequest) -> TutorTurnResponse:
         thread_id=thread_id,
         done=bool(result.get("done")),
         turn=result.get("turn", 0),
+        lesson=result.get("lesson"),
         supervisor_reason=result.get("supervisor_reason", ""),
         terminate_reason=result.get("terminate_reason", ""),
         mastery=await _mastery_of(req.user_id, req.document_id),
@@ -284,6 +287,7 @@ async def tutor_submit(req: TutorSubmitRequest) -> TutorTurnResponse:
             awaiting_answers=True,
             turn=payload.get("turn", 0),
             quiz=payload.get("quiz"),
+            lesson=result.get("lesson"),
             grading_report=grading_report,
             mastery=mastery,
             supervisor_reason=payload.get("supervisor_reason", "") or result.get("supervisor_reason", ""),
@@ -295,6 +299,7 @@ async def tutor_submit(req: TutorSubmitRequest) -> TutorTurnResponse:
         thread_id=req.thread_id,
         done=bool(result.get("done")),
         turn=result.get("turn", 0),
+        lesson=result.get("lesson"),
         grading_report=grading_report,
         mastery=mastery,
         supervisor_reason=result.get("supervisor_reason", ""),
