@@ -585,29 +585,6 @@ async def _embed(texts: list[str]):
     )
 
 
-async def _collection_exists(name: str) -> bool:
-    try:
-        await _run_chroma_io(
-            chromadb_client.get_collection,
-            name=name,
-            operation_name="get_collection",
-        )
-    except NotFoundError:
-        return False
-    return True
-
-
-async def _get_collection_if_exists(name: str):
-    try:
-        return await _run_chroma_io(
-            chromadb_client.get_collection,
-            name=name,
-            operation_name="get_collection",
-        )
-    except NotFoundError:
-        return None
-
-
 def _staging_is_stale(metadata: dict, now: float | None = None) -> bool:
     created_at = metadata.get("created_at")
     if not isinstance(created_at, (int, float)):

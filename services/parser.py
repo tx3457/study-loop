@@ -379,11 +379,3 @@ async def parse_upload(file_bytes: bytes, filename: str) -> list[Document]:
         )
         raise DocumentParseError from exc
 
-
-# 暴露给上层调用和单测
-def get_ocr_backend_name() -> str:
-    return _ocr_backend.name
-
-
-def is_ocr_available() -> bool:
-    return _ocr_backend.available
