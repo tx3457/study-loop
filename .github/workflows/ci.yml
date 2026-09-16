@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # 依赖审计每周跑一次。公告什么时候出现和本仓库什么时候提交无关，
+    # 挂在 push 上等于让一条与本次修改毫无关系的 CVE 挡住工作。
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -68,6 +73,21 @@ jobs:
         run: python scripts/demo_react_tutor_agent.py
       - name: Verify published SciFact BM25 artifact
         run: python evaluation/scifact_bm25/verify.py
+
+  dependency-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install pip-audit
+        run: pip install pip-audit
+      - name: Audit pinned dependencies
+        run: pip-audit -r requirements.txt --progress-spinner off
 
   frontend:
     runs-on: ubuntu-latest
