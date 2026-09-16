@@ -1,7 +1,7 @@
 export const QUIZ_RECOVERY_STORAGE_KEY = 'study-loop.quiz.recovery.v1'
 
 const SCHEMA_VERSION = 1
-const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{8,128}$/u
+const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u
 const LEARNING_PATH_ID_PATTERN = /^lp_[0-9a-f]{32}$/u
 
 function isObject(value) {
