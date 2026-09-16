@@ -25,8 +25,9 @@ StudyLoop 是一个基于个人学习材料的 AI 自适应学习系统：从文
 
 ## 核心亮点
 
-- **文档驱动学习**：解析 PDF、DOCX、Markdown、文本和图片，通过 Chroma 与 BM25 检索材料；选择文档后可要求回答携带服务端登记的片段 ID。
-- **有界工具 Agent**：模型只能选择注册表中的业务工具，工具结果会作为 observation 回到下一轮决策；执行最多 8 轮，并支持 HITL 暂停、补充和恢复。
+- **文档驱动学习**：解析 PDF、DOCX、Markdown、文本和图片，Chroma 与 BM25 混合检索并用 RRF 融合。引用校验基于每轮独立的证据登记表：模型引用本轮未检索到的片段会被判定无效，开启 grounding 后没有有效引用则安全弃答。
+- **有界工具 Agent**：模型只能从注册表白名单选择业务工具，越界调用被拦截并回灌错误 observation；工具参数由服务端权威绑定，模型无法伪造上游工具的产出；并行工具批次拒绝「副作用写入 + 结束」的混合调用。执行上限 8 轮，超限强制收尾并标记 `max_rounds_truncated`。
+- **可续跑的 HITL**：Agent 需要补充信息时暂停并持久化快照，由独立端点续跑。会话认领使用 CAS 与 fencing token；恢复时比对工具契约指纹，工具定义变更后不允许旧会话续跑。
 - **自适应学习闭环**：学习路径、Quiz、AI 批改、错题与学习画像共同决定下一阶段或下一轮辅导动作。
 - **可恢复的 Web 工作流**：Learning Path、Quiz、Adaptive 和 Autonomous 使用幂等请求、服务端会话与持久化快照处理刷新、断网、响应丢失和后端重启。
 - **工程化交付**：提供 Docker Compose、PostgreSQL/SQLite 状态存储、Pytest、Playwright E2E、前端构建检查和容器 smoke test。
@@ -73,14 +74,17 @@ docker compose up --build -d --wait
 | --- | --- |
 | Web | React 19, React Router, Vite |
 | API | FastAPI, Pydantic, Uvicorn |
-| Agent and workflows | LangGraph, bounded tool loop, HITL checkpoint/resume |
+| Agent | bounded tool loop, server-authoritative tool bindings, durable HITL pause/resume |
+| Experimental | LangGraph supervisor graphs (opt-in) |
 | Retrieval | Chroma, BM25, optional query rewriting / HyDE / reranking |
 | State | PostgreSQL, SQLite, learner-memory snapshots |
 | Delivery and quality | Docker Compose, GitHub Actions, Pytest, Playwright |
 
 ## 产品边界
 
-Web 产品主线包括文档管理、学习路径、答题练习、自主 Agent、自适应辅导和学习报告。`/agent/tutor/*` supervisor 图是架构实验，默认不启用：只有进程启动时 `MAS_SUPERVISOR_ENABLED=true` 才注册路由，且没有 Web 界面。
+Web 产品主线包括文档管理、学习路径、答题练习、自主 Agent、自适应辅导和学习报告。
+
+以下端点默认注册、在认证门内，但没有 Web 界面：`/chat`、`/chat/structured`、`/chat/stream`、`/chat/history`、`/chat/tools` 是工具循环的直接接口；`/agent/run` 与 `/agent/stream` 是 orchestrator 调试入口；`/eval/ab` 运行 A/B 评测，会真实消耗模型额度；`/generate/quiz/native` 是不走学习路径的单次出题。`/agent/tutor/*` supervisor 图是架构实验，只有进程启动时 `MAS_SUPERVISOR_ENABLED=true` 才注册路由。
 
 引用校验保证片段 ID 来自本轮、指定文档范围内的检索结果，但不等同于对回答中每一项事实完成语义核验。文档删除是“仅删除材料”，不会级联清除已经形成的学习历史和会话工件。完整边界见架构与安全文档。
 

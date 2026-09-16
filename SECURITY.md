@@ -19,6 +19,13 @@ not be committed:
 - `.deepeval/`, `artifacts/`, `traces/`
 - `.omc/`, `.omx/`, `.playwright-cli/`
 
+Uploaded DOCX files are validated before any parser expands them. The archive
+guard enforces independent budgets on entry count, central-directory size,
+per-entry and total decompressed bytes, XML payload size, and a 200:1
+compression-ratio ceiling, and rejects ZIP64 and Unicode Path extra fields
+outright. A hostile or malformed archive is refused before it reaches the
+document loader.
+
 Cloud model providers and optional tracing/MCP integrations may receive user
 content when enabled. Review the provider's data policy before uploading
 sensitive material. Tracing and live MCP integrations are disabled in the
@@ -146,12 +153,13 @@ multi-process data plane; `DATABASE_URL` alone does not remove that boundary.
   A confirmed cancel deletes a still-paused server snapshot; canceling an
   in-flight operation is rejected. This data remains available to scripts
   running in the same origin and tab.
-- The standalone API currently has no trusted authentication subject. A
-  `conversation_id` is therefore a high-entropy bearer capability, not an
-  authorization boundary, and deployments must be treated as single-user or
-  placed behind authentication. The default Compose file binds the Web and API
-  ports to loopback and does not publish PostgreSQL; preserve an equivalent
-  boundary when adapting it. The ID is no longer logged in full.
+- In anonymous mode (no `STUDYLOOP_AUTH_TOKEN` configured) every caller shares
+  the same default subject. A `conversation_id` is therefore a high-entropy
+  bearer capability, not an authorization boundary, and deployments must be
+  treated as single-user or placed behind authentication. The default Compose
+  file binds the Web and API ports to loopback and does not publish PostgreSQL;
+  preserve an equivalent boundary when adapting it. The ID is no longer logged
+  in full.
 - Audit responses are redacted by default. Full tool arguments, output previews,
   and retrieved text remain unavailable unless a trusted deployment explicitly
   sets `AUDIT_PAYLOAD_ENABLED=true`; this switch is not a substitute for

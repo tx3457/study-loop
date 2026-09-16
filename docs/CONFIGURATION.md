@@ -25,8 +25,10 @@ When connecting a provider for the first time:
 2. Replace the `LLM_*` values with the real Chat endpoint, key, and model.
 3. Configure `STRUCTURED_*` separately if the Chat provider does not support the
    required structured-output behavior.
-4. Configure `EMBEDDING_*` and `LLM_EMBEDDING_MODEL` separately if embeddings
-   are not available from the Chat provider.
+4. Set `LLM_EMBEDDING_MODEL` explicitly. It has no fallback, and leaving it
+   empty fails document ingestion with `provider_not_configured`. Configure
+   `EMBEDDING_*` separately only if embeddings are not available from the Chat
+   provider.
 
 Run the explicit capability probe after configuration:
 

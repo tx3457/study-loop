@@ -5,7 +5,7 @@ POST /eval/ab  →  运行一次 A/B 实验，返回两组对比 + LLM-as-Judge 
 
 ── 使用示例 ─────────────────────────────────────────────────────────────────
   # CE 实验：有/无 Context Engineering 对比
-  curl -X POST http://localhost:8000/eval/ab -H 'Content-Type: application/json' -d '{
+  curl -X POST http://localhost:8001/eval/ab -H 'Content-Type: application/json' -d '{
     "document_id": "product.txt",
     "query": "产品功能",
     "experiment": "ce",
@@ -14,7 +14,7 @@ POST /eval/ab  →  运行一次 A/B 实验，返回两组对比 + LLM-as-Judge 
   }'
 
   # RAG 实验：纯向量 vs Hybrid 检索对比
-  curl -X POST http://localhost:8000/eval/ab -H 'Content-Type: application/json' -d '{
+  curl -X POST http://localhost:8001/eval/ab -H 'Content-Type: application/json' -d '{
     "document_id": "product.txt",
     "query": "产品功能",
     "experiment": "rag"

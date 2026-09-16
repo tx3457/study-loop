@@ -1,7 +1,7 @@
 # Development guide
 
 This document contains the setup, validation, and repository-reference details
-that are intentionally kept out of the project showcase in `README.md`.
+that are kept out of `README.md`.
 
 ## Requirements
 
@@ -94,7 +94,10 @@ TEST_DATABASE_URL=postgresql://user:password@127.0.0.1:5432/studyloop_test \
     tests/test_quiz_sessions_postgres.py \
     tests/test_adaptive_sessions_postgres.py \
     tests/test_autonomous_sessions_postgres.py \
-    tests/test_memory_postgres.py
+    tests/test_learning_path_store_postgres.py \
+    tests/test_memory_postgres.py \
+    tests/test_memory_postgres_runtime.py \
+    tests/test_memory_postgres_setup.py
 ```
 
 Deterministic tool-loop demonstration:

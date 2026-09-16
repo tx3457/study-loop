@@ -169,7 +169,7 @@ app.add_middleware(RequestContextMiddleware)
 
 # 闸门挂在 include_router 上而不是逐个端点：默认关闭，将来新增的端点
 # 自动落在闸门内侧，不会因为有人忘了加 Depends 而漏出去。
-# 豁免的只有 "/" 和 /health/live，由 tests/test_auth_subject.py 钉死。
+# 豁免的只有 "/"、/health/live 和 /health/ready，由 tests/test_auth_subject.py 钉死。
 _AUTHENTICATED = [Depends(require_user_id)]
 
 app.include_router(chat_router, dependencies=_AUTHENTICATED)
