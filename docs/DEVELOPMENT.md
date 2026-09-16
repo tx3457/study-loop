@@ -134,7 +134,6 @@ study-loop/
 ├── models/          Pydantic data models
 ├── frontend/        React application and Playwright E2E
 ├── tests/           backend tests
-├── evaluation/      offline retrieval evidence
 ├── examples/        example learning material
 └── docs/            architecture and operating documentation
 ```

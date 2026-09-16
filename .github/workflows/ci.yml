@@ -71,8 +71,6 @@ jobs:
           --cov-report=term-missing:skip-covered
       - name: Run deterministic Agent demo
         run: python scripts/demo_react_tutor_agent.py
-      - name: Verify published SciFact BM25 artifact
-        run: python evaluation/scifact_bm25/verify.py
 
   dependency-audit:
     runs-on: ubuntu-latest
