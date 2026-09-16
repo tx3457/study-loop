@@ -2082,6 +2082,10 @@ async def continue_autonomous(
         len(resume_tools_called),
         len(resume_evidence_registry),
     )
+    # handoff_to_next_pause 会在 _run_react_loop 返回前提交结果并置位
+    # outcome_committed，此时下面这个绑定还不存在。显式初始化让异常处理
+    # 能够区分"已提交且拿得到响应"和"已提交但引用未绑定"。
+    response: AutonomousResponse | None = None
     try:
         response = await _run_react_loop(
             messages=resume_messages, plan=session.plan,
@@ -2191,6 +2195,10 @@ async def continue_autonomous(
         if outcome_committed:
             if not isinstance(exc, Exception):
                 raise
+            if response is None:
+                # 结果已经提交，但本地拿不到那份响应，无法用它对账收据。
+                # 报 ambiguous 让调用方带原 key 重试，从会话快照取回结果。
+                raise IdempotencyConflictError("in_progress") from exc
             if receipt_lease is not None:
                 try:
                     await request_idempotency.reconcile_completed(
