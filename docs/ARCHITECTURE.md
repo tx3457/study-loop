@@ -43,8 +43,8 @@ workflow rather than an unconstrained tool Agent.
 
 The optional supervisor graph is experimental: it has no Web surface and is not
 registered in FastAPI unless `MAS_SUPERVISOR_ENABLED=true` at process startup.
-The `/agent/tutor/*` routes are a Lab surface for architecture experiments, not a
-headline product or resume claim.
+The `/agent/tutor/*` routes are a Lab surface for architecture experiments, not
+part of the product surface.
 
 ## Tool loop
 

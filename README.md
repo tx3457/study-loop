@@ -80,7 +80,7 @@ docker compose up --build -d --wait
 
 ## 产品边界
 
-Web 产品主线包括文档管理、学习路径、答题练习、自主 Agent、自适应辅导和学习报告。`/agent/tutor/*` supervisor 图是默认关闭的 API-only Lab，且纯讲解 worker 尚未完成，因此不作为当前产品或简历功能。
+Web 产品主线包括文档管理、学习路径、答题练习、自主 Agent、自适应辅导和学习报告。`/agent/tutor/*` supervisor 图是架构实验，默认不启用：只有进程启动时 `MAS_SUPERVISOR_ENABLED=true` 才注册路由，且没有 Web 界面。
 
 引用校验保证片段 ID 来自本轮、指定文档范围内的检索结果，但不等同于对回答中每一项事实完成语义核验。文档删除是“仅删除材料”，不会级联清除已经形成的学习历史和会话工件。完整边界见架构与安全文档。
 
