@@ -67,6 +67,7 @@ async def _search_document(document_id: str, query: str, user_id: str) -> str:
 
 async def _generate_quiz(
     document_id: str,
+    user_id: str,
     topic: str = "",
     count: int = 3,
     difficulty: str = "medium",
@@ -79,6 +80,7 @@ async def _generate_quiz(
         count=count,
         difficulty=difficulty,
         type=type,
+        owner_id=user_id,
     )
     return quiz.model_dump_json(ensure_ascii=False)
 
@@ -333,7 +335,7 @@ def _register_all() -> None:
                     "default": "choice",
                 },
             },
-            "required": ["document_id"],
+            "required": ["user_id", "document_id"],
         },
         handler=_generate_quiz,
         # 生成涉及 LLM thinking + 结构化输出，慢；重试一次防止累积成本
@@ -341,6 +343,7 @@ def _register_all() -> None:
             timeout_sec=60.0,
             max_retries=1,
             effect_mode=EffectMode.READ_ONLY,
+            owner_argument="user_id",
         ),
     ))
 

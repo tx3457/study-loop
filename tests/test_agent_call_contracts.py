@@ -68,5 +68,50 @@ class TestRetrievalCallContract(unittest.TestCase):
                 )
 
 
+class TestNoCallSiteOmitsTheOwner(unittest.TestCase):
+    """静态扫描全部调用点，而不是只测被 mock 过的那几条路径。
+
+    上面两个类比对的是签名；这个类比对的是**调用点**。所有相关用例都 patch 掉了
+    被调方，mock 接受任何参数，所以漏传 owner_id 在测试里是看不见的——
+    `_generate_quiz`、`routers/quiz.py` 和 `services/session.py` 三处就是这样
+    带着运行时 TypeError 通过了全量测试。
+    """
+
+    REQUIRE_OWNER = {
+        "retrieve_with_rewrite", "hybrid_query_document", "query_document",
+        "bm25_only_query_document", "deal_document", "delete_document",
+        "get_all_document", "ensure_document_available",
+        "generate_question", "generate_lesson", "generate_learning_path",
+    }
+    PACKAGES = ("services", "routers", "agents")
+
+    def test_every_call_site_passes_owner_id(self):
+        import ast
+
+        root = Path(__file__).parent.parent
+        missing = []
+        for package in self.PACKAGES:
+            for path in sorted((root / package).glob("*.py")):
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+                for node in ast.walk(tree):
+                    if not isinstance(node, ast.Call):
+                        continue
+                    name = getattr(node.func, "id", None) or getattr(
+                        node.func, "attr", None
+                    )
+                    if name not in self.REQUIRE_OWNER:
+                        continue
+                    if any(k.arg is None for k in node.keywords):
+                        continue  # **kwargs 转发，静态判断不了
+                    if "owner_id" not in {k.arg for k in node.keywords}:
+                        missing.append(
+                            f"{path.relative_to(root)}:{node.lineno} {name}()"
+                        )
+        self.assertEqual(
+            missing, [],
+            "这些调用点没有传 owner_id，运行时会 TypeError：\n" + "\n".join(missing),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

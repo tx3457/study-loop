@@ -20,10 +20,12 @@ class AgentV2ToolHandlerContractTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(
             tools, "generate_question", AsyncMock(return_value=generated)
         ) as generate:
-            await tools._generate_quiz("doc-1")
+            await tools._generate_quiz("doc-1", "default_user")
 
         self.assertEqual(generate.await_args.kwargs["document_id"], "doc-1")
         self.assertEqual(generate.await_args.kwargs["description"], "文档综合内容")
+        # 出题要检索文档，属主必须一路传到检索层，否则运行时 TypeError
+        self.assertEqual(generate.await_args.kwargs["owner_id"], "default_user")
         schema = tool_registry.get("generate_quiz").parameters_schema
         self.assertNotIn("topic", schema["required"])
         self.assertEqual(schema["properties"]["topic"]["default"], "")

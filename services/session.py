@@ -128,6 +128,7 @@ async def prepare_session(req: SessionStartRequest) -> QuizSession:
         req.type,
         difficulty_score=difficulty_score,
         weak_points=weak_points,
+        owner_id=req.user_id,
     )
     questions = getattr(quiz_response, "questions", None)
     if not isinstance(questions, list):
