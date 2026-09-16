@@ -35,6 +35,7 @@ workflow rather than an unconstrained tool Agent.
 | Surface | Actual control flow | State and stop condition | Accurate label |
 | --- | --- | --- | --- |
 | `/agent/autonomous` | The model chooses a registered business tool, `ask_user`, or `finalize`; tool output returns as an observation before the next decision | PostgreSQL/SQLite pause snapshots with guarded resume; at most 8 rounds | Tool-using Agent |
+| `/chat/tools` | The same tool loop without a session: the model chooses a registered business tool and answers from the observations | No server session; at most 3 rounds | Bounded tool-using endpoint |
 | `/agent/tutor/assist` (Lab) | The embedded assistant uses the same tool loop; `ask_user` pauses through LangGraph `interrupt` | SQLite checkpointer + `thread_id`; at most 8 assistant rounds | Experimental tool-using Agent with HITL |
 | `/agent/adaptive/*` | The model selects a structured teaching action; application code executes a known branch | Adaptive session state, mastery/round stop rules | Agentic workflow |
 | `/agent/tutor/start` and `/agent/tutor/submit` | A supervisor node reasons over the full observation and dispatches the next worker with `Command(goto=...)`; workers flow back to it for the next decision | SQLite checkpointer + `thread_id`; `interrupt` per answer turn, at most 8 handoffs | Supervisor-based Multi-Agent with HITL |
@@ -67,6 +68,11 @@ the model, per-tool timeout/retry settings, and local audit records.
 `services/tool_loop.py` parses tool calls, executes allowed tools, and appends
 their results as tool messages. The current schema is not a complete server-side
 authorization or Pydantic-validation boundary; see `SECURITY.md`.
+
+`/chat/tools` is the smallest entry point into this loop: one request, no server
+session, at most three rounds. `/agent/autonomous` runs the same
+`run_tool_round` and adds the control tools, the pause snapshot, and the
+eight-round budget on top of it.
 
 ## Persistence boundaries
 
