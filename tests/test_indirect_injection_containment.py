@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from services.vectorstore import DEFAULT_DOCUMENT_OWNER
 import services.tools  # noqa: F401  # 注册内置工具
 from services.injection import scan_untrusted_content
 from services.tool_loop import _mark_untrusted_observation
@@ -43,7 +44,7 @@ def _search(retrieval):
         "services.tools.retrieve_with_rewrite",
         AsyncMock(return_value=retrieval),
     ):
-        return json.loads(asyncio.run(_search_document("doc", "q")))
+        return json.loads(asyncio.run(_search_document("doc", "q", DEFAULT_DOCUMENT_OWNER)))
 
 
 class TestRetrievedContentEnvelope(unittest.TestCase):

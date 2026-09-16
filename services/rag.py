@@ -105,8 +105,10 @@ async def generate_question(
     difficulty_score: float | None = None,
     weak_points: list[str] | None = None,
     reflected_message: str = "",
+    *,
+    owner_id: str,
 ):
-    result = await retrieve_with_rewrite(document_id, description)
+    result = await retrieve_with_rewrite(document_id, description, owner_id=owner_id)
     chunks = result["documents"][0]
     return await generate_question_from_chunks(
         chunks,

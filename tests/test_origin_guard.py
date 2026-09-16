@@ -15,6 +15,7 @@ from fastapi.testclient import TestClient
 import main
 import routers.documents as documents_router
 import routers.learning_path as learning_path_router
+from services.vectorstore import DEFAULT_DOCUMENT_OWNER
 from services.origin_guard import ALLOWED_BROWSER_ORIGINS, OriginGuardMiddleware
 from services.request_context import RequestContextMiddleware
 
@@ -286,7 +287,9 @@ class TestOriginGuard(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIsNone(response.headers.get("access-control-allow-origin"))
         self.assert_request_id(response)
-        generate_learning_path.assert_awaited_once_with("notes.md")
+        generate_learning_path.assert_awaited_once_with(
+            "notes.md", owner_id=DEFAULT_DOCUMENT_OWNER
+        )
 
     def test_noncanonical_and_lookalike_origins_are_rejected(self) -> None:
         rejected_origins = (

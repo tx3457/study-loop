@@ -11,6 +11,7 @@ import chromadb
 from chromadb.errors import NotFoundError
 
 import services.vectorstore as vectorstore
+from services.vectorstore import DEFAULT_DOCUMENT_OWNER
 
 
 def _embedding_response(texts):
@@ -38,7 +39,7 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
         with patch.object(vectorstore, "chromadb_client", client), \
              patch.object(vectorstore, "_embed", AsyncMock(side_effect=provider_error)):
             with self.assertRaises(RuntimeError) as raised:
-                await vectorstore.deal_document("notes.md", "notes.md", ["content"])
+                await vectorstore.deal_document("notes.md", "notes.md", ["content"], owner_id=DEFAULT_DOCUMENT_OWNER)
 
         self.assertIs(raised.exception, provider_error)
         client.create_collection.assert_not_called()
@@ -68,7 +69,7 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
         chunks = [f"chunk {i}" for i in range(vectorstore.EMBED_BATCH_SIZE + 1)]
         with patch.object(vectorstore, "chromadb_client", client), \
              patch.object(vectorstore, "_embed", embed):
-            count = await vectorstore.deal_document("notes.md", "notes.md", chunks)
+            count = await vectorstore.deal_document("notes.md", "notes.md", chunks, owner_id=DEFAULT_DOCUMENT_OWNER)
 
         self.assertEqual(count, len(chunks))
         writes = [event[0] for event in events if event[0] != "lookup"]
@@ -101,7 +102,7 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
                  return_value=_embedding_response(["content"])
              )):
             with self.assertRaises(RuntimeError) as raised:
-                await vectorstore.deal_document("notes.md", "notes.md", ["content"])
+                await vectorstore.deal_document("notes.md", "notes.md", ["content"], owner_id=DEFAULT_DOCUMENT_OWNER)
 
         self.assertIs(raised.exception, write_error)
         client.delete_collection.assert_called_once()
@@ -132,7 +133,7 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
                  return_value=_embedding_response(["content"])
              )), self.assertLogs(vectorstore.logger, level="ERROR") as logs:
             with self.assertRaises(RuntimeError) as raised:
-                await vectorstore.deal_document("notes.md", "notes.md", ["content"])
+                await vectorstore.deal_document("notes.md", "notes.md", ["content"], owner_id=DEFAULT_DOCUMENT_OWNER)
 
         self.assertIs(raised.exception, write_error)
         self.assertTrue(any("cleanup failure" in line for line in logs.output))
@@ -165,7 +166,7 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
                  return_value=_embedding_response(["content"])
              )):
             task = asyncio.create_task(
-                vectorstore.deal_document("notes.md", "notes.md", ["content"])
+                vectorstore.deal_document("notes.md", "notes.md", ["content"], owner_id=DEFAULT_DOCUMENT_OWNER)
             )
             await asyncio.to_thread(started.wait, 2)
             task.cancel()
@@ -184,7 +185,7 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
         with patch.object(vectorstore, "chromadb_client", client), \
              patch.object(vectorstore, "_embed", embed):
             with self.assertRaises(vectorstore.DocumentAlreadyExistsError):
-                await vectorstore.deal_document("notes.md", "notes.md", ["new content"])
+                await vectorstore.deal_document("notes.md", "notes.md", ["new content"], owner_id=DEFAULT_DOCUMENT_OWNER)
 
         embed.assert_not_awaited()
         client.create_collection.assert_not_called()
@@ -213,7 +214,7 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
                  return_value=_embedding_response(["content"])
              )):
             with self.assertRaises(vectorstore.DocumentAlreadyExistsError):
-                await vectorstore.deal_document("notes.md", "notes.md", ["content"])
+                await vectorstore.deal_document("notes.md", "notes.md", ["content"], owner_id=DEFAULT_DOCUMENT_OWNER)
 
         client.delete_collection.assert_called_once()
         self.assertNotEqual(client.delete_collection.call_args.kwargs["name"], "notes.md")
@@ -239,7 +240,7 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
         ]
 
         with patch.object(vectorstore, "chromadb_client", client):
-            collections = await vectorstore.get_all_document()
+            collections = await vectorstore.get_all_document(owner_id=DEFAULT_DOCUMENT_OWNER)
 
         self.assertEqual(
             [item.name for item in collections],
@@ -266,7 +267,7 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
         vectorstore._active_staging_names.add("active-staging")
 
         with patch.object(vectorstore, "chromadb_client", client):
-            collections = await vectorstore.get_all_document()
+            collections = await vectorstore.get_all_document(owner_id=DEFAULT_DOCUMENT_OWNER)
 
         self.assertEqual(collections, [])
         client.delete_collection.assert_called_once_with(name="stale-staging")
@@ -283,7 +284,7 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
             )
 
             with patch.object(vectorstore, "chromadb_client", client):
-                visible = await vectorstore.get_all_document()
+                visible = await vectorstore.get_all_document(owner_id=DEFAULT_DOCUMENT_OWNER)
             self.assertEqual([item.name for item in visible], ["legacy-full.md"])
             with self.assertRaises(NotFoundError):
                 client.get_collection("legacy-empty.md")
@@ -294,9 +295,10 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
                      return_value=_embedding_response(["new valid content"])
                  )):
                 count = await vectorstore.deal_document(
-                    "direct-empty.md", "direct-empty.md", ["new valid content"]
+                    "direct-empty.md", "direct-empty.md", ["new valid content"],
+                    owner_id=DEFAULT_DOCUMENT_OWNER,
                 )
-                visible = await vectorstore.get_all_document()
+                visible = await vectorstore.get_all_document(owner_id=DEFAULT_DOCUMENT_OWNER)
 
             self.assertEqual(count, 1)
             self.assertEqual(
@@ -333,14 +335,14 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
         with patch.object(vectorstore, "chromadb_client", client):
             collection.delete.side_effect = RuntimeError("storage down")
             with self.assertRaises(RuntimeError):
-                await vectorstore.delete_document("notes.md")
+                await vectorstore.delete_document("notes.md", owner_id=DEFAULT_DOCUMENT_OWNER)
             self.assertNotIn("notes.md", vectorstore._bm25_cache)
             self.assertEqual(collection.metadata["ingest_status"], "deleting")
 
             collection.delete.side_effect = None
             client.list_collections.return_value = [collection]
-            visible = await vectorstore.get_all_document()
-            replay = await vectorstore.delete_document("notes.md")
+            visible = await vectorstore.get_all_document(owner_id=DEFAULT_DOCUMENT_OWNER)
+            replay = await vectorstore.delete_document("notes.md", owner_id=DEFAULT_DOCUMENT_OWNER)
 
         self.assertEqual(visible, [])
         self.assertEqual(replay, "material_deleted")
@@ -369,13 +371,14 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
         client.get_collection.side_effect = get_collection
 
         with patch.object(vectorstore, "chromadb_client", client):
-            status = await vectorstore.delete_document("legacy.md")
-            replay = await vectorstore.delete_document("legacy.md")
+            status = await vectorstore.delete_document("legacy.md", owner_id=DEFAULT_DOCUMENT_OWNER)
+            replay = await vectorstore.delete_document("legacy.md", owner_id=DEFAULT_DOCUMENT_OWNER)
             with self.assertRaises(vectorstore.DocumentAlreadyExistsError):
                 await vectorstore.deal_document(
                     "legacy.md",
                     "legacy.md",
                     ["不能继承旧学习历史"],
+                    owner_id=DEFAULT_DOCUMENT_OWNER,
                 )
 
         self.assertEqual(status, "material_deleted")
@@ -420,11 +423,11 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
             gate_bm25_build,
         ):
             first_task = asyncio.create_task(
-                vectorstore._get_bm25_index(collection, "notes.md")
+                vectorstore._get_bm25_index(collection, "notes.md", DEFAULT_DOCUMENT_OWNER)
             )
             await asyncio.wait_for(build_started.wait(), timeout=2)
             second_task = asyncio.create_task(
-                vectorstore._get_bm25_index(collection, "notes.md")
+                vectorstore._get_bm25_index(collection, "notes.md", DEFAULT_DOCUMENT_OWNER)
             )
             try:
                 await asyncio.sleep(0)
@@ -470,7 +473,7 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
             gate_bm25_build,
         ):
             build_task = asyncio.create_task(
-                vectorstore._get_bm25_index(collection, "notes.md")
+                vectorstore._get_bm25_index(collection, "notes.md", DEFAULT_DOCUMENT_OWNER)
             )
             await asyncio.wait_for(build_started.wait(), timeout=2)
             try:
@@ -479,7 +482,7 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
                 release_build.set()
             with self.assertRaises(asyncio.CancelledError):
                 await build_task
-            await asyncio.wait_for(vectorstore.get_all_document(), timeout=2)
+            await asyncio.wait_for(vectorstore.get_all_document(owner_id=DEFAULT_DOCUMENT_OWNER), timeout=2)
 
         self.assertNotIn("notes.md", vectorstore._bm25_cache)
 
@@ -519,14 +522,14 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
             gate_bm25_build,
         ), patch.object(vectorstore, "CHROMA_IO_OPERATION_TIMEOUT_SECONDS", 0.05):
             build_task = asyncio.create_task(
-                vectorstore._get_bm25_index(collection, "notes.md")
+                vectorstore._get_bm25_index(collection, "notes.md", DEFAULT_DOCUMENT_OWNER)
             )
             await asyncio.wait_for(build_started.wait(), timeout=2)
             with self.assertRaises(vectorstore.ChromaIOOperationTimeoutError):
                 await asyncio.wait_for(build_task, timeout=1)
             release_build.set()
             await asyncio.wait_for(build_finished.wait(), timeout=2)
-            await asyncio.wait_for(vectorstore.get_all_document(), timeout=2)
+            await asyncio.wait_for(vectorstore.get_all_document(owner_id=DEFAULT_DOCUMENT_OWNER), timeout=2)
 
         self.assertNotIn("notes.md", vectorstore._bm25_cache)
 
@@ -569,10 +572,10 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
             gate_bm25_build,
         ):
             build_task = asyncio.create_task(
-                vectorstore._get_bm25_index(collection, "notes.md")
+                vectorstore._get_bm25_index(collection, "notes.md", DEFAULT_DOCUMENT_OWNER)
             )
             await asyncio.wait_for(build_started.wait(), timeout=2)
-            delete_task = asyncio.create_task(vectorstore.delete_document("notes.md"))
+            delete_task = asyncio.create_task(vectorstore.delete_document("notes.md", owner_id=DEFAULT_DOCUMENT_OWNER))
             release_build.set()
             await build_task
             self.assertEqual(await delete_task, "material_deleted")

@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import routers.documents as documents_router
 import services.vectorstore as vectorstore
+from services.vectorstore import DEFAULT_DOCUMENT_OWNER
 from main import app
 
 
@@ -124,7 +125,9 @@ class TestDocumentUploadErrorBoundaries(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["document_id"], filename)
         self.assertEqual(response.json()["filename"], filename)
-        index.assert_awaited_once_with(filename, filename, ["梯度下降"])
+        index.assert_awaited_once_with(
+            filename, filename, ["梯度下降"], owner_id=DEFAULT_DOCUMENT_OWNER
+        )
 
     def test_document_list_uses_public_id_from_collection_metadata(self):
         collection = SimpleNamespace(
@@ -172,9 +175,10 @@ class TestUnicodeDocumentStorage(unittest.IsolatedAsyncioTestCase):
                 patch.object(vectorstore, "_embed", AsyncMock(return_value=embeddings)),
             ):
                 count = await vectorstore.deal_document(
-                    filename, filename, ["梯度下降"]
+                    filename, filename, ["梯度下降"],
+                    owner_id=DEFAULT_DOCUMENT_OWNER,
                 )
-                collections = await vectorstore.get_all_document()
+                collections = await vectorstore.get_all_document(owner_id=DEFAULT_DOCUMENT_OWNER)
 
                 self.assertEqual(count, 1)
                 self.assertEqual(len(collections), 1)
@@ -183,36 +187,37 @@ class TestUnicodeDocumentStorage(unittest.IsolatedAsyncioTestCase):
                     collections[0].metadata["source_document_id"], filename
                 )
 
-                await vectorstore.ensure_document_available(filename)
-                query_result = await vectorstore.query_document(filename, "梯度")
+                await vectorstore.ensure_document_available(filename, owner_id=DEFAULT_DOCUMENT_OWNER)
+                query_result = await vectorstore.query_document(filename, "梯度", owner_id=DEFAULT_DOCUMENT_OWNER)
                 self.assertEqual(query_result["documents"][0], ["梯度下降"])
 
                 internal_id = collections[0].name
                 with self.assertRaises(NotFoundError):
-                    await vectorstore.ensure_document_available(internal_id)
+                    await vectorstore.ensure_document_available(internal_id, owner_id=DEFAULT_DOCUMENT_OWNER)
                 with self.assertRaises(NotFoundError):
-                    await vectorstore.query_document(internal_id, "梯度")
+                    await vectorstore.query_document(internal_id, "梯度", owner_id=DEFAULT_DOCUMENT_OWNER)
                 with self.assertRaises(NotFoundError):
-                    await vectorstore.delete_document(internal_id)
+                    await vectorstore.delete_document(internal_id, owner_id=DEFAULT_DOCUMENT_OWNER)
 
                 # Rejecting the internal alias must not affect the public id.
-                await vectorstore.ensure_document_available(filename)
+                await vectorstore.ensure_document_available(filename, owner_id=DEFAULT_DOCUMENT_OWNER)
 
-                status = await vectorstore.delete_document(filename)
-                replay = await vectorstore.delete_document(filename)
-                self.assertEqual(await vectorstore.get_all_document(), [])
+                status = await vectorstore.delete_document(filename, owner_id=DEFAULT_DOCUMENT_OWNER)
+                replay = await vectorstore.delete_document(filename, owner_id=DEFAULT_DOCUMENT_OWNER)
+                self.assertEqual(await vectorstore.get_all_document(owner_id=DEFAULT_DOCUMENT_OWNER), [])
                 tombstone = client.get_collection(internal_id)
                 self.assertEqual(status, "material_deleted")
                 self.assertEqual(replay, "material_deleted")
                 self.assertEqual(tombstone.count(), 0)
                 self.assertEqual(tombstone.metadata["ingest_status"], "deleted")
                 with self.assertRaises(NotFoundError):
-                    await vectorstore.ensure_document_available(filename)
+                    await vectorstore.ensure_document_available(filename, owner_id=DEFAULT_DOCUMENT_OWNER)
                 with self.assertRaises(vectorstore.DocumentAlreadyExistsError):
                     await vectorstore.deal_document(
                         filename,
                         filename,
                         ["不能复用同名材料"],
+                        owner_id=DEFAULT_DOCUMENT_OWNER,
                     )
 
 

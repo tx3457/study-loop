@@ -15,11 +15,12 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import services.vectorstore as vs
+from services.vectorstore import DEFAULT_DOCUMENT_OWNER
 
 
 def _hybrid_stub(returns_by_query: dict):
     """造一个假的 hybrid_query_document:按 query 返回预设 {documents,ids}。"""
-    async def _fn(document_id, query, n_results=5):
+    async def _fn(document_id, query, n_results=5, *, owner_id):
         return returns_by_query[query]
     return _fn
 
@@ -30,14 +31,14 @@ class TestRetrieveWithRewrite(unittest.IsolatedAsyncioTestCase):
         """HyDE/Multi-query 全关 → 直接 hybrid(原 query),零行为变化。"""
         calls = []
 
-        async def _hybrid(document_id, query, n_results=5):
+        async def _hybrid(document_id, query, n_results=5, *, owner_id):
             calls.append(query)
             return {"documents": [["d1"]], "ids": [["id1"]]}
 
         with patch.object(vs, "multiquery_enabled", return_value=False), \
              patch.object(vs, "hyde_enabled", return_value=False), \
              patch.object(vs, "hybrid_query_document", _hybrid):
-            out = await vs.retrieve_with_rewrite("doc", "原始query")
+            out = await vs.retrieve_with_rewrite("doc", "原始query", owner_id=DEFAULT_DOCUMENT_OWNER)
 
         self.assertEqual(calls, ["原始query"])          # 只检索一次,用原 query
         self.assertEqual(out["documents"][0], ["d1"])
@@ -57,7 +58,7 @@ class TestRetrieveWithRewrite(unittest.IsolatedAsyncioTestCase):
              patch.object(vs, "hyde_enabled", return_value=False), \
              patch.object(vs, "multi_query_rewrite", _mq), \
              patch.object(vs, "hybrid_query_document", _hybrid_stub(returns)):
-            out = await vs.retrieve_with_rewrite("doc", "原q", n_results=3)
+            out = await vs.retrieve_with_rewrite("doc", "原q", n_results=3, owner_id=DEFAULT_DOCUMENT_OWNER)
 
         ids = out["ids"][0]
         self.assertEqual(len(ids), 3)               # top_k=n_results=3,只回 3 条
@@ -75,7 +76,7 @@ class TestRetrieveWithRewrite(unittest.IsolatedAsyncioTestCase):
         async def _hyde_fail(q):
             return "同一句"                            # 全部塌缩成同一句
 
-        async def _hybrid(document_id, query, n_results=5):
+        async def _hybrid(document_id, query, n_results=5, *, owner_id):
             calls.append(query)
             return {"documents": [["d"]], "ids": [["i"]]}
 
@@ -84,7 +85,7 @@ class TestRetrieveWithRewrite(unittest.IsolatedAsyncioTestCase):
              patch.object(vs, "multi_query_rewrite", _mq), \
              patch.object(vs, "hyde_rewrite", _hyde_fail), \
              patch.object(vs, "hybrid_query_document", _hybrid):
-            out = await vs.retrieve_with_rewrite("doc", "原q")
+            out = await vs.retrieve_with_rewrite("doc", "原q", owner_id=DEFAULT_DOCUMENT_OWNER)
 
         self.assertEqual(calls, ["同一句"])            # 去重后只检索一次,而非 3 次
         self.assertEqual(out["documents"][0], ["d"])
@@ -96,7 +97,7 @@ class TestRetrieveWithRewrite(unittest.IsolatedAsyncioTestCase):
         async def _mq(query, n=None):
             return [query, "变体A"]
 
-        async def _hybrid(document_id, query, n_results=5):
+        async def _hybrid(document_id, query, n_results=5, *, owner_id):
             call_log.append(query)
             # 前两次(多路)抛错,兜底那次(原 query)成功
             if len(call_log) <= 2:
@@ -107,7 +108,7 @@ class TestRetrieveWithRewrite(unittest.IsolatedAsyncioTestCase):
              patch.object(vs, "hyde_enabled", return_value=False), \
              patch.object(vs, "multi_query_rewrite", _mq), \
              patch.object(vs, "hybrid_query_document", _hybrid):
-            out = await vs.retrieve_with_rewrite("doc", "原q")
+            out = await vs.retrieve_with_rewrite("doc", "原q", owner_id=DEFAULT_DOCUMENT_OWNER)
 
         self.assertEqual(out["documents"][0], ["兜底块"])   # 没有返回空 chunks
         self.assertEqual(call_log[-1], "原q")               # 最后一次是用原 query 兜底

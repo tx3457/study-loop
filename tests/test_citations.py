@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from services.vectorstore import DEFAULT_DOCUMENT_OWNER
 from services.citations import collect_search_evidence, resolve_citations
 from services.tools import _search_document
 
@@ -126,7 +127,7 @@ def test_search_document_returns_aligned_server_chunk_ids():
         "services.tools.retrieve_with_rewrite",
         AsyncMock(return_value=retrieval),
     ):
-        payload = json.loads(asyncio.run(_search_document("doc", "question")))
+        payload = json.loads(asyncio.run(_search_document("doc", "question", DEFAULT_DOCUMENT_OWNER)))
 
     assert payload == {
         "document_id": "doc",

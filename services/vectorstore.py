@@ -498,43 +498,64 @@ class DocumentOwnerMismatchError(NotFoundError):
     """A storage collection exists, but not for the requested public id."""
 
 
-def _storage_document_id(document_id: str) -> str:
-    """Map a public filename to a deterministic Chroma-safe collection name.
+# 建库早于属主概念的 collection 没有 owner_id metadata，归属这个命名空间。
+# 单用户部署里所有请求也解析到它，所以历史数据不会因为引入属主而失联。
+DEFAULT_DOCUMENT_OWNER = "default_user"
 
-    Existing ASCII identifiers remain unchanged for backward compatibility.
-    Unicode, spaces and other valid filename characters use a 224-bit digest;
-    the original public id is retained in collection metadata.
+
+def _storage_document_id(document_id: str, owner_id: str) -> str:
+    """Map an (owner, public filename) pair to a Chroma-safe collection name.
+
+    属主是存储身份的一部分，而不是取到 collection 之后再比对的一个字段：
+    换个 owner_id，连 collection 的名字都算不出来，所以「忘记校验属主」这种
+    错误在这里不成立。
+
+    默认属主沿用原来的命名（ASCII 原样、其余走摘要），既有库不需要迁移；
+    其他属主一律走 owner 参与的摘要，不同属主的同名文件天然不同名。
     """
-    if _VALID_COLLECTION_NAME.fullmatch(document_id):
-        return document_id
-    digest = hashlib.sha256(document_id.encode("utf-8")).hexdigest()[:56]
-    return f"doc-{digest}"
+    if owner_id == DEFAULT_DOCUMENT_OWNER:
+        if _VALID_COLLECTION_NAME.fullmatch(document_id):
+            return document_id
+        digest = hashlib.sha256(document_id.encode("utf-8")).hexdigest()[:56]
+        return f"doc-{digest}"
+    # \x00 作分隔符：文件名里不可能出现，("a", "bc") 和 ("ab", "c") 不会撞。
+    identity = f"{owner_id}\x00{document_id}".encode("utf-8")
+    return f"u-{hashlib.sha256(identity).hexdigest()[:56]}"
 
 
-def _require_public_document_owner(collection, document_id: str):
-    """Reject internal collection-name aliases for a public document id."""
+def _collection_owner(metadata: dict) -> str:
+    """Owner of a stored collection; pre-scoping collections are default-owned."""
+    owner = metadata.get("owner_id")
+    return owner if isinstance(owner, str) and owner else DEFAULT_DOCUMENT_OWNER
+
+
+def _require_public_document_owner(collection, document_id: str, owner_id: str):
+    """Reject internal collection-name aliases and other owners' documents."""
     metadata = collection.metadata if isinstance(collection.metadata, dict) else {}
     public_id = (
         metadata.get("source_document_id")
         or metadata.get("source_filename")
         or collection.name
     )
-    if public_id != document_id:
+    # 属主不符按「不存在」报，不按「禁止访问」报：后者会告诉调用方这个
+    # 文档确实存在、只是不属于他，等于一个存在性探测接口。
+    if public_id != document_id or _collection_owner(metadata) != owner_id:
         raise DocumentOwnerMismatchError(f"Document {document_id!r} not found")
     return collection
 
 
 async def _get_public_document_collection(
     document_id: str,
+    owner_id: str,
     *,
     include_tombstone: bool = False,
 ):
     collection = await _run_chroma_io(
         chromadb_client.get_collection,
-        name=_storage_document_id(document_id),
+        name=_storage_document_id(document_id, owner_id),
         operation_name="get_collection",
     )
-    collection = _require_public_document_owner(collection, document_id)
+    collection = _require_public_document_owner(collection, document_id, owner_id)
     metadata = collection.metadata if isinstance(collection.metadata, dict) else {}
     if (
         not include_tombstone
@@ -544,9 +565,9 @@ async def _get_public_document_collection(
     return collection
 
 
-async def ensure_document_available(document_id: str) -> None:
+async def ensure_document_available(document_id: str, *, owner_id: str) -> None:
     """Resolve a public document id and fail if its collection is unavailable."""
-    await _get_public_document_collection(document_id)
+    await _get_public_document_collection(document_id, owner_id)
 
 
 async def _embed(texts: list[str]):
@@ -594,9 +615,9 @@ def _staging_is_stale(metadata: dict, now: float | None = None) -> bool:
     return (now or time.time()) - created_at >= _STAGING_TTL_SECONDS
 
 
-def _ensure_document_slot_available_sync(document_id: str) -> None:
+def _ensure_document_slot_available_sync(document_id: str, owner_id: str) -> None:
     """Reject real duplicates while migrating legacy empty ghost collections."""
-    storage_id = _storage_document_id(document_id)
+    storage_id = _storage_document_id(document_id, owner_id)
     try:
         existing = chromadb_client.get_collection(name=storage_id)
     except NotFoundError:
@@ -617,7 +638,7 @@ def _ensure_document_slot_available_sync(document_id: str) -> None:
             chromadb_client.delete_collection(name=storage_id)
         except NotFoundError:
             pass
-        _invalidate_bm25_cache(document_id)
+        _invalidate_bm25_cache(storage_id)
         logger.info(
             "[vectorstore] removed incomplete collection before upload: %s", document_id
         )
@@ -626,10 +647,11 @@ def _ensure_document_slot_available_sync(document_id: str) -> None:
     raise DocumentAlreadyExistsError(f"文档 '{document_id}' 已存在，请先删除后再上传")
 
 
-async def _ensure_document_slot_available(document_id: str) -> None:
+async def _ensure_document_slot_available(document_id: str, owner_id: str) -> None:
     await _run_chroma_io(
         _ensure_document_slot_available_sync,
         document_id,
+        owner_id,
         operation_name="ensure_document_slot_available",
     )
 
@@ -640,12 +662,13 @@ def _deal_document_sync(
     chunks: list[str],
     embeddings: list,
     cancellation_event: threading.Event,
+    owner_id: str,
 ) -> int:
     """Perform one complete staging→published transition on the Chroma worker."""
-    storage_id = _storage_document_id(document_id)
+    storage_id = _storage_document_id(document_id, owner_id)
     # Re-check inside the same serialized worker immediately before mutation.
     # The async preflight only avoids wasting embedding calls on obvious dupes.
-    _ensure_document_slot_available_sync(document_id)
+    _ensure_document_slot_available_sync(document_id, owner_id)
     staging_name = f"{_STAGING_PREFIX}{uuid.uuid4().hex}"
     collection = None
     try:
@@ -657,6 +680,7 @@ def _deal_document_sync(
                 "ingest_status": "indexing",
                 "source_filename": filename,
                 "source_document_id": document_id,
+                "owner_id": owner_id,
                 "created_at": int(time.time()),
             },
         )
@@ -682,11 +706,12 @@ def _deal_document_sync(
                     "ingest_status": "indexed",
                     "source_filename": filename,
                     "source_document_id": document_id,
+                    "owner_id": owner_id,
                 },
             )
             # The canonical name may now resolve to new text even if a later
             # client cancellation prevents the outer coroutine from returning.
-            _invalidate_bm25_cache(document_id)
+            _invalidate_bm25_cache(storage_id)
             if cancellation_event.is_set():
                 raise asyncio.CancelledError
         except Exception as publish_error:
@@ -698,7 +723,7 @@ def _deal_document_sync(
             except NotFoundError:
                 published_exists = False
             if published_exists:
-                _invalidate_bm25_cache(document_id)
+                _invalidate_bm25_cache(storage_id)
                 raise DocumentAlreadyExistsError(
                     f"文档 '{document_id}' 已存在，请先删除后再上传"
                 ) from publish_error
@@ -733,9 +758,11 @@ def _cleanup_staging_collection_sync(staging_name: str, document_id: str) -> Non
         return
 
 
-async def deal_document(document_id: str, filename: str, chunks: list[str]):
+async def deal_document(
+    document_id: str, filename: str, chunks: list[str], *, owner_id: str
+):
     # 同名重传不能继续用 add：Chroma 会忽略重复 id，导致接口成功但正文仍未更新。
-    await _ensure_document_slot_available(document_id)
+    await _ensure_document_slot_available(document_id, owner_id)
 
     # 先完成所有外部 embedding 调用，provider 失败时不产生任何 Chroma 写入。
     # 分批 embed:几百 chunk 一次性 embed 会撞 API input 上限(多数厂商 ~2048 条/8k token)
@@ -753,6 +780,7 @@ async def deal_document(document_id: str, filename: str, chunks: list[str]):
         chunks,
         embeddings,
         cancellation_event,
+        owner_id,
         operation_name="deal_document",
         cancellation_event=cancellation_event,
     )
@@ -804,25 +832,32 @@ def _bm25_cache_store(document_id: str, entry: dict) -> None:
         logger.debug("[bm25_cache] evicted %s to stay within budget", evicted_id)
 
 
-def _invalidate_bm25_cache(document_id: str) -> None:
-    """Fence in-flight builders, then remove every cached copy for a document."""
+def _invalidate_bm25_cache(cache_key: str) -> None:
+    """Fence in-flight builders, then remove every cached copy for a document.
+
+    键是 _storage_document_id 的结果而不是公开 document_id：属主参与存储身份后，
+    两个属主可以各有一份同名文档，按公开名做键会让他们共用同一条缓存，
+    等于把一方的正文喂给另一方。
+    """
     with _bm25_cache_lock:
-        _bm25_document_versions[document_id] = (
-            _bm25_document_versions.get(document_id, 0) + 1
+        _bm25_document_versions[cache_key] = (
+            _bm25_document_versions.get(cache_key, 0) + 1
         )
-        _bm25_cache_drop(document_id)
+        _bm25_cache_drop(cache_key)
 
 
 def _get_or_build_bm25_index_sync(
     collection,
     document_id: str,
+    owner_id: str,
     cache_epoch: int,
     document_version: int,
     cancellation_event: threading.Event,
 ) -> dict:
     """Single-flight corpus read/build/publish on the bounded storage worker."""
+    cache_key = _storage_document_id(document_id, owner_id)
     with _bm25_cache_lock:
-        cached = _bm25_cache_take(document_id)
+        cached = _bm25_cache_take(cache_key)
         if cached is not None:
             return cached
     all_results = collection.get(include=["documents"])
@@ -838,8 +873,8 @@ def _get_or_build_bm25_index_sync(
         "tokenizer_id": BM25_TOKENIZER_ID,
         "cached_chars": sum(len(doc) for doc in all_docs),
     }
-    current = chromadb_client.get_collection(name=_storage_document_id(document_id))
-    _require_public_document_owner(current, document_id)
+    current = chromadb_client.get_collection(name=cache_key)
+    _require_public_document_owner(current, document_id, owner_id)
     metadata = current.metadata if isinstance(current.metadata, dict) else {}
     if metadata.get("ingest_status") in {"deleting", "deleted"}:
         raise NotFoundError(f"Document {document_id!r} not found")
@@ -847,23 +882,24 @@ def _get_or_build_bm25_index_sync(
         if (
             cancellation_event.is_set()
             or cache_epoch != _bm25_cache_epoch
-            or document_version != _bm25_document_versions.get(document_id, 0)
+            or document_version != _bm25_document_versions.get(cache_key, 0)
         ):
             raise NotFoundError(f"Document {document_id!r} not found")
-        _bm25_cache_store(document_id, entry)
+        _bm25_cache_store(cache_key, entry)
     return entry
 
 
-async def _get_bm25_index(collection, document_id: str) -> dict:
+async def _get_bm25_index(collection, document_id: str, owner_id: str) -> dict:
     """取或构建某文档的 BM25 索引,带进程内缓存。返回 {bm25, all_docs, all_ids}。
 
-    缓存在 deal_document / delete_document 时按 document_id 失效。
-    分词由 services.tokenization 统一提供，确保索引和查询使用同一规则。
+    缓存键含属主（见 _invalidate_bm25_cache），在 deal_document / delete_document
+    时失效。分词由 services.tokenization 统一提供，确保索引和查询使用同一规则。
     """
+    cache_key = _storage_document_id(document_id, owner_id)
     with _bm25_cache_lock:
-        cached = _bm25_cache_take(document_id)
+        cached = _bm25_cache_take(cache_key)
         cache_epoch = _bm25_cache_epoch
-        document_version = _bm25_document_versions.get(document_id, 0)
+        document_version = _bm25_document_versions.get(cache_key, 0)
         if cached is not None:
             return cached
     cancellation_event = threading.Event()
@@ -871,6 +907,7 @@ async def _get_bm25_index(collection, document_id: str) -> dict:
         _get_or_build_bm25_index_sync,
         collection,
         document_id,
+        owner_id,
         cache_epoch,
         document_version,
         cancellation_event,
@@ -888,8 +925,8 @@ def clear_bm25_cache() -> None:
         _bm25_cached_chars = 0
 
 
-async def query_document(document_id: str, query: str):
-    collection = await _get_public_document_collection(document_id)
+async def query_document(document_id: str, query: str, *, owner_id: str):
+    collection = await _get_public_document_collection(document_id, owner_id)
     query_vec = await _embed([query])
     return await _run_chroma_io(
         collection.query,
@@ -909,6 +946,8 @@ async def hybrid_query_document(
     query: str,
     n_results: int = 5,
     enable_rerank: bool | None = None,
+    *,
+    owner_id: str,
 ) -> dict:
     """
     Hybrid 检索：向量 + BM25 → RRF 融合 → Cross-Encoder 精排。
@@ -928,7 +967,7 @@ async def hybrid_query_document(
     recall_n = n_results * recall_multiplier
 
     # 1. 向量检索
-    collection = await _get_public_document_collection(document_id)
+    collection = await _get_public_document_collection(document_id, owner_id)
     query_vec = await _embed([query])
     vec_results = await _run_chroma_io(
         collection.query,
@@ -939,8 +978,8 @@ async def hybrid_query_document(
     vec_docs = vec_results["documents"][0]  # list[str]
     vec_ids = vec_results["ids"][0]  # list[str]
 
-    # 2. BM25 检索:索引按 document_id 缓存(文档增删时失效),避免每次全量重建
-    idx = await _get_bm25_index(collection, document_id)
+    # 2. BM25 检索:索引按(属主, document_id)缓存(文档增删时失效),避免每次全量重建
+    idx = await _get_bm25_index(collection, document_id, owner_id)
     all_docs, all_ids, bm25 = idx["all_docs"], idx["all_ids"], idx["bm25"]
     if bm25 is None:
         bm25_ids, bm25_docs = [], []
@@ -999,7 +1038,7 @@ async def hybrid_query_document(
     metadata={"strategy": "hyde+multiquery+hybrid+rrf"},
 )
 async def retrieve_with_rewrite(
-    document_id: str, query: str, n_results: int = 5
+    document_id: str, query: str, n_results: int = 5, *, owner_id: str
 ) -> dict:
     """生产检索入口：按 env 决定是否做 HyDE / Multi-query 改写，再 hybrid 检索 + RRF 合并。
 
@@ -1034,11 +1073,18 @@ async def retrieve_with_rewrite(
 
     # 单 query：直接走 hybrid，省去无意义的 RRF 合并
     if len(queries) == 1:
-        return await hybrid_query_document(document_id, queries[0], n_results=n_results)
+        return await hybrid_query_document(
+            document_id, queries[0], n_results=n_results, owner_id=owner_id
+        )
 
     # 多 query：各自 hybrid 检索 → RRF 合并
     results = await asyncio.gather(
-        *[hybrid_query_document(document_id, q, n_results=n_results) for q in queries],
+        *[
+            hybrid_query_document(
+                document_id, q, n_results=n_results, owner_id=owner_id
+            )
+            for q in queries
+        ],
         return_exceptions=True,
     )
     ranked_lists: list[list[tuple[str, str]]] = []
@@ -1060,7 +1106,9 @@ async def retrieve_with_rewrite(
         logger.warning(
             "[retrieve_with_rewrite] all rewritten sub-queries failed, fallback to original query"
         )
-        return await hybrid_query_document(document_id, query, n_results=n_results)
+        return await hybrid_query_document(
+            document_id, query, n_results=n_results, owner_id=owner_id
+        )
 
     merged = rrf_merge_ranked_lists(ranked_lists, top_k=n_results)
     return {
@@ -1070,11 +1118,11 @@ async def retrieve_with_rewrite(
 
 
 async def bm25_only_query_document(
-    document_id: str, query: str, n_results: int = 5
+    document_id: str, query: str, n_results: int = 5, *, owner_id: str
 ) -> dict:
     """纯 BM25 检索（用于评测对照组，与 hybrid 和 naive 三组对比）"""
-    collection = await _get_public_document_collection(document_id)
-    idx = await _get_bm25_index(collection, document_id)
+    collection = await _get_public_document_collection(document_id, owner_id)
+    idx = await _get_bm25_index(collection, document_id, owner_id)
     all_docs, all_ids, bm25 = idx["all_docs"], idx["all_ids"], idx["bm25"]
     if bm25 is None:
         return {"documents": [[]], "ids": [[]]}
@@ -1090,7 +1138,7 @@ async def bm25_only_query_document(
     return {"documents": [top_docs], "ids": [top_ids]}
 
 
-def _get_all_document_sync():
+def _get_all_document_sync(owner_id: str):
     collections = chromadb_client.list_collections()
     visible = []
     now = time.time()
@@ -1104,7 +1152,9 @@ def _get_all_document_sync():
                 or collection.name
             )
             try:
-                _delete_document_sync(public_id)
+                # 墓碑清理是全局维护，按该 collection 自己的属主解析存储 id，
+                # 不能用调用方的属主——否则别人的残留永远清不掉。
+                _delete_document_sync(public_id, _collection_owner(metadata))
             except Exception as cleanup_error:
                 logger.warning(
                     "[vectorstore] deleting tombstone cleanup deferred for %s: %s",
@@ -1141,29 +1191,36 @@ def _get_all_document_sync():
                     type(cleanup_error).__name__,
                 )
             continue
+        # 上面的清理对所有属主一视同仁（否则别人的陈旧 staging 永远不回收），
+        # 但能被看见的只有自己的文档。
+        if _collection_owner(metadata) != owner_id:
+            continue
         visible.append(collection)
     return visible
 
 
-async def get_all_document():
+async def get_all_document(*, owner_id: str):
     return await _run_chroma_io(
         _get_all_document_sync,
+        owner_id,
         operation_name="get_all_document",
     )
 
 
-def _deleted_tombstone_metadata(document_id: str) -> dict:
+def _deleted_tombstone_metadata(document_id: str, owner_id: str) -> dict:
     return {
         "ingest_status": "deleted",
         "source_document_id": document_id,
         "source_filename": document_id,
+        # 墓碑也要认属主：否则同名重传时属主校验会把自己的墓碑判成别人的。
+        "owner_id": owner_id,
         "deleted_at": int(time.time()),
     }
 
 
-def _delete_document_sync(document_id: str) -> str:
-    storage_id = _storage_document_id(document_id)
-    _invalidate_bm25_cache(document_id)
+def _delete_document_sync(document_id: str, owner_id: str) -> str:
+    storage_id = _storage_document_id(document_id, owner_id)
+    _invalidate_bm25_cache(storage_id)
     try:
         collection = chromadb_client.get_collection(name=storage_id)
     except NotFoundError:
@@ -1174,7 +1231,7 @@ def _delete_document_sync(document_id: str) -> str:
         try:
             chromadb_client.create_collection(
                 name=storage_id,
-                metadata=_deleted_tombstone_metadata(document_id),
+                metadata=_deleted_tombstone_metadata(document_id, owner_id),
             )
             return "material_deleted"
         except Exception as create_error:
@@ -1183,7 +1240,7 @@ def _delete_document_sync(document_id: str) -> str:
             except NotFoundError:
                 raise create_error
 
-    collection = _require_public_document_owner(collection, document_id)
+    collection = _require_public_document_owner(collection, document_id, owner_id)
     metadata = collection.metadata if isinstance(collection.metadata, dict) else {}
     if metadata.get("ingest_status") == "deleted" and collection.count() == 0:
         return "material_deleted"
@@ -1201,7 +1258,7 @@ def _delete_document_sync(document_id: str) -> str:
     # Close the invalidate→metadata transition window: a builder that started
     # after the first fence could still validate the formerly indexed
     # collection and publish old text before this modify completed.
-    _invalidate_bm25_cache(document_id)
+    _invalidate_bm25_cache(storage_id)
 
     ids = list((collection.get(include=[]).get("ids") or []))
     for start in range(0, len(ids), 1000):
@@ -1219,11 +1276,12 @@ def _delete_document_sync(document_id: str) -> str:
     return "material_deleted"
 
 
-async def delete_document(document_id: str) -> str:
+async def delete_document(document_id: str, *, owner_id: str) -> str:
     # Chroma is synchronous. The complete deleting→empty→deleted transition
     # stays on the serialized worker even if the HTTP request is cancelled.
     return await _run_chroma_io(
         _delete_document_sync,
         document_id,
+        owner_id,
         operation_name="delete_document",
     )

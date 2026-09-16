@@ -28,7 +28,11 @@ from services.llm import (
     structured_client as _client,
     structured_model as _model,
 )
-from services.vectorstore import hybrid_query_document, query_document
+from services.vectorstore import (
+    DEFAULT_DOCUMENT_OWNER,
+    hybrid_query_document,
+    query_document,
+)
 from services.tracing import traceable
 
 load_dotenv(Path(__file__).parent.parent / ".env")
@@ -167,7 +171,9 @@ async def run_ab_experiment(config: ABConfig) -> ABResult:
 async def _run_ce_experiment(config: ABConfig) -> ABResult:
     """CE 实验：同一检索结果，对比有/无 Context Engineering。"""
     # 1. 共用检索结果（控制变量）
-    retrieval = await hybrid_query_document(config.document_id, config.query)
+    retrieval = await hybrid_query_document(
+        config.document_id, config.query, owner_id=DEFAULT_DOCUMENT_OWNER
+    )
     chunks = retrieval["documents"][0]
 
     # 2. 并发生成两组题目
@@ -202,8 +208,12 @@ async def _run_rag_experiment(config: ABConfig) -> ABResult:
     """RAG 实验：同一 query，对比纯向量 vs Hybrid 检索。"""
     # 1. 并发执行两种检索
     vec_result, hybrid_result = await asyncio.gather(
-        query_document(config.document_id, config.query),
-        hybrid_query_document(config.document_id, config.query),
+        query_document(
+            config.document_id, config.query, owner_id=DEFAULT_DOCUMENT_OWNER
+        ),
+        hybrid_query_document(
+            config.document_id, config.query, owner_id=DEFAULT_DOCUMENT_OWNER
+        ),
     )
     vec_chunks = vec_result["documents"][0]
     hybrid_chunks = hybrid_result["documents"][0]

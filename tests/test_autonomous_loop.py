@@ -110,7 +110,7 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
     async def test_business_tool_then_finalize(self):
         responses = [
             _assistant_msg(tool_calls=[_tool_call("c1", "search_document",
-                                                  '{"document_id": "d", "query": "RAG"}')]),
+                                                  '{"user_id": "u", "document_id": "d", "query": "RAG"}')]),
             _assistant_msg(tool_calls=[_tool_call("c2", "finalize",
                                                   '{"final_answer": "RAG 就是检索增强", "reason": "已获取资料"}')]),
         ]
@@ -246,7 +246,7 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
     async def test_required_grounding_rejects_any_unretrieved_citation_id(self):
         responses = [
             _assistant_msg(tool_calls=[_tool_call(
-                "c1", "search_document", '{"document_id": "d", "query": "RAG"}'
+                "c1", "search_document", '{"user_id": "u", "document_id": "d", "query": "RAG"}'
             )]),
             _assistant_msg(tool_calls=[_tool_call(
                 "c2",
@@ -279,7 +279,7 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
     async def test_optional_grounding_keeps_valid_citations_and_reports_invalid_ids(self):
         responses = [
             _assistant_msg(tool_calls=[_tool_call(
-                "c1", "search_document", '{"document_id": "d", "query": "RAG"}'
+                "c1", "search_document", '{"user_id": "u", "document_id": "d", "query": "RAG"}'
             )]),
             _assistant_msg(tool_calls=[_tool_call(
                 "c2",
@@ -557,7 +557,7 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
     async def test_search_outside_requested_document_is_blocked_before_dispatch(self):
         responses = [
             _assistant_msg(tool_calls=[_tool_call(
-                "c1", "search_document", '{"document_id": "other.md", "query": "RAG"}'
+                "c1", "search_document", '{"user_id": "u", "document_id": "other.md", "query": "RAG"}'
             )]),
             _assistant_msg(tool_calls=[_tool_call(
                 "c2",
@@ -918,7 +918,7 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
                     json.dumps({"final_answer": f"不应公开 {secret}"}),
                 ),
                 _tool_call(
-                    "c2", "search_document", '{"document_id": "d", "query": "q"}'
+                    "c2", "search_document", '{"user_id": "u", "document_id": "d", "query": "q"}'
                 ),
             ]),
             _assistant_msg(tool_calls=[_tool_call(
@@ -1462,7 +1462,7 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
     async def test_continue_preserves_citation_evidence_registry(self):
         first_responses = [
             _assistant_msg(tool_calls=[_tool_call(
-                "c1", "search_document", '{"document_id": "d", "query": "RAG"}'
+                "c1", "search_document", '{"user_id": "u", "document_id": "d", "query": "RAG"}'
             )]),
             _assistant_msg(tool_calls=[_tool_call(
                 "c2", "ask_user", '{"question": "是否继续？"}'
@@ -1515,7 +1515,7 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
         # LLM 每轮都调业务工具，永不 finalize → 跑满 MAX_AUTONOMOUS_ROUNDS + 收尾 call
         loop_resps = [
             _assistant_msg(tool_calls=[_tool_call(f"c{i}", "search_document",
-                                                  '{"document_id": "d", "query": "q"}')])
+                                                  '{"user_id": "u", "document_id": "d", "query": "q"}')])
             for i in range(au.MAX_AUTONOMOUS_ROUNDS)
         ]
         finish_resp = [_assistant_msg(content="基于已有信息的收尾回答")]
@@ -1532,7 +1532,7 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
         secret = "sk-123456789012345678901234"
         loop_responses = [
             _assistant_msg(tool_calls=[_tool_call(
-                f"c{i}", "search_document", '{"document_id": "d", "query": "q"}'
+                f"c{i}", "search_document", '{"user_id": "u", "document_id": "d", "query": "q"}'
             )])
             for i in range(au.MAX_AUTONOMOUS_ROUNDS)
         ]

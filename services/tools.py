@@ -38,9 +38,11 @@ logger = logging.getLogger(__name__)
 # 1. Tool Handler（业务实现，保持 async + 返回 str 的契约）
 # ═══════════════════════════════════════════════════════════════════════════
 
-async def _search_document(document_id: str, query: str) -> str:
+async def _search_document(document_id: str, query: str, user_id: str) -> str:
     # 走统一生产检索入口（含 HyDE/Multi-query 改写），与出题流保持一致。
-    result = await retrieve_with_rewrite(document_id, query)
+    # user_id 由注册表按 owner_argument 对照可信上下文校验过，检索因此
+    # 只可能命中该属主自己的文档。
+    result = await retrieve_with_rewrite(document_id, query, owner_id=user_id)
     chunks = result["documents"][0][:3]    # 避免 token 爆炸
     chunk_ids = result["ids"][0][:3]
     if len(chunks) != len(chunk_ids):
@@ -118,8 +120,8 @@ async def _get_user_profile(
     )
 
 
-async def _get_learning_path(document_id: str) -> str:
-    path = await generate_learning_path(document_id)
+async def _get_learning_path(document_id: str, user_id: str) -> str:
+    path = await generate_learning_path(document_id, owner_id=user_id)
     return path.model_dump_json(ensure_ascii=False)
 
 
@@ -287,10 +289,11 @@ def _register_all() -> None:
         parameters_schema={
             "type": "object",
             "properties": {
+                "user_id": {"type": "string", "description": "用户 ID"},
                 "document_id": {"type": "string", "description": "文档 ID"},
                 "query": {"type": "string", "description": "搜索关键词或问题"},
             },
-            "required": ["document_id", "query"],
+            "required": ["user_id", "document_id", "query"],
         },
         handler=_search_document,
         # 检索：embed + ChromaDB + BM25，应该快。给 20s 应付偶发慢

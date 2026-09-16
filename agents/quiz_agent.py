@@ -34,7 +34,11 @@ logger = logging.getLogger(__name__)
 @traceable(name="quiz_agent.retrieve", run_type="retriever")
 async def retrieve(state: QuizAgentState) -> dict:
     """检索：HyDE / Multi-query 改写（按 env 开关）→ Hybrid（BM25 + 向量 + RRF）→ Reranker。"""
-    result = await retrieve_with_rewrite(state["document_id"], state["description"])
+    # 属主取 state 里的 user_id（由调用方 router 从可信身份写入），
+    # 检索因此只会命中该属主自己的 collection。
+    result = await retrieve_with_rewrite(
+        state["document_id"], state["description"], owner_id=state["user_id"]
+    )
     return {
         "chunks": result["documents"][0],
         "retrieve_count": state.get("retrieve_count", 0) + 1,

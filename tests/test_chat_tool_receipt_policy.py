@@ -97,7 +97,7 @@ class TestChatToolReceiptPolicy(unittest.IsolatedAsyncioTestCase):
                 _tool_call(
                     "read",
                     "search_document",
-                    '{"document_id":"d","query":"q"}',
+                    '{"user_id":"u","document_id":"d","query":"q"}',
                 ),
                 _tool_call(
                     "cross-scope-read",

@@ -106,7 +106,7 @@ def question_views(session: QuizSession) -> list[QuestionView]:
 
 async def prepare_session(req: SessionStartRequest) -> QuizSession:
     """Generate and validate a QuizSession without choosing a storage backend."""
-    await _ensure_document_available(req.document_id)
+    await _ensure_document_available(req.document_id, owner_id=req.user_id)
 
     # 自适应：读取用户画像，计算本次出题参数
     profile = await get_user_profile(req.user_id)

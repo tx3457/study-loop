@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from chromadb.errors import NotFoundError
 
 import services.vectorstore as vectorstore
+from services.vectorstore import DEFAULT_DOCUMENT_OWNER
 
 
 class _BlockingCatalogClient:
@@ -108,7 +109,7 @@ class TestChromaIOBoundary(unittest.IsolatedAsyncioTestCase):
             "to_thread",
             side_effect=AssertionError("Chroma must not use the default executor"),
         ):
-            task = asyncio.create_task(vectorstore.get_all_document())
+            task = asyncio.create_task(vectorstore.get_all_document(owner_id=DEFAULT_DOCUMENT_OWNER))
             ticker = asyncio.create_task(tick_after_worker_starts())
             await asyncio.wait_for(heartbeat.wait(), timeout=2)
             client.release.set()
@@ -130,7 +131,7 @@ class TestChromaIOBoundary(unittest.IsolatedAsyncioTestCase):
             side_effect=AssertionError("Chroma must not use the default executor"),
         ):
             tasks = [
-                asyncio.create_task(vectorstore.get_all_document())
+                asyncio.create_task(vectorstore.get_all_document(owner_id=DEFAULT_DOCUMENT_OWNER))
                 for _ in range(task_count)
             ]
             try:
@@ -182,7 +183,7 @@ class TestChromaIOBoundary(unittest.IsolatedAsyncioTestCase):
                 "to_thread",
                 side_effect=AssertionError("Chroma must not use the default executor"),
             ):
-                task = asyncio.create_task(vectorstore.get_all_document())
+                task = asyncio.create_task(vectorstore.get_all_document(owner_id=DEFAULT_DOCUMENT_OWNER))
                 await asyncio.wait_for(client.started.wait(), timeout=2)
                 task.cancel()
                 task.cancel()  # A second client disconnect must not extend the drain deadline.
@@ -193,7 +194,7 @@ class TestChromaIOBoundary(unittest.IsolatedAsyncioTestCase):
                 # away.  It must be consumed by the worker hand-off, not leak as
                 # an unhandled task exception during loop shutdown.
                 client.release.set()
-                follow_up = await asyncio.wait_for(vectorstore.get_all_document(), timeout=2)
+                follow_up = await asyncio.wait_for(vectorstore.get_all_document(owner_id=DEFAULT_DOCUMENT_OWNER), timeout=2)
                 self.assertEqual(follow_up, [])
         finally:
             loop.set_exception_handler(old_handler)
@@ -210,7 +211,7 @@ class TestChromaIOBoundary(unittest.IsolatedAsyncioTestCase):
             AsyncMock(return_value=embeddings),
         ):
             with self.assertRaises(vectorstore.DocumentAlreadyExistsError):
-                await vectorstore.deal_document("notes.md", "notes.md", ["content"])
+                await vectorstore.deal_document("notes.md", "notes.md", ["content"], owner_id=DEFAULT_DOCUMENT_OWNER)
 
         self.assertIn("notes.md", client.collections)
         self.assertNotIn("notes.md", client.deleted_names)
@@ -224,9 +225,9 @@ class TestChromaIOBoundary(unittest.IsolatedAsyncioTestCase):
             "CHROMA_IO_CANCEL_DRAIN_SECONDS",
             0.05,
         ):
-            active = asyncio.create_task(vectorstore.get_all_document())
+            active = asyncio.create_task(vectorstore.get_all_document(owner_id=DEFAULT_DOCUMENT_OWNER))
             await asyncio.wait_for(client.started.wait(), timeout=2)
-            waiting = asyncio.create_task(vectorstore.get_all_document())
+            waiting = asyncio.create_task(vectorstore.get_all_document(owner_id=DEFAULT_DOCUMENT_OWNER))
             await asyncio.sleep(0)
             waiting.cancel()
             with self.assertRaises(asyncio.CancelledError):
@@ -236,7 +237,7 @@ class TestChromaIOBoundary(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await asyncio.wait_for(active, timeout=2), [])
             # A later public request creates the only second catalog call.  If
             # the cancelled waiter had been submitted early, this would be 3.
-            self.assertEqual(await asyncio.wait_for(vectorstore.get_all_document(), timeout=2), [])
+            self.assertEqual(await asyncio.wait_for(vectorstore.get_all_document(owner_id=DEFAULT_DOCUMENT_OWNER), timeout=2), [])
 
         self.assertEqual(client.calls, 2)
 
@@ -249,12 +250,12 @@ class TestChromaIOBoundary(unittest.IsolatedAsyncioTestCase):
             "CHROMA_IO_OPERATION_TIMEOUT_SECONDS",
             0.05,
         ):
-            task = asyncio.create_task(vectorstore.get_all_document())
+            task = asyncio.create_task(vectorstore.get_all_document(owner_id=DEFAULT_DOCUMENT_OWNER))
             await asyncio.wait_for(client.started.wait(), timeout=2)
             with self.assertRaises(vectorstore.ChromaIOOperationTimeoutError):
                 await asyncio.wait_for(task, timeout=1)
             client.release.set()
-            self.assertEqual(await asyncio.wait_for(vectorstore.get_all_document(), timeout=2), [])
+            self.assertEqual(await asyncio.wait_for(vectorstore.get_all_document(owner_id=DEFAULT_DOCUMENT_OWNER), timeout=2), [])
 
     async def test_readiness_probe_uses_the_same_single_worker_channel(self):
         loop = asyncio.get_running_loop()
@@ -276,7 +277,7 @@ class TestChromaIOBoundary(unittest.IsolatedAsyncioTestCase):
                 loop.call_soon_threadsafe(probe_finished.set)
 
         with patch.object(vectorstore, "chromadb_client", client):
-            active = asyncio.create_task(vectorstore.get_all_document())
+            active = asyncio.create_task(vectorstore.get_all_document(owner_id=DEFAULT_DOCUMENT_OWNER))
             await asyncio.wait_for(client.started.wait(), timeout=2)
             threading.Thread(target=probe_in_thread, daemon=True).start()
             client.release.set()
@@ -316,13 +317,13 @@ class TestChromaIOBoundary(unittest.IsolatedAsyncioTestCase):
             AsyncMock(return_value=embeddings),
         ):
             write = asyncio.create_task(
-                vectorstore.deal_document("notes.md", "notes.md", ["content"])
+                vectorstore.deal_document("notes.md", "notes.md", ["content"], owner_id=DEFAULT_DOCUMENT_OWNER)
             )
             await asyncio.wait_for(add_started.wait(), timeout=2)
             shutdown = asyncio.create_task(vectorstore.shutdown_vectorstore_io())
             await asyncio.sleep(0)
             with self.assertRaises(vectorstore.ChromaIOShuttingDownError):
-                await asyncio.wait_for(vectorstore.get_all_document(), timeout=1)
+                await asyncio.wait_for(vectorstore.get_all_document(owner_id=DEFAULT_DOCUMENT_OWNER), timeout=1)
 
             release_add.set()
             self.assertEqual(await asyncio.wait_for(write, timeout=2), 1)
@@ -333,7 +334,7 @@ class TestChromaIOBoundary(unittest.IsolatedAsyncioTestCase):
         next_client = _BlockingCatalogClient(loop)
         next_client.release.set()
         with patch.object(vectorstore, "chromadb_client", next_client):
-            self.assertEqual(await asyncio.wait_for(vectorstore.get_all_document(), timeout=2), [])
+            self.assertEqual(await asyncio.wait_for(vectorstore.get_all_document(owner_id=DEFAULT_DOCUMENT_OWNER), timeout=2), [])
 
     async def test_shutdown_of_hung_worker_returns_bounded_and_stays_fail_closed(self):
         loop = asyncio.get_running_loop()
@@ -344,11 +345,11 @@ class TestChromaIOBoundary(unittest.IsolatedAsyncioTestCase):
             "CHROMA_IO_SHUTDOWN_DRAIN_SECONDS",
             0.05,
         ):
-            active = asyncio.create_task(vectorstore.get_all_document())
+            active = asyncio.create_task(vectorstore.get_all_document(owner_id=DEFAULT_DOCUMENT_OWNER))
             await asyncio.wait_for(client.started.wait(), timeout=2)
             await asyncio.wait_for(vectorstore.shutdown_vectorstore_io(), timeout=1)
             with self.assertRaises(vectorstore.ChromaIOShuttingDownError):
-                await asyncio.wait_for(vectorstore.get_all_document(), timeout=1)
+                await asyncio.wait_for(vectorstore.get_all_document(owner_id=DEFAULT_DOCUMENT_OWNER), timeout=1)
 
             client.release.set()
             self.assertEqual(await asyncio.wait_for(active, timeout=2), [])
@@ -404,9 +405,9 @@ class TestChromaIOBoundary(unittest.IsolatedAsyncioTestCase):
                 "_acquire_chroma_io_active",
                 gate_active,
             ):
-                active = asyncio.create_task(vectorstore.get_all_document())
+                active = asyncio.create_task(vectorstore.get_all_document(owner_id=DEFAULT_DOCUMENT_OWNER))
                 await asyncio.wait_for(client.started.wait(), timeout=2)
-                old_waiter = asyncio.create_task(vectorstore.get_all_document())
+                old_waiter = asyncio.create_task(vectorstore.get_all_document(owner_id=DEFAULT_DOCUMENT_OWNER))
                 shutdown = asyncio.create_task(vectorstore.shutdown_vectorstore_io())
                 await asyncio.sleep(0)
                 client.release.set()
@@ -418,7 +419,7 @@ class TestChromaIOBoundary(unittest.IsolatedAsyncioTestCase):
                 resume_waiter.set()
                 with self.assertRaises(vectorstore.ChromaIOShuttingDownError):
                     await asyncio.wait_for(old_waiter, timeout=2)
-                self.assertEqual(await asyncio.wait_for(vectorstore.get_all_document(), timeout=2), [])
+                self.assertEqual(await asyncio.wait_for(vectorstore.get_all_document(owner_id=DEFAULT_DOCUMENT_OWNER), timeout=2), [])
 
             self.assertEqual(client.calls, 2)
 
@@ -438,7 +439,7 @@ class TestChromaIOBoundary(unittest.IsolatedAsyncioTestCase):
                 "CHROMA_IO_CANCEL_DRAIN_SECONDS",
                 0.05,
             ):
-                task = asyncio.create_task(vectorstore.get_all_document())
+                task = asyncio.create_task(vectorstore.get_all_document(owner_id=DEFAULT_DOCUMENT_OWNER))
                 await asyncio.wait_for(client.started.wait(), timeout=2)
                 task.cancel()
                 with self.assertRaises(asyncio.CancelledError):
@@ -454,7 +455,7 @@ class TestChromaIOBoundary(unittest.IsolatedAsyncioTestCase):
             next_client = _BlockingCatalogClient(loop)
             next_client.release.set()
             with patch.object(vectorstore, "chromadb_client", next_client):
-                return await vectorstore.get_all_document()
+                return await vectorstore.get_all_document(owner_id=DEFAULT_DOCUMENT_OWNER)
 
         self.assertEqual(asyncio.run(read_in_second_loop()), [])
 
@@ -466,7 +467,7 @@ class TestChromaIOBoundary(unittest.IsolatedAsyncioTestCase):
             client = _BlockingCatalogClient(loop)
             client.release.set()
             with patch.object(vectorstore, "chromadb_client", client):
-                return await vectorstore.get_all_document()
+                return await vectorstore.get_all_document(owner_id=DEFAULT_DOCUMENT_OWNER)
 
         self.assertEqual(asyncio.run(read_once()), [])
         self.assertEqual(asyncio.run(read_once()), [])

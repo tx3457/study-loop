@@ -92,7 +92,7 @@ class TestChatToolLoop(unittest.IsolatedAsyncioTestCase):
     async def test_single_tool_then_finalize(self):
         responses = [
             _assistant_msg(tool_calls=[_tool_call("c1", "search_document",
-                                                  '{"document_id": "d", "query": "q"}')]),
+                                                  '{"user_id": "u", "document_id": "d", "query": "q"}')]),
             _assistant_msg(content="这是基于检索的最终回答"),
         ]
         with patch.object(chat, "_client", _mock_client(responses)), \

@@ -14,6 +14,7 @@ from models.learning_path import (
     LearningPathResource,
 )
 from services.idempotency import IdempotencyConflictError, normalize_idempotency_key
+from services.vectorstore import DEFAULT_DOCUMENT_OWNER
 from services.learning_path import (
     LearningPathEvidenceUnavailableError,
     generate_learning_path,
@@ -92,7 +93,9 @@ async def _find_created_path(
 @router.post("/learning-path/{document_id}", response_model=LearningPath)
 async def create_learning_path(document_id: str):
     try:
-        generated = await generate_learning_path(document_id)
+        generated = await generate_learning_path(
+            document_id, owner_id=DEFAULT_DOCUMENT_OWNER
+        )
         payload = generated.model_dump(mode="python") if isinstance(
             generated, BaseModel
         ) else generated
@@ -137,7 +140,9 @@ async def create_learning_path_resource(
         return _resource(existing)
 
     try:
-        generated = await generate_learning_path(request.document_id)
+        generated = await generate_learning_path(
+            request.document_id, owner_id=DEFAULT_DOCUMENT_OWNER
+        )
         payload = generated.model_dump(mode="python") if isinstance(
             generated, BaseModel
         ) else generated

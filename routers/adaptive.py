@@ -647,6 +647,7 @@ async def _generate_quiz(
         decision.question_type,
         difficulty_score=decision.difficulty_score,
         weak_points=decision.target_weak_points,
+        owner_id=user_id,
     )
     questions = getattr(generated, "questions", None)
     if not isinstance(questions, list):
@@ -673,6 +674,7 @@ async def _generate_lesson(
         document_id=aggregate.document_id,
         topic=decision.topic,
         weak_points=weak_points or [],
+        owner_id=aggregate.user_id,
         last_report=aggregate.last_report,
     )
 
@@ -693,7 +695,7 @@ async def _opening_state(
     history = [_turn_from_decision(1, decision)]
 
     if decision.action == "switch_to_plan":
-        path = await generate_learning_path(req.document_id)
+        path = await generate_learning_path(req.document_id, owner_id=req.user_id)
         artifact = _artifact(
             session_id=session_id,
             turn=1,
@@ -742,6 +744,7 @@ async def _opening_state(
             document_id=req.document_id,
             topic=decision.topic,
             weak_points=decision.target_weak_points or weak_points,
+            owner_id=req.user_id,
             last_report=None,
         )
         artifact = _artifact(
@@ -832,7 +835,7 @@ async def adaptive_start(
             return await _response(record, aggregate.current_artifact)
 
     try:
-        await ensure_document_available(req.document_id)
+        await ensure_document_available(req.document_id, owner_id=req.user_id)
         injection, _reason = await check_injection(req.goal)
         if injection:
             logger.warning("adaptive start input safety check rejected")
@@ -1076,7 +1079,9 @@ async def _next_artifact(
 
     # Explicit planning takes precedence over generic mastery/max-turn exits.
     if decision.action == "switch_to_plan":
-        path = await generate_learning_path(aggregate.document_id)
+        path = await generate_learning_path(
+            aggregate.document_id, owner_id=aggregate.user_id
+        )
         return (
             _artifact(
                 session_id=aggregate.adaptive_session_id,

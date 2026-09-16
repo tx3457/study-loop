@@ -89,12 +89,17 @@ async def extract_brief(document_id: str, user_intent: str = "") -> PathBrief:
 
 
 # ── 阶段 B：explore ──────────────────────────────────────────────────────
-async def explore(document_id: str, brief: PathBrief) -> ExplorationReport:
+async def explore(
+    document_id: str, brief: PathBrief, *, owner_id: str
+) -> ExplorationReport:
     """B 阶段：用 brief.keywords 并行 hybrid 检索，汇总 chunks 并去重。"""
     queries = brief.keywords or [document_id]
     # 并行 RAG sweep
     results = await asyncio.gather(
-        *[hybrid_query_document(document_id, q, n_results=5) for q in queries],
+        *[
+            hybrid_query_document(document_id, q, n_results=5, owner_id=owner_id)
+            for q in queries
+        ],
         return_exceptions=True,
     )
 
@@ -284,13 +289,15 @@ async def generate_learning_path(
     document_id: str,
     user_intent: str = "",
     enable_critique: bool = True,
+    *,
+    owner_id: str,
 ) -> LearningPath:
     """完整流水线入口。enable_critique=False 可关掉 critique-revise（ablation 用）。
 
     pipeline:
       A brief → B explore → C compress → D synthesize → E critique →（不通过则 revise）
     """
-    await ensure_document_available(document_id)
+    await ensure_document_available(document_id, owner_id=owner_id)
     logger.info("[planner] start pipeline")
 
     # A
@@ -298,7 +305,7 @@ async def generate_learning_path(
     logger.info("[planner] brief extracted: keywords=%d", len(brief.keywords))
 
     # B
-    report = await explore(document_id, brief)
+    report = await explore(document_id, brief, owner_id=owner_id)
     logger.info(f"[planner] explored {len(report.chunks)} unique chunks")
 
     # C

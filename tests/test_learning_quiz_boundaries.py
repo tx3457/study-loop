@@ -16,6 +16,7 @@ from pydantic import ValidationError
 
 import routers.session as session_router
 import routers.adaptive as adaptive_router
+from services.vectorstore import DEFAULT_DOCUMENT_OWNER
 import services.grader as grader_service
 import services.learning_path as learning_path
 import services.rag as rag
@@ -78,7 +79,7 @@ class TestLearningPathEvidenceBoundary(unittest.IsolatedAsyncioTestCase):
             patch.object(learning_path, "extract_brief", extract_brief),
         ):
             with self.assertRaises(NotFoundError):
-                await learning_path.generate_learning_path("missing.md")
+                await learning_path.generate_learning_path("missing.md", owner_id=DEFAULT_DOCUMENT_OWNER)
 
         extract_brief.assert_not_awaited()
 
@@ -101,7 +102,7 @@ class TestLearningPathEvidenceBoundary(unittest.IsolatedAsyncioTestCase):
             patch.object(learning_path, "synthesize", synthesize),
         ):
             with self.assertRaises(RuntimeError):
-                await learning_path.generate_learning_path("notes.md")
+                await learning_path.generate_learning_path("notes.md", owner_id=DEFAULT_DOCUMENT_OWNER)
 
         synthesize.assert_not_awaited()
 
@@ -124,7 +125,7 @@ class TestLearningPathEvidenceBoundary(unittest.IsolatedAsyncioTestCase):
             patch.object(learning_path, "synthesize", synthesize),
         ):
             with self.assertRaises(RuntimeError):
-                await learning_path.generate_learning_path("notes.md")
+                await learning_path.generate_learning_path("notes.md", owner_id=DEFAULT_DOCUMENT_OWNER)
 
         synthesize.assert_not_awaited()
 

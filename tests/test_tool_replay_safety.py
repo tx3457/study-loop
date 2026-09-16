@@ -49,7 +49,7 @@ class TestToolReplaySafety(unittest.IsolatedAsyncioTestCase):
             with patch.object(search, "handler", new=search_handler):
                 await tool_registry.invoke(
                     search.name,
-                    {"document_id": "d", "query": "q"},
+                    {"user_id": "u", "document_id": "d", "query": "q"},
                     run_id=read_run,
                     on_before_handler=AsyncMock(),
                 )
@@ -576,7 +576,7 @@ class TestToolReplaySafety(unittest.IsolatedAsyncioTestCase):
             id="search-1",
             function=SimpleNamespace(
                 name="search_document",
-                arguments='{"document_id":"d","query":"q"}',
+                arguments='{"user_id":"u","document_id":"d","query":"q"}',
             ),
         )
 
@@ -644,7 +644,7 @@ class TestToolReplaySafety(unittest.IsolatedAsyncioTestCase):
             id="search-barrier",
             function=SimpleNamespace(
                 name="search_document",
-                arguments='{"document_id":"d","query":"q"}',
+                arguments='{"user_id":"u","document_id":"d","query":"q"}',
             ),
         )
         client = MagicMock()
@@ -725,7 +725,7 @@ class TestToolReplaySafety(unittest.IsolatedAsyncioTestCase):
             id="valid-read",
             function=SimpleNamespace(
                 name="search_document",
-                arguments='{"document_id":"d","query":"q"}',
+                arguments='{"user_id":"u","document_id":"d","query":"q"}',
             ),
         )
         client = MagicMock()
@@ -895,7 +895,7 @@ class TestToolReplaySafety(unittest.IsolatedAsyncioTestCase):
             ), patch("services.retry.random.uniform", return_value=0):
                 result = await tool_registry.invoke(
                     "search_document",
-                    {"document_id": "d", "query": "q"},
+                    {"user_id": "u", "document_id": "d", "query": "q"},
                 )
 
             self.assertEqual(result, '{"chunks":[]}')

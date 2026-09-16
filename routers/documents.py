@@ -15,6 +15,7 @@ from models.quiz import Quiz
 from services.chunker import default_chunker
 from services.parser import DocumentParseError, UnsupportedFileError, parse_upload
 from services.vectorstore import (
+    DEFAULT_DOCUMENT_OWNER,
     DocumentAlreadyExistsError,
     deal_document,
     delete_document,
@@ -101,7 +102,9 @@ async def upload_document(file: UploadFile = File(...)):
         )
 
     try:
-        chunk_count = await deal_document(filename, filename, chunk_texts)
+        chunk_count = await deal_document(
+            filename, filename, chunk_texts, owner_id=DEFAULT_DOCUMENT_OWNER
+        )
     except DocumentAlreadyExistsError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e
     except ChromaError as e:
@@ -121,7 +124,7 @@ async def upload_document(file: UploadFile = File(...)):
 @router.get("/documents")
 async def get_documents():
     try:
-        collections = await get_all_document()
+        collections = await get_all_document(owner_id=DEFAULT_DOCUMENT_OWNER)
     except ChromaError as e:
         logger.error(
             "文档列表读取失败: error_type=%s",
@@ -142,7 +145,7 @@ async def get_documents():
 @router.delete("/documents/{document_id}")
 async def delete_document_by_id(document_id: str):
     try:
-        status = await delete_document(document_id)
+        status = await delete_document(document_id, owner_id=DEFAULT_DOCUMENT_OWNER)
     except NotFoundError as e:
         # Includes attempts to address a Unicode document through its internal
         # collection alias rather than the public filename.

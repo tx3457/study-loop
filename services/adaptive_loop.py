@@ -206,12 +206,15 @@ async def generate_lesson(
     document_id: str,
     topic: str,
     weak_points: list[str],
+    owner_id: str,
     last_report: Optional[GradingReport] = None,
     client: Optional[AsyncOpenAI] = None,
 ) -> str:
     """teach 动作的内容:检索该知识点材料 → LLM 生成纯讲解。失败返回降级文本(不中断闭环)。"""
     try:
-        result = await retrieve_with_rewrite(document_id, topic, n_results=4)
+        result = await retrieve_with_rewrite(
+            document_id, topic, n_results=4, owner_id=owner_id
+        )
         chunks = result.get("documents", [[]])[0] or []
     except Exception as e:
         logger.warning(
