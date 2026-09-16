@@ -1,34 +1,35 @@
 fastapi==0.122.0
 uvicorn==0.38.0
-python-dotenv==1.1.0
-python-multipart==0.0.20
+python-dotenv==1.2.2
+python-multipart==0.0.31
 pydantic==2.12.3
 openai==2.30.0
-chromadb==1.5.5
-langgraph==1.1.3
-langchain==1.2.13
-langchain-core==1.2.23
-langchain-openai==1.1.12
+chromadb==1.5.9
+langgraph==1.2.11
+langchain==1.3.9
+langchain-core==1.6.3
+langchain-openai==1.1.14
 langchain-community==0.4.1
 langchain-experimental==0.4.1
-langchain-text-splitters==1.1.1
-langsmith==0.7.22
+langchain-text-splitters==1.1.2
+langsmith==0.8.18
 langfuse==4.3.1
 rank-bm25==0.2.2
 psycopg[binary]==3.2.9
-langgraph-checkpoint-postgres==2.0.22
+langgraph-checkpoint-postgres==3.1.1
 
 # Document parsing and OCR
-pypdf==5.1.0
+pypdf==6.16.1
 docx2txt==0.8
 pytesseract==0.3.13
-Pillow==11.0.0
+Pillow==12.3.0
 pdf2image==1.17.0   # 扫描型 PDF fallback（系统需 apt install poppler-utils）
 
 # Optional MCP clients for external tools
 mcp>=1.0.0
 
 # LangGraph SQLite checkpointer for interrupt/resume
-langgraph-checkpoint-sqlite==2.0.11
-# checkpoint-sqlite 2.x relies on Connection.is_alive, removed in aiosqlite 0.22.
-aiosqlite==0.21.0
+langgraph-checkpoint-sqlite==3.1.1
+# checkpoint-sqlite 3.x no longer needs Connection.is_alive, so the 0.21 ceiling
+# that 2.x required is gone; 0.22 is verified against the interrupt/resume tests.
+aiosqlite==0.22.1
