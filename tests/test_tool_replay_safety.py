@@ -51,6 +51,7 @@ class TestToolReplaySafety(unittest.IsolatedAsyncioTestCase):
                     search.name,
                     {"user_id": "u", "document_id": "d", "query": "q"},
                     run_id=read_run,
+                    user_id="u",
                     on_before_handler=AsyncMock(),
                 )
 
@@ -742,6 +743,9 @@ class TestToolReplaySafety(unittest.IsolatedAsyncioTestCase):
                 tools=[tool.to_openai_schema()],
                 client=client,
                 on_before_tool_dispatch=progress_barrier,
+                # search_document 绑定了属主，注册表要拿它比对可信上下文；
+                # 不传等同于「没有身份」，调用会在到 handler 之前就被拒。
+                user_id="u",
             )
 
         self.assertEqual(order, ["progress", "handler"])
@@ -896,6 +900,7 @@ class TestToolReplaySafety(unittest.IsolatedAsyncioTestCase):
                 result = await tool_registry.invoke(
                     "search_document",
                     {"user_id": "u", "document_id": "d", "query": "q"},
+                    user_id="u",
                 )
 
             self.assertEqual(result, '{"chunks":[]}')

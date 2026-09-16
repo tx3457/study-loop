@@ -261,22 +261,19 @@ export async function getUserSessions(userId = 'default_user') {
   return request(`/user/${encodeURIComponent(userId)}/sessions`)
 }
 
-/** 错题本 */
-export async function getWrongQuestions(documentId, userId = 'default_user') {
-  const query = new URLSearchParams({ user_id: userId })
-  return request(`/wrong-questions/${encodeURIComponent(documentId)}?${query}`)
+/** 错题本。身份由后端从 Authorization 头解析，这里不再自报 user_id。 */
+export async function getWrongQuestions(documentId) {
+  return request(`/wrong-questions/${encodeURIComponent(documentId)}`)
 }
 
 /** 用当前文档的持久错题创建一轮重练会话 */
 export async function startWrongQuestionPractice(
   documentId,
-  userId = 'default_user',
   idempotencyKey,
   { signal } = {},
 ) {
-  const query = new URLSearchParams({ user_id: userId })
   return request(
-    `/wrong-questions/${encodeURIComponent(documentId)}/practice?${query}`,
+    `/wrong-questions/${encodeURIComponent(documentId)}/practice`,
     {
       method: 'POST',
       signal,

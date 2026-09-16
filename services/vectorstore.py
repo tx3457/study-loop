@@ -801,28 +801,30 @@ _bm25_document_versions: dict[str, int] = {}
 
 
 # 下面三个 helper 都不自带加锁，调用方必须已持有 _bm25_cache_lock。
-def _bm25_cache_take(document_id: str) -> dict | None:
+# 参数是 _storage_document_id 的结果，不是公开 document_id——传错不会报错，
+# 只会让缓存失效不掉，继续吐已经删掉的正文，所以参数名写成 cache_key。
+def _bm25_cache_take(cache_key: str) -> dict | None:
     """读一条并标记为最近使用（LRU）。"""
-    entry = _bm25_cache.get(document_id)
+    entry = _bm25_cache.get(cache_key)
     if entry is not None:
-        _bm25_cache.move_to_end(document_id)
+        _bm25_cache.move_to_end(cache_key)
     return entry
 
 
-def _bm25_cache_drop(document_id: str) -> None:
+def _bm25_cache_drop(cache_key: str) -> None:
     """删一条并扣减字符计数。"""
     global _bm25_cached_chars
-    entry = _bm25_cache.pop(document_id, None)
+    entry = _bm25_cache.pop(cache_key, None)
     if entry is not None:
         # 不用 .get(..., 0) 兜底：计数一旦漂移，限额会静默失效且不报任何错。
         _bm25_cached_chars -= entry["cached_chars"]
 
 
-def _bm25_cache_store(document_id: str, entry: dict) -> None:
+def _bm25_cache_store(cache_key: str, entry: dict) -> None:
     """写入一条，必要时按 LRU 淘汰到预算以内。"""
     global _bm25_cached_chars
-    _bm25_cache_drop(document_id)          # 同键覆盖也要先扣旧值
-    _bm25_cache[document_id] = entry
+    _bm25_cache_drop(cache_key)            # 同键覆盖也要先扣旧值
+    _bm25_cache[cache_key] = entry
     _bm25_cached_chars += entry["cached_chars"]
     # 留住至少一条：单个文档超过整个预算时，反复重建索引比多占一份内存更糟。
     # 内存上界因此是「预算 + 一个文档」，仍然有界。

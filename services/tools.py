@@ -303,6 +303,7 @@ def _register_all() -> None:
             timeout_sec=20.0,
             max_retries=2,
             effect_mode=EffectMode.READ_ONLY,
+            owner_argument="user_id",
         ),
     ))
 
@@ -315,6 +316,7 @@ def _register_all() -> None:
         parameters_schema={
             "type": "object",
             "properties": {
+                "user_id": {"type": "string", "description": "用户 ID"},
                 "document_id": {"type": "string", "description": "文档 ID"},
                 "topic": {
                     "type": "string",
@@ -380,9 +382,10 @@ def _register_all() -> None:
         parameters_schema={
             "type": "object",
             "properties": {
+                "user_id": {"type": "string", "description": "用户 ID"},
                 "document_id": {"type": "string", "description": "文档 ID"},
             },
-            "required": ["document_id"],
+            "required": ["user_id", "document_id"],
         },
         handler=_get_learning_path,
         # 全文 LLM 规划，最慢
@@ -390,6 +393,7 @@ def _register_all() -> None:
             timeout_sec=90.0,
             max_retries=1,
             effect_mode=EffectMode.READ_ONLY,
+            owner_argument="user_id",
         ),
     ))
 

@@ -597,7 +597,6 @@ export default function Quiz() {
           })
         : await startWrongQuestionPractice(
             record.intent.request.document_id,
-            record.intent.request.user_id,
             record.start_idempotency_key,
             { signal },
           )

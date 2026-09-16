@@ -113,5 +113,59 @@ class TestNoCallSiteOmitsTheOwner(unittest.TestCase):
         )
 
 
+class TestToolSchemaMatchesItsHandler(unittest.TestCase):
+    """注册表按模型给的参数字典调 handler，两边对不上就是运行时错误。
+
+    这一类同样躲得过单测：用例大多直接调 handler，绕开了 schema。
+    `generate_quiz` 的 required 里写了 user_id 却没写进 properties，
+    `get_learning_path` 的 handler 加了 user_id 而 schema 原封不动，
+    两个都是这么溜过去的。
+    """
+
+    def _tools(self):
+        import services.tools  # noqa: F401  触发注册
+        from services.tool_registry import tool_registry
+        return tool_registry
+
+    def test_every_handler_argument_is_reachable_from_its_schema(self):
+        registry = self._tools()
+        problems = []
+        for name in registry.list_tools():
+            tool = registry.get(name)
+            schema = tool.parameters_schema or {}
+            properties = set((schema.get("properties") or {}).keys())
+            required = set(schema.get("required") or [])
+            params = inspect.signature(tool.handler).parameters
+            if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+                continue
+            handler_required = {
+                n for n, p in params.items()
+                if p.default is inspect.Parameter.empty
+                and p.kind in (p.POSITIONAL_OR_KEYWORD, p.KEYWORD_ONLY)
+            }
+            for missing in sorted(handler_required - properties):
+                problems.append(f"{name}: handler 要 {missing}，schema 里没有这个属性")
+            for missing in sorted(handler_required - required):
+                problems.append(f"{name}: handler 必填 {missing}，schema 未列入 required")
+            for extra in sorted(properties - set(params)):
+                problems.append(f"{name}: schema 声明了 {extra}，handler 不接受")
+        self.assertEqual(problems, [], "\n" + "\n".join(problems))
+
+    def test_tools_that_touch_user_data_bind_an_owner(self):
+        """会读写用户数据的工具必须声明 owner_argument，由注册表比对可信上下文。"""
+        registry = self._tools()
+        for name in (
+            "search_document", "generate_quiz", "get_learning_path",
+            "get_user_profile", "update_learning_profile",
+        ):
+            with self.subTest(tool=name):
+                tool = registry.get(name)
+                self.assertIsNotNone(tool, f"{name} 未注册")
+                self.assertEqual(
+                    tool.metadata.owner_argument, "user_id",
+                    f"{name} 没有绑定属主，模型可以替别人读写",
+                )
+
+
 if __name__ == "__main__":
     unittest.main()
