@@ -19,10 +19,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
 def _accepts(fn, keyword: str) -> bool:
-    params = inspect.signature(fn).parameters
-    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
-        return True
-    return keyword in params
+    """**kwargs 不算接受。它会静默吞掉拼错的关键字，而这个契约要挡的正是
+    签名漂移——被调方必须显式声明每一个调用点传的参数，否则下面的断言会
+    在被调方加上 **kwargs 的那天起变成空转。"""
+    return keyword in inspect.signature(fn).parameters
 
 
 class TestLessonCallContract(unittest.TestCase):

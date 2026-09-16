@@ -23,12 +23,12 @@ import services.mcp_servers as ms
 
 
 class TestMcpLiveEnabled(unittest.TestCase):
-    def test_default_false(self):
+    def test_live_mcp_stays_off_without_the_env_flag(self):
         env = {k: v for k, v in os.environ.items() if k != "MCP_LIVE_ENABLED"}
         with patch.dict(os.environ, env, clear=True):
             self.assertFalse(ms.mcp_live_enabled())
 
-    def test_true(self):
+    def test_live_mcp_turns_on_when_the_env_flag_is_true(self):
         with patch.dict(os.environ, {"MCP_LIVE_ENABLED": "true"}):
             self.assertTrue(ms.mcp_live_enabled())
 

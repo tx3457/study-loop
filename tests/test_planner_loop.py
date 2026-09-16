@@ -83,10 +83,20 @@ class TestGraphTopology(unittest.TestCase):
         expected = {"extract_brief", "explore", "compress", "synthesize", "critique", "path_reviser"}
         self.assertTrue(expected.issubset(nodes), f"missing nodes: {expected - nodes}")
 
-    def test_old_planner_agent_callable_still_exists(self):
-        """planner_agent 是 adapter 函数,向后兼容 orchestrator.add_node 调用方式"""
+    def test_planner_agent_keeps_the_single_state_node_signature(self):
+        """planner_agent 是 orchestrator.add_node 的节点入口。add_node 只传一个
+        state，且图编译不校验签名,参数个数一旦变化要到运行期才炸。"""
+        import inspect
+
         from agents.planner_agent import planner_agent
-        self.assertTrue(callable(planner_agent))
+        self.assertTrue(inspect.iscoroutinefunction(planner_agent))
+        required = [
+            name
+            for name, p in inspect.signature(planner_agent).parameters.items()
+            if p.default is inspect.Parameter.empty
+            and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)
+        ]
+        self.assertEqual(required, ["state"])
 
 
 class TestRouteAfterCritique(unittest.TestCase):
