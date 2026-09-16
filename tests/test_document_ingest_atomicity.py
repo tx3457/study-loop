@@ -94,7 +94,7 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
         write_error = RuntimeError("index write failed")
         staging.add.side_effect = write_error
         client.create_collection.return_value = staging
-        vectorstore._bm25_cache["notes.md"] = {"existing": True}
+        vectorstore._bm25_cache["notes.md"] = {"existing": True, "cached_chars": 0}
 
         with patch.object(vectorstore, "chromadb_client", client), \
              patch.object(vectorstore, "_embed", AsyncMock(
@@ -328,7 +328,7 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
 
         collection.modify.side_effect = update_metadata
         client.get_collection.return_value = collection
-        vectorstore._bm25_cache["notes.md"] = {"cached": True}
+        vectorstore._bm25_cache["notes.md"] = {"cached": True, "cached_chars": 0}
 
         with patch.object(vectorstore, "chromadb_client", client):
             collection.delete.side_effect = RuntimeError("storage down")

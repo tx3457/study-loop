@@ -9,6 +9,7 @@ import re
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 
 import chromadb
@@ -758,10 +759,49 @@ async def deal_document(document_id: str, filename: str, chunks: list[str]):
 
 
 # ── BM25 索引缓存(按 document_id),避免每次查询全量 collection.get + 重建索引 ──────
-_bm25_cache: dict[str, dict] = {}
+# 每条缓存持有该文档的全部 chunk 正文和 BM25 索引，且只在文档更新/删除时失效。
+# 没有上限时，进程内存随「查询过多少个不同文档」单调增长，永远不回落。
+#
+# 限额按缓存正文的总字符数，不按条目数：一个大文档抵得上几百个小文档，
+# 按条目数封不住内存。单条上界由上传大小限制决定。
+_BM25_CACHE_MAX_CHARS = max(100_000, int(os.getenv("BM25_CACHE_MAX_CHARS", "5000000")))
+_bm25_cache: "OrderedDict[str, dict]" = OrderedDict()
+_bm25_cached_chars = 0
 _bm25_cache_lock = threading.Lock()
 _bm25_cache_epoch = 0
 _bm25_document_versions: dict[str, int] = {}
+
+
+# 下面三个 helper 都不自带加锁，调用方必须已持有 _bm25_cache_lock。
+def _bm25_cache_take(document_id: str) -> dict | None:
+    """读一条并标记为最近使用（LRU）。"""
+    entry = _bm25_cache.get(document_id)
+    if entry is not None:
+        _bm25_cache.move_to_end(document_id)
+    return entry
+
+
+def _bm25_cache_drop(document_id: str) -> None:
+    """删一条并扣减字符计数。"""
+    global _bm25_cached_chars
+    entry = _bm25_cache.pop(document_id, None)
+    if entry is not None:
+        # 不用 .get(..., 0) 兜底：计数一旦漂移，限额会静默失效且不报任何错。
+        _bm25_cached_chars -= entry["cached_chars"]
+
+
+def _bm25_cache_store(document_id: str, entry: dict) -> None:
+    """写入一条，必要时按 LRU 淘汰到预算以内。"""
+    global _bm25_cached_chars
+    _bm25_cache_drop(document_id)          # 同键覆盖也要先扣旧值
+    _bm25_cache[document_id] = entry
+    _bm25_cached_chars += entry["cached_chars"]
+    # 留住至少一条：单个文档超过整个预算时，反复重建索引比多占一份内存更糟。
+    # 内存上界因此是「预算 + 一个文档」，仍然有界。
+    while len(_bm25_cache) > 1 and _bm25_cached_chars > _BM25_CACHE_MAX_CHARS:
+        evicted_id, evicted = _bm25_cache.popitem(last=False)
+        _bm25_cached_chars -= evicted["cached_chars"]
+        logger.debug("[bm25_cache] evicted %s to stay within budget", evicted_id)
 
 
 def _invalidate_bm25_cache(document_id: str) -> None:
@@ -770,7 +810,7 @@ def _invalidate_bm25_cache(document_id: str) -> None:
         _bm25_document_versions[document_id] = (
             _bm25_document_versions.get(document_id, 0) + 1
         )
-        _bm25_cache.pop(document_id, None)
+        _bm25_cache_drop(document_id)
 
 
 def _get_or_build_bm25_index_sync(
@@ -782,7 +822,7 @@ def _get_or_build_bm25_index_sync(
 ) -> dict:
     """Single-flight corpus read/build/publish on the bounded storage worker."""
     with _bm25_cache_lock:
-        cached = _bm25_cache.get(document_id)
+        cached = _bm25_cache_take(document_id)
         if cached is not None:
             return cached
     all_results = collection.get(include=["documents"])
@@ -796,6 +836,7 @@ def _get_or_build_bm25_index_sync(
         "all_docs": all_docs,
         "all_ids": all_ids,
         "tokenizer_id": BM25_TOKENIZER_ID,
+        "cached_chars": sum(len(doc) for doc in all_docs),
     }
     current = chromadb_client.get_collection(name=_storage_document_id(document_id))
     _require_public_document_owner(current, document_id)
@@ -809,7 +850,7 @@ def _get_or_build_bm25_index_sync(
             or document_version != _bm25_document_versions.get(document_id, 0)
         ):
             raise NotFoundError(f"Document {document_id!r} not found")
-        _bm25_cache[document_id] = entry
+        _bm25_cache_store(document_id, entry)
     return entry
 
 
@@ -820,7 +861,7 @@ async def _get_bm25_index(collection, document_id: str) -> dict:
     分词由 services.tokenization 统一提供，确保索引和查询使用同一规则。
     """
     with _bm25_cache_lock:
-        cached = _bm25_cache.get(document_id)
+        cached = _bm25_cache_take(document_id)
         cache_epoch = _bm25_cache_epoch
         document_version = _bm25_document_versions.get(document_id, 0)
         if cached is not None:
@@ -840,10 +881,11 @@ async def _get_bm25_index(collection, document_id: str) -> dict:
 
 def clear_bm25_cache() -> None:
     """清空 BM25 缓存（测试用 / 手动失效）。"""
-    global _bm25_cache_epoch
+    global _bm25_cache_epoch, _bm25_cached_chars
     with _bm25_cache_lock:
         _bm25_cache_epoch += 1
         _bm25_cache.clear()
+        _bm25_cached_chars = 0
 
 
 async def query_document(document_id: str, query: str):
