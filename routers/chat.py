@@ -6,7 +6,7 @@ from fastapi.responses import StreamingResponse
 
 from models.chat import ChatRequest, HistoryRequest, ToolChatRequest, ToolChatResponse
 from services.auth import require_user_id
-from services.llm import _client as _client, chat, chat_structured, chat_stream, chat_history
+from services.llm import _client as _client, chat_stream, chat_history
 from services.compression import compress_chat_history, COMPRESS_THRESHOLD
 from services.tools import (
     get_read_only_tool_capabilities,
@@ -29,14 +29,6 @@ conversations: dict[str, list] = {}
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-
-@router.post("/chat")
-async def llm_service(request:ChatRequest):
-    return await chat(request.message)
-
-@router.post("/chat/structured")
-async def llm_service_structured(request:ChatRequest):
-    return await chat_structured(request.message)
 
 @router.post("/chat/stream")
 async def llm_service_stream(request:ChatRequest):

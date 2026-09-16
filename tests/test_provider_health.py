@@ -443,9 +443,6 @@ from main import app
 with TestClient(app, raise_server_exceptions=False) as client:
     assert client.get("/health/live").status_code == 200
     assert client.get("/health/providers").status_code == 503
-    response = client.post("/chat", json={"message": "hello"})
-    assert response.status_code == 503, response.text
-    assert response.json()["detail"] == "模型服务尚未正确配置"
     stream_response = client.post("/chat/stream", json={"message": "hello"})
     assert stream_response.status_code == 503, stream_response.text
     assert stream_response.json()["detail"] == "模型服务尚未正确配置"

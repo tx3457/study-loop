@@ -2,8 +2,6 @@ from typing import Optional
 
 from openai import AsyncOpenAI
 
-from models.chat import ChatResponse, StructuredResponse
-
 from services.provider_config import (
     PROVIDER_REQUEST_DEADLINE_SECONDS,
     build_managed_async_openai,
@@ -100,22 +98,6 @@ async def llm_parse(
         ),
         total_timeout=total_timeout,
     )
-
-
-async def chat(message: str):
-    response = await llm_chat([{"role": "user", "content": message}])
-    return ChatResponse(
-        response=response.choices[0].message.content,
-        usage=response.usage.model_dump(),
-    )
-
-
-async def chat_structured(message: str):
-    response = await llm_parse(
-        [{"role": "user", "content": message}],
-        response_format=StructuredResponse,
-    )
-    return response.choices[0].message.parsed
 
 
 async def chat_stream(message: str):

@@ -3,18 +3,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 class ChatRequest(BaseModel):
     message: str
 
-class ChatResponse(BaseModel):
-    response: str
-    usage: dict
-
-class CodeIssue(BaseModel):
-    severity: str
-    description: str
-    fix: str
-
-class StructuredResponse(BaseModel):
-    issues: list[CodeIssue]
-
 class HistoryRequest(BaseModel):
     conversation_id: str
     message: str
