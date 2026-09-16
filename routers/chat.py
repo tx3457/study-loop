@@ -1,10 +1,11 @@
 import logging
 import uuid
 
-from fastapi import APIRouter, Header
+from fastapi import Depends, APIRouter, Header
 from fastapi.responses import StreamingResponse
 
 from models.chat import ChatRequest, HistoryRequest, ToolChatRequest, ToolChatResponse
+from services.auth import require_user_id
 from services.llm import _client as _client, chat, chat_structured, chat_stream, chat_history
 from services.compression import compress_chat_history, COMPRESS_THRESHOLD
 from services.tools import (
@@ -215,8 +216,11 @@ async def chat_with_tools(
     idempotency_key: str | None = Header(
         default=None, alias="Idempotency-Key"
     ),
+    subject: str = Depends(require_user_id),
 ) -> ToolChatResponse:
     """Run read-only tool chat, enabling stateful tools with a durable receipt."""
+    # 请求体里自报的 user_id 不作数：身份只来自 Authorization 头解析出的主体。
+    req.user_id = subject
     key = normalize_idempotency_key(idempotency_key)
     receipt_lease = None
     if key:

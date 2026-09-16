@@ -6,9 +6,10 @@ POST /agent/run  →  根据 action 路由到对应 Agent 流水线：
   action="grade" → GraderAgent(AI批改) → AdaptAgent(写回画像)
   action="plan"  → PlannerAgent(学习路径)
 """
-from fastapi import APIRouter, HTTPException
+from fastapi import Depends, APIRouter, HTTPException
 from pydantic import BaseModel
 from agents.orchestrator import orchestrator
+from services.auth import require_user_id
 from services.tracing import build_trace_config
 
 router = APIRouter(prefix="/agent", tags=["agent"])
@@ -26,7 +27,7 @@ class RunRequest(BaseModel):
 
 
 @router.post("/run")
-async def run_agent(req: RunRequest):
+async def run_agent(req: RunRequest, subject: str = Depends(require_user_id)):
     """Multi-Agent 编排入口。
 
     Quiz 流（action='quiz'）：
@@ -41,6 +42,8 @@ async def run_agent(req: RunRequest):
     Plan 流（action='plan'）：
       PlannerAgent 读取文档全量内容，生成分阶段学习路径。
     """
+    # 请求体里自报的 user_id 不作数：身份只来自 Authorization 头解析出的主体。
+    req.user_id = subject
     if req.action == "grade" and not req.session_id:
         raise HTTPException(status_code=422, detail="grade action requires session_id")
 

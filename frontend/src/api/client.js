@@ -7,6 +7,37 @@
 
 const BASE_URL = import.meta.env.VITE_API_URL || '/api'
 const REQUEST_ID_PATTERN = /^req_[0-9a-f]{32}$/
+const TOKEN_KEY = 'studyloop.auth.token'
+
+// 后端设置 STUDYLOOP_AUTH_TOKEN 后，所有业务端点都要求 Bearer 令牌。
+// 没配置时后端是匿名模式，这里读不到令牌就什么都不加，行为不变。
+export function readAuthToken() {
+  try {
+    return globalThis.localStorage?.getItem(TOKEN_KEY) || ''
+  } catch {
+    // 隐私模式下 localStorage 不可读：当作没配置，请求照发，由后端决定放不放行。
+    return ''
+  }
+}
+
+export function writeAuthToken(token) {
+  try {
+    const value = (token || '').trim()
+    if (value) globalThis.localStorage?.setItem(TOKEN_KEY, value)
+    else globalThis.localStorage?.removeItem(TOKEN_KEY)
+  } catch {
+    // 隐私模式下写不进去：本次会话内仍可请求，只是刷新后要重填。
+  }
+}
+
+function withAuth(options = {}) {
+  const token = readAuthToken()
+  if (!token) return options
+  return {
+    ...options,
+    headers: { ...(options.headers || {}), Authorization: `Bearer ${token}` },
+  }
+}
 
 function responseRequestId(response, body = null) {
   const headerValue = response?.headers?.get?.('X-Request-ID')
@@ -65,7 +96,7 @@ export function isTerminalExecutionError(error) {
  * 通用请求封装，自动处理错误
  */
 async function request(path, options = {}) {
-  const res = await fetch(`${BASE_URL}${path}`, options)
+  const res = await fetch(`${BASE_URL}${path}`, withAuth(options))
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
@@ -383,11 +414,13 @@ export async function submitAdaptive({
  * @returns {Promise} resolve on done, reject on error
  */
 export async function streamAgent(params, onEvent) {
-  const res = await fetch(`${BASE_URL}/agent/stream`, {
+  // SSE 走裸 fetch（需要 ReadableStream），不经过 request()，
+  // 所以必须自己带上令牌——漏掉就会在启用认证后 401。
+  const res = await fetch(`${BASE_URL}/agent/stream`, withAuth({
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params),
-  })
+  }))
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))

@@ -6,7 +6,7 @@ Supervisor-based MAS guided 辅导实验端点（Lab）
             → [Command(resume=answers)] → grader → supervisor 决策下一轮 / finish
 
 两段式 HTTP（HITL：用 LangGraph interrupt + checkpointer 持久化中断点，跨请求 thread_id 续跑）：
-  POST /agent/tutor/start  {user_id, document_id, goal}
+  POST /agent/tutor/start  {document_id, goal}   身份取自 Authorization 头
       → 跑到 wait_for_answers interrupt 暂停 → {thread_id, quiz, awaiting_answers, turn, supervisor_reason}
   POST /agent/tutor/submit {thread_id, quiz_session_id, answers}
       → Command(resume=answers) 续跑 grader→supervisor→下一轮(下一个 interrupt) 或 finish
@@ -21,7 +21,9 @@ import logging
 import uuid
 from weakref import WeakValueDictionary
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+
+from services.auth import require_user_id
 from langgraph.types import Command
 from pydantic import BaseModel, Field, field_validator
 
@@ -44,7 +46,6 @@ _SUBMIT_LOCKS: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
 # 请求 / 响应模型
 # ═══════════════════════════════════════════════════════════════════════════
 class TutorStartRequest(BaseModel):
-    user_id: str = Field(default="default", description="用户 ID")
     document_id: str = Field(..., description="已建库的文档 ID")
     goal: str = Field(..., description="学习目标 / 主题")
 
@@ -81,7 +82,6 @@ class TutorSubmitRequest(BaseModel):
 class TutorOneshotRequest(BaseModel):
     """oneshot 单跳请求：action 明确，supervisor 单跳到对应 worker → finish。"""
     action: str = Field(default="quiz", description="quiz / grade / plan")
-    user_id: str = Field(default="default", description="用户 ID")
     document_id: str = Field(..., description="已建库的文档 ID")
     description: str = Field(default="", description="出题主题 / 学习目标（quiz/plan 用）")
     count: int = Field(default=3, ge=1, le=10, description="题目数量（quiz 用）")
@@ -103,7 +103,6 @@ class TutorOneshotResponse(BaseModel):
 class TutorAssistRequest(BaseModel):
     """assist 自由问答请求：supervisor 路由到 assistant ReAct worker。"""
     query: str = Field(..., description="用户自然语言问题 / 学习目标")
-    user_id: str = Field(default="default", description="用户 ID")
     document_id: str | None = Field(default=None, description="可选文档 ID")
 
 
@@ -173,17 +172,19 @@ async def _mastery_of(user_id: str, document_id: str) -> float | None:
 # 端点
 # ═══════════════════════════════════════════════════════════════════════════
 @router.post("/agent/tutor/start", response_model=TutorTurnResponse)
-async def tutor_start(req: TutorStartRequest) -> TutorTurnResponse:
+async def tutor_start(
+    req: TutorStartRequest, user_id: str = Depends(require_user_id)
+) -> TutorTurnResponse:
     """开启一个 supervisor 辅导会话：跑到首个 wait_for_answers interrupt 暂停，回题目等作答。"""
     _require_enabled()
-    thread_id = f"{req.user_id}:{req.document_id}:{uuid.uuid4().hex[:12]}"
+    thread_id = f"{user_id}:{req.document_id}:{uuid.uuid4().hex[:12]}"
     config = {"configurable": {"thread_id": thread_id}}
     # 跨会话记忆：开场即读"欢迎回来"上下文（注入 init_state 供 supervisor，并回传前端）
-    returning_context = await build_returning_context(req.user_id, req.document_id)
+    returning_context = await build_returning_context(user_id, req.document_id)
     welcome_back = returning_context.get("welcome_msg", "") if returning_context.get("is_returning") else ""
     init_state = {
         "thread_id": thread_id,
-        "user_id": req.user_id,
+        "user_id": user_id,
         "document_id": req.document_id,
         "goal": req.goal,
         "description": req.goal,
@@ -221,7 +222,7 @@ async def tutor_start(req: TutorStartRequest) -> TutorTurnResponse:
         lesson=result.get("lesson"),
         supervisor_reason=result.get("supervisor_reason", ""),
         terminate_reason=result.get("terminate_reason", ""),
-        mastery=await _mastery_of(req.user_id, req.document_id),
+        mastery=await _mastery_of(user_id, req.document_id),
         history=result.get("history", []) or [],
         returning_context=returning_context,
         welcome_back=welcome_back,
@@ -309,7 +310,9 @@ async def tutor_submit(req: TutorSubmitRequest) -> TutorTurnResponse:
 
 
 @router.post("/agent/tutor/oneshot", response_model=TutorOneshotResponse)
-async def tutor_oneshot(req: TutorOneshotRequest) -> TutorOneshotResponse:
+async def tutor_oneshot(
+    req: TutorOneshotRequest, user_id: str = Depends(require_user_id)
+) -> TutorOneshotResponse:
     """oneshot 单跳端点：supervisor 按 action 单跳到对应 worker → finish。
 
     与 start/submit 不同：mode="oneshot" 不进 guided 循环、不 interrupt，一次 ainvoke 跑到收尾。
@@ -321,7 +324,7 @@ async def tutor_oneshot(req: TutorOneshotRequest) -> TutorOneshotResponse:
     _require_enabled()
     init_state = {
         "action": req.action,
-        "user_id": req.user_id,
+        "user_id": user_id,
         "document_id": req.document_id,
         "description": req.description,
         "goal": req.description,
@@ -368,18 +371,20 @@ def _assist_response(thread_id: str, result: dict) -> TutorAssistResponse:
 
 
 @router.post("/agent/tutor/assist", response_model=TutorAssistResponse)
-async def tutor_assist(req: TutorAssistRequest) -> TutorAssistResponse:
+async def tutor_assist(
+    req: TutorAssistRequest, user_id: str = Depends(require_user_id)
+) -> TutorAssistResponse:
     """assist 自由问答端点：supervisor 路由到 assistant ReAct worker。
 
     mode="assist"，带 checkpointer + thread_id（assistant 的 ask_user 用 interrupt 暂停需要）。
     跑到 finalize（done + final_answer）或 ask_user interrupt（awaiting_user_input + user_question）。
     """
     _require_enabled()
-    thread_id = f"{req.user_id}:assist:{uuid.uuid4().hex[:12]}"
+    thread_id = f"{user_id}:assist:{uuid.uuid4().hex[:12]}"
     config = {"configurable": {"thread_id": thread_id}}
     init_state = {
         "thread_id": thread_id,
-        "user_id": req.user_id,
+        "user_id": user_id,
         "document_id": req.document_id,
         "goal": req.query,
         "description": req.query,

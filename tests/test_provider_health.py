@@ -363,7 +363,7 @@ class TestProviderHealthApi(unittest.TestCase):
             response = self.client.get("/health/live")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"name": "StudyLoop", "status": "ok"})
+        self.assertEqual(response.json(), {"name": "StudyLoop", "status": "ok", "auth": "anonymous"})
         checker.check.assert_not_awaited()
 
     def test_provider_health_uses_503_only_for_degraded_result(self):

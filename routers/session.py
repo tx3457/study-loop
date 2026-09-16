@@ -4,7 +4,7 @@ import json
 import logging
 
 from chromadb.errors import ChromaError, NotFoundError
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import Depends, APIRouter, Header, HTTPException
 from pydantic import BaseModel, ValidationError
 
 from models.grader import GradingReport
@@ -20,6 +20,7 @@ from models.session import (
     SessionSnapshot,
     SessionStartRequest,
 )
+from services.auth import require_user_id
 from services.grader import grade_quiz_session
 from services.idempotency import (
     IdempotencyConflictError,
@@ -669,7 +670,10 @@ async def _grade_and_write_memory(
 async def start(
     req: SessionStartRequest,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    subject: str = Depends(require_user_id),
 ):
+    # 请求体里自报的 user_id 不作数：身份只来自 Authorization 头解析出的主体。
+    req.user_id = subject
     key = normalize_idempotency_key(idempotency_key)
     if req.learning_path_source is not None and key is None:
         raise HTTPException(

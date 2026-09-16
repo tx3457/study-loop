@@ -60,7 +60,9 @@ class TestDurableWrongQuestionPracticeHttp(unittest.TestCase):
     def test_practice_start_replay_and_reload_use_one_durable_session(self) -> None:
         prepare = AsyncMock(return_value=_practice_session())
         headers = {"Idempotency-Key": "wrong-practice-start-key"}
-        path = "/wrong-questions/notes.md/practice?user_id=user-1"
+        # user_id 不再是查询参数——身份由服务端解析，调用方改不了它。
+        # 「同键不同载荷必须冲突」这条契约仍然要验，改用调用方真能改的字段。
+        path = "/wrong-questions/notes.md/practice"
 
         with patch.object(
             wrong_questions_router,
@@ -70,7 +72,7 @@ class TestDurableWrongQuestionPracticeHttp(unittest.TestCase):
             first = self.client.post(path, headers=headers)
             replay = self.client.post(path, headers=headers)
             mismatch = self.client.post(
-                "/wrong-questions/notes.md/practice?user_id=user-2",
+                "/wrong-questions/other-notes.md/practice",
                 headers=headers,
             )
 

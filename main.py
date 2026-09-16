@@ -1,7 +1,7 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from openai import APIError, APITimeoutError, RateLimitError
@@ -20,6 +20,7 @@ from routers.autonomous import router as autonomous_router
 from routers.adaptive import router as adaptive_router
 from routers.audit import router as audit_router
 from routers.health import router as health_router
+from services.auth import require_user_id, verify_configuration
 from services.memory_persist import load_snapshot, persist_snapshot
 from services.idempotency import (
     IdempotencyConflictError,
@@ -121,7 +122,7 @@ def _include_experimental_routers(application: FastAPI) -> bool:
         return False
     from routers.tutor import router as tutor_router
 
-    application.include_router(tutor_router)
+    application.include_router(tutor_router, dependencies=_AUTHENTICATED)
     return True
 
 
@@ -129,6 +130,8 @@ def _include_experimental_routers(application: FastAPI) -> bool:
 async def lifespan(_app: FastAPI):
     """Own startup resources and release them in reverse dependency order."""
     try:
+        # 令牌配置错误在这里就让进程起不来，而不是每个请求各报一次 500。
+        verify_configuration()
         await _start_vectorstore_io()
         await _load_memory_snapshot()
         await _connect_mcp_live_servers()
@@ -164,19 +167,24 @@ app.add_middleware(
 app.add_middleware(OriginGuardMiddleware)
 app.add_middleware(RequestContextMiddleware)
 
-app.include_router(chat_router)
-app.include_router(document_router)
-app.include_router(quiz_router)
-app.include_router(learning_path_router)
-app.include_router(session_router)
-app.include_router(wrong_questions_router)
-app.include_router(user_router)
-app.include_router(orchestrator_router)
-app.include_router(stream_router)
-app.include_router(eval_router)
-app.include_router(autonomous_router)
-app.include_router(adaptive_router)
-app.include_router(audit_router)
+# 闸门挂在 include_router 上而不是逐个端点：默认关闭，将来新增的端点
+# 自动落在闸门内侧，不会因为有人忘了加 Depends 而漏出去。
+# 豁免的只有 "/" 和 /health/live，由 tests/test_auth_subject.py 钉死。
+_AUTHENTICATED = [Depends(require_user_id)]
+
+app.include_router(chat_router, dependencies=_AUTHENTICATED)
+app.include_router(document_router, dependencies=_AUTHENTICATED)
+app.include_router(quiz_router, dependencies=_AUTHENTICATED)
+app.include_router(learning_path_router, dependencies=_AUTHENTICATED)
+app.include_router(session_router, dependencies=_AUTHENTICATED)
+app.include_router(wrong_questions_router, dependencies=_AUTHENTICATED)
+app.include_router(user_router, dependencies=_AUTHENTICATED)
+app.include_router(orchestrator_router, dependencies=_AUTHENTICATED)
+app.include_router(stream_router, dependencies=_AUTHENTICATED)
+app.include_router(eval_router, dependencies=_AUTHENTICATED)
+app.include_router(autonomous_router, dependencies=_AUTHENTICATED)
+app.include_router(adaptive_router, dependencies=_AUTHENTICATED)
+app.include_router(audit_router, dependencies=_AUTHENTICATED)
 _include_experimental_routers(app)
 app.include_router(health_router)
 

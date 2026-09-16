@@ -126,7 +126,7 @@ class TestApiErrorBoundaries(unittest.TestCase):
         origin = "http://127.0.0.1:5173"
         with patch.object(user_router, "get_user_profile", AsyncMock(return_value=None)):
             response = self.client.get(
-                "/user/brand-new-user/profile", headers={"Origin": origin}
+                "/user/default_user/profile", headers={"Origin": origin}
             )
 
         self.assertEqual(response.status_code, 200)

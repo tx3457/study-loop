@@ -14,7 +14,7 @@ import uuid
 from typing import Any
 
 from chromadb.errors import ChromaError, NotFoundError
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import Depends, APIRouter, Header, HTTPException
 from pydantic import ValidationError
 
 from models.adaptive import AdaptiveTurn, NextStepDecision
@@ -31,6 +31,7 @@ from models.adaptive_session import (
 from models.grader import GradingReport
 from models.learning_path import LearningPath
 from models.session import QuestionView, QuizSession
+from services.auth import require_user_id
 from services.adaptive_loop import decide_next_step, generate_lesson, should_terminate
 from services.adaptive_sessions import (
     AdaptiveSessionAlreadyExistsError,
@@ -825,7 +826,10 @@ async def _create_start(
 async def adaptive_start(
     req: AdaptiveStartRequest,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    subject: str = Depends(require_user_id),
 ) -> AdaptiveTurnResponse:
+    # 请求体里自报的 user_id 不作数：身份只来自 Authorization 头解析出的主体。
+    req.user_id = subject
     key = normalize_idempotency_key(idempotency_key)
     request_payload = req.model_dump(mode="json")
     if key:

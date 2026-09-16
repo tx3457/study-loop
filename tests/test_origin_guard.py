@@ -361,7 +361,7 @@ class TestOriginGuard(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"name": "StudyLoop", "status": "ok"})
+        self.assertEqual(response.json(), {"name": "StudyLoop", "status": "ok", "auth": "anonymous"})
         self.assertIsNone(response.headers.get("access-control-allow-origin"))
         self.assert_request_id(response)
 

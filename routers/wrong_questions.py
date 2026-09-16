@@ -1,10 +1,11 @@
 import logging
 
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import Depends, APIRouter, Header, HTTPException
 from pydantic import BaseModel
 
 from models.session import QuestionView, QuizSessionAggregate
 from models.wrong_questions import WrongQuestionBank
+from services.auth import require_user_id
 from services.idempotency import IdempotencyConflictError, normalize_idempotency_key
 from services.quiz_sessions import (
     QuizSessionAlreadyExistsError,
@@ -37,8 +38,9 @@ class RepracticeResponse(BaseModel):
 @router.get("/{document_id}", response_model=WrongQuestionBank)
 async def list_wrong_questions(
     document_id: str,
-    user_id: str = Query(default="default_user", min_length=1, max_length=128),
+    user_id: str = Depends(require_user_id),
 ):
+    # user_id 曾经是 query 参数：换个值就能读别人的错题本。现在只来自可信身份。
     return await get_wrong_questions(document_id, user_id=user_id)
 
 
@@ -63,7 +65,7 @@ def _response(record) -> RepracticeResponse:
 @router.post("/{document_id}/practice", response_model=RepracticeResponse)
 async def repractice(
     document_id: str,
-    user_id: str = Query(default="default_user", min_length=1, max_length=128),
+    user_id: str = Depends(require_user_id),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ):
     key = normalize_idempotency_key(idempotency_key)

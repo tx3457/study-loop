@@ -321,12 +321,13 @@ class TestChatToolReceiptPolicy(unittest.IsolatedAsyncioTestCase):
                         user_id="u",
                         document_id="d",
                     )
-                    first = await chat.chat_with_tools(request, idempotency_key=key)
-                    replay = await chat.chat_with_tools(request, idempotency_key=key)
+                    first = await chat.chat_with_tools(request, idempotency_key=key, subject="u")
+                    replay = await chat.chat_with_tools(request, idempotency_key=key, subject="u")
                     with self.assertRaises(IdempotencyConflictError) as mismatch:
                         await chat.chat_with_tools(
                             request.model_copy(update={"message": "不同请求"}),
                             idempotency_key=key,
+                            subject="u",
                         )
 
                 visible = _visible_tool_names(client)
@@ -432,10 +433,11 @@ class TestChatToolReceiptPolicy(unittest.IsolatedAsyncioTestCase):
                         document_id="d",
                     )
                     with self.assertRaises(SideEffectAmbiguousError):
-                        await chat.chat_with_tools(request, idempotency_key=key)
+                        await chat.chat_with_tools(request, idempotency_key=key, subject="u")
                     replay = await chat.chat_with_tools(
                         request,
                         idempotency_key=key,
+                        subject="u",
                     )
 
                 self.assertEqual(len(effects), 1)
@@ -493,9 +495,9 @@ class TestChatToolReceiptPolicy(unittest.IsolatedAsyncioTestCase):
                         document_id="d",
                     )
                     with self.assertRaises(SideEffectAmbiguousError):
-                        await chat.chat_with_tools(request, idempotency_key=key)
+                        await chat.chat_with_tools(request, idempotency_key=key, subject="u")
                     with self.assertRaises(IdempotencyConflictError) as retry:
-                        await chat.chat_with_tools(request, idempotency_key=key)
+                        await chat.chat_with_tools(request, idempotency_key=key, subject="u")
 
                 self.assertEqual(retry.exception.reason, "ambiguous")
                 self.assertEqual(len(effects), 1)
@@ -521,6 +523,7 @@ class TestChatToolReceiptPolicy(unittest.IsolatedAsyncioTestCase):
                 await chat.chat_with_tools(
                     ToolChatRequest(message="x", user_id="u"),
                     idempotency_key="short",
+                    subject="u",
                 )
 
         begin.assert_not_awaited()

@@ -102,7 +102,7 @@ class TestChatToolLoop(unittest.IsolatedAsyncioTestCase):
                 message="搜一下",
                 user_id="u",
                 document_id="d",
-            ))
+            ), subject="u")
         self.assertEqual(out.response, "这是基于检索的最终回答")
         self.assertEqual(out.tools_called, ["search_document"])
         disp.assert_awaited_once()
@@ -136,7 +136,7 @@ class TestChatToolLoop(unittest.IsolatedAsyncioTestCase):
                 message="x",
                 user_id="u",
                 document_id="d",
-            ))
+            ), subject="u")
         # dispatch 被调了 MAX_TOOL_ROUNDS 次（每轮一次）
         self.assertEqual(disp.await_count, chat.MAX_TOOL_ROUNDS)
         self.assertEqual(len(out.tools_called), chat.MAX_TOOL_ROUNDS)
@@ -367,7 +367,7 @@ class TestChatToolLoop(unittest.IsolatedAsyncioTestCase):
             out = await chat.chat_with_tools(ToolChatRequest(
                 message="选择文档",
                 user_id="selected-user",
-            ))
+            ), subject="u")
 
         dispatch.assert_not_awaited()
         self.assertEqual(out.tools_called, [])

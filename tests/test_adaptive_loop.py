@@ -262,7 +262,7 @@ class TestAdaptiveRouterLoop(unittest.IsolatedAsyncioTestCase):
 
     async def test_start_serves_first_quiz(self):
         self._patches(NextStepDecision(action="continue", topic="排序", reason="开场"))
-        resp = await rt.adaptive_start(rt.AdaptiveStartRequest(document_id="doc", goal="排序"))
+        resp = await rt.adaptive_start(rt.AdaptiveStartRequest(document_id="doc", goal="排序"), subject="default_user")
         self.assertEqual(resp.turn, 1)
         self.assertEqual(len(resp.questions), 2)
         self.assertFalse(resp.done)
@@ -286,7 +286,7 @@ class TestAdaptiveRouterLoop(unittest.IsolatedAsyncioTestCase):
             self.assertLogs(rt.logger, level="WARNING") as captured,
             self.assertRaises(rt.HTTPException) as raised,
         ):
-            await rt.adaptive_start(rt.AdaptiveStartRequest(document_id="doc", goal="unsafe goal"))
+            await rt.adaptive_start(rt.AdaptiveStartRequest(document_id="doc", goal="unsafe goal"), subject="default_user")
 
         self.assertEqual(raised.exception.status_code, 400)
         self.assertNotIn(secret, str(raised.exception.detail))
@@ -298,7 +298,7 @@ class TestAdaptiveRouterLoop(unittest.IsolatedAsyncioTestCase):
             NextStepDecision(action="continue", topic="排序", reason="continue"),
             mastery_seq=[0.3, 0.9],
         )
-        start = await rt.adaptive_start(rt.AdaptiveStartRequest(document_id="doc", goal="排序"))
+        start = await rt.adaptive_start(rt.AdaptiveStartRequest(document_id="doc", goal="排序"), subject="default_user")
         sid = start.adaptive_session_id
         out = await rt.adaptive_submit(
             rt.AdaptiveSubmitRequest(
@@ -322,7 +322,7 @@ class TestAdaptiveRouterLoop(unittest.IsolatedAsyncioTestCase):
             mastery_seq=[0.3, 0.4],
         )
         with patch.object(rt, "generate_learning_path", AsyncMock(return_value=fake_path)):
-            start = await rt.adaptive_start(rt.AdaptiveStartRequest(document_id="doc", goal="排序"))
+            start = await rt.adaptive_start(rt.AdaptiveStartRequest(document_id="doc", goal="排序"), subject="default_user")
             out = await rt.adaptive_submit(
                 rt.AdaptiveSubmitRequest(
                     adaptive_session_id=start.adaptive_session_id,
@@ -342,7 +342,7 @@ class TestAdaptiveRouterLoop(unittest.IsolatedAsyncioTestCase):
             NextStepDecision(action="continue", topic="排序", reason="巩固"),
             mastery_seq=[0.3, 0.4],
         )
-        start = await rt.adaptive_start(rt.AdaptiveStartRequest(document_id="doc", goal="排序"))
+        start = await rt.adaptive_start(rt.AdaptiveStartRequest(document_id="doc", goal="排序"), subject="default_user")
         out = await rt.adaptive_submit(
             rt.AdaptiveSubmitRequest(
                 adaptive_session_id=start.adaptive_session_id,
@@ -367,7 +367,7 @@ class TestAdaptiveRouterLoop(unittest.IsolatedAsyncioTestCase):
         ]
         self._patches(decisions, mastery_seq=[0.3, 0.3])
         with patch.object(rt, "generate_lesson", AsyncMock(return_value="递归就是函数调用自己……")):
-            start = await rt.adaptive_start(rt.AdaptiveStartRequest(document_id="doc", goal="递归"))
+            start = await rt.adaptive_start(rt.AdaptiveStartRequest(document_id="doc", goal="递归"), subject="default_user")
             self.assertEqual(start.turn_type, "teach")
             self.assertTrue(start.lesson)
             self.assertEqual(len(start.questions), 0)  # 讲解轮没有题
@@ -386,7 +386,7 @@ class TestAdaptiveRouterLoop(unittest.IsolatedAsyncioTestCase):
 
     async def test_answer_count_mismatch_400(self):
         self._patches(NextStepDecision(action="continue", topic="排序", reason="x"))
-        start = await rt.adaptive_start(rt.AdaptiveStartRequest(document_id="doc", goal="排序"))
+        start = await rt.adaptive_start(rt.AdaptiveStartRequest(document_id="doc", goal="排序"), subject="default_user")
         from fastapi import HTTPException
 
         with self.assertRaises(HTTPException) as ctx:

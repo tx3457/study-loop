@@ -39,7 +39,7 @@ class TestHttpErrorBoundary(unittest.TestCase):
             "routers.user.get_user_profile",
             AsyncMock(side_effect=ValueError(marker)),
         ):
-            response = self.client.get("/user/u1/profile")
+            response = self.client.get("/user/default_user/profile")
 
         self.assertEqual(response.status_code, 500)
         self.assertEqual(response.json()["code"], "internal_error")
@@ -49,7 +49,7 @@ class TestHttpErrorBoundary(unittest.TestCase):
         response = self.client.post(
             "/agent/autonomous",
             headers={"Idempotency-Key": "short"},
-            json={"query": "学 RAG", "user_id": "u"},
+            json={"query": "学 RAG", "user_id": "default_user"},
         )
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["code"], "invalid_idempotency_key")

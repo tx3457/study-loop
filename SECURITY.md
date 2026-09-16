@@ -67,6 +67,24 @@ multi-process data plane; `DATABASE_URL` alone does not remove that boundary.
   an independent Pydantic type-validation layer.
 - `ToolMetadata.permission` is descriptive metadata; it is not an authorization
   system.
+- Request identity comes from the server, not from the caller. `user_id` used to
+  be an ordinary body, query or path field, so any caller could name any user and
+  read that user's documents, profile and wrong-question bank.
+  `services/auth.py` is now the single source: with `STUDYLOOP_AUTH_TOKEN` set,
+  every business endpoint requires `Authorization: Bearer <token>` and the subject
+  is derived from it; without it the deployment runs in anonymous single-user
+  mode, which `/health/live` reports as `auth: "anonymous"` so the mode is visible
+  without guessing a token first. The gate is attached at `include_router`, so a
+  newly added endpoint sits inside it by default, and
+  `tests/test_auth_subject.py` pins the exemption list to `/`, `/health/live` and
+  `/health/ready`. `/health/providers` is gated because it makes real provider
+  calls. Documents are additionally scoped by owner in storage, so identity and
+  data separation do not depend on the same check.
+  Boundaries: a shared token authenticates the deployment, not a person. It does
+  not separate two humans using the same instance, anyone holding it is the single
+  user, and there is no rotation, revocation or rate limiting on it. A token short
+  enough to guess makes the process refuse to start rather than pretend to be
+  protected.
 - Retrieved document text is untrusted input. `search_document` returns it inside
   an envelope marked `content_trust: untrusted_document_text`, and a layer-1
   pattern scan sets `injection_flagged` when the passage contains

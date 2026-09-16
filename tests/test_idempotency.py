@@ -544,11 +544,11 @@ class TestIdempotencyStore(unittest.IsolatedAsyncioTestCase):
                 result = await tool_registry.invoke(
                     "update_learning_profile",
                     {
-                        "user_id": "u",
+                        "user_id": "default_user",
                         "document_id": "d",
                         "grade_result": {"score": 1.0},
                     },
-                    user_id="u",
+                    user_id="default_user",
                     idempotency_key=key,
                     idempotency_lease=decision.lease,
                 )
@@ -604,7 +604,7 @@ class TestAutonomousIdempotencyBoundary(unittest.TestCase):
             )],
             tools_called=[],
             rounds_used=1,
-            user_id="u",
+            user_id="default_user",
             document_id=None,
             evidence_registry={},
             grounding_required=False,
@@ -634,12 +634,12 @@ class TestAutonomousIdempotencyBoundary(unittest.TestCase):
             first = self.client.post(
                 "/agent/autonomous",
                 headers={"Idempotency-Key": "browser-request-1"},
-                json={"query": "学RAG", "user_id": "u"},
+                json={"query": "学RAG", "user_id": "default_user"},
             )
             second = self.client.post(
                 "/agent/autonomous",
                 headers={"Idempotency-Key": "browser-request-1"},
-                json={"query": "学RAG", "user_id": "u"},
+                json={"query": "学RAG", "user_id": "default_user"},
             )
 
         self.assertEqual(first.status_code, 200)
@@ -661,12 +661,12 @@ class TestAutonomousIdempotencyBoundary(unittest.TestCase):
             first = self.client.post(
                 "/agent/autonomous",
                 headers={"Idempotency-Key": "browser-request-2"},
-                json={"query": "first", "user_id": "u"},
+                json={"query": "first", "user_id": "default_user"},
             )
             second = self.client.post(
                 "/agent/autonomous",
                 headers={"Idempotency-Key": "browser-request-2"},
-                json={"query": "changed", "user_id": "u"},
+                json={"query": "changed", "user_id": "default_user"},
             )
 
         self.assertEqual(first.status_code, 200)
@@ -681,7 +681,7 @@ class TestAutonomousIdempotencyBoundary(unittest.TestCase):
             response = self.client.post(
                 "/agent/autonomous",
                 headers={"Idempotency-Key": "short"},
-                json={"query": "学RAG", "user_id": "u"},
+                json={"query": "学RAG", "user_id": "default_user"},
             )
 
         self.assertEqual(response.status_code, 400)
@@ -785,7 +785,7 @@ class TestAutonomousIdempotencyBoundary(unittest.TestCase):
 
     def test_start_does_not_reconcile_effect_receipt_from_unfenced_pause(self):
         key = "browser-start-outcome-repair"
-        request = autonomous_router.AutonomousRequest(query="学RAG", user_id="u")
+        request = autonomous_router.AutonomousRequest(query="学RAG", user_id="default_user")
         decision = asyncio.run(self.store.begin(
             key,
             "agent.autonomous",
@@ -826,7 +826,7 @@ class TestAutonomousIdempotencyBoundary(unittest.TestCase):
 
     def test_start_recovers_pause_when_session_save_commit_ack_is_lost(self):
         key = "browser-start-pause-save-ack-loss"
-        request = autonomous_router.AutonomousRequest(query="学RAG", user_id="u")
+        request = autonomous_router.AutonomousRequest(query="学RAG", user_id="default_user")
         original_save = self.session_store.save
 
         async def commit_then_lose_ack(*args, **kwargs):
@@ -902,7 +902,7 @@ class TestAutonomousIdempotencyBoundary(unittest.TestCase):
 
     def test_cancel_after_pause_commit_preserves_canonical_replay(self):
         key = "browser-start-pause-save-cancel"
-        request = autonomous_router.AutonomousRequest(query="学RAG", user_id="u")
+        request = autonomous_router.AutonomousRequest(query="学RAG", user_id="default_user")
         original_save = self.session_store.save
 
         async def commit_then_cancel(*args, **kwargs):
@@ -964,7 +964,7 @@ class TestAutonomousIdempotencyBoundary(unittest.TestCase):
                 self.session_store, "save", side_effect=commit_then_cancel
             ):
                 with self.assertRaises(asyncio.CancelledError):
-                    await autonomous_router.autonomous_agent(request, key)
+                    await autonomous_router.autonomous_agent(request, key, subject="default_user")
             replay_loop = AsyncMock()
             with patch.object(
                 autonomous_router, "request_idempotency", self.store
@@ -973,7 +973,7 @@ class TestAutonomousIdempotencyBoundary(unittest.TestCase):
             ), patch.object(
                 autonomous_router, "_run_react_loop", replay_loop
             ):
-                replayed = await autonomous_router.autonomous_agent(request, key)
+                replayed = await autonomous_router.autonomous_agent(request, key, subject="default_user")
             return run_loop, replay_loop, replayed
 
         run_loop, replay_loop, replayed = asyncio.run(scenario())
@@ -989,7 +989,7 @@ class TestAutonomousIdempotencyBoundary(unittest.TestCase):
             clock=lambda: now[0],
         )
         key = "weak-key-but-valid"
-        request = autonomous_router.AutonomousRequest(query="学RAG", user_id="u")
+        request = autonomous_router.AutonomousRequest(query="学RAG", user_id="default_user")
         decision = asyncio.run(self.store.begin(
             key,
             "agent.autonomous",
@@ -1027,7 +1027,7 @@ class TestAutonomousIdempotencyBoundary(unittest.TestCase):
 
     def test_corrupt_initial_pause_recovery_returns_generic_gone(self):
         key = "browser-corrupt-initial-pause"
-        request = autonomous_router.AutonomousRequest(query="学RAG", user_id="u")
+        request = autonomous_router.AutonomousRequest(query="学RAG", user_id="default_user")
         decision = asyncio.run(self.store.begin(
             key,
             "agent.autonomous",
@@ -1328,7 +1328,7 @@ class TestAutonomousIdempotencyBoundary(unittest.TestCase):
         self.assertEqual(replay.response, response.json())
 
     def test_replayed_pause_response_fails_when_snapshot_is_gone(self):
-        request = autonomous_router.AutonomousRequest(query="学RAG", user_id="u")
+        request = autonomous_router.AutonomousRequest(query="学RAG", user_id="default_user")
         key = "browser-expired-pause-1"
         decision = asyncio.run(self.store.begin(
             key,
@@ -1350,7 +1350,7 @@ class TestAutonomousIdempotencyBoundary(unittest.TestCase):
             response = self.client.post(
                 "/agent/autonomous",
                 headers={"Idempotency-Key": key},
-                json={"query": "学RAG", "user_id": "u"},
+                json={"query": "学RAG", "user_id": "default_user"},
             )
 
         self.assertEqual(response.status_code, 410)

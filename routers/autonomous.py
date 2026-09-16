@@ -26,10 +26,11 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Literal, Optional
 
-from fastapi import APIRouter, Header, HTTPException, Path as ApiPath
+from fastapi import Depends, APIRouter, Header, HTTPException, Path as ApiPath
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from models.citation import CitationView, GroundingStatus
+from services.auth import require_user_id
 from services.citations import (
     CitationResolution,
     EvidenceChunk,
@@ -1768,8 +1769,11 @@ async def autonomous_agent(
     idempotency_key: Optional[str] = Header(
         default=None, alias="Idempotency-Key"
     ),
+    subject: str = Depends(require_user_id),
 ) -> AutonomousResponse:
     """Run one request with an optional durable replay receipt."""
+    # 请求体里自报的 user_id 不作数：身份只来自 Authorization 头解析出的主体。
+    req.user_id = subject
     key = normalize_idempotency_key(idempotency_key)
     receipt_lease = None
     request_payload = req.model_dump(mode="json")

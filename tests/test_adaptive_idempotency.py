@@ -119,7 +119,7 @@ class TestAdaptiveDurableRoutes(unittest.TestCase):
         response = self.client.post(
             "/agent/adaptive/start",
             json={
-                "user_id": "user-1",
+                "user_id": "default_user",
                 "document_id": "notes.md",
                 "goal": "learn sorting",
             },
@@ -148,7 +148,7 @@ class TestAdaptiveDurableRoutes(unittest.TestCase):
         mismatch = self.client.post(
             "/agent/adaptive/start",
             json={
-                "user_id": "user-1",
+                "user_id": "default_user",
                 "document_id": "notes.md",
                 "goal": "a different goal",
             },
@@ -184,7 +184,7 @@ class TestAdaptiveDurableRoutes(unittest.TestCase):
         response = self.client.post(
             "/agent/adaptive/start",
             json={
-                "user_id": "user-1",
+                "user_id": "default_user",
                 "document_id": "notes.md",
                 "goal": "learn sorting",
             },
@@ -213,7 +213,7 @@ class TestAdaptiveDurableRoutes(unittest.TestCase):
             stored = await self.store.find_start(
                 "adaptive-opening-path-1",
                 {
-                    "user_id": "user-1",
+                    "user_id": "default_user",
                     "document_id": "notes.md",
                     "goal": "learn sorting",
                 },
@@ -246,7 +246,7 @@ class TestAdaptiveDurableRoutes(unittest.TestCase):
         self.assertEqual(generate_path.await_count, 1)
         self.assertEqual(self.generate.await_count, 0)
         published = self.path_store._get_sync(start["learning_path_id"])
-        self.assertEqual(published.user_id, "user-1")
+        self.assertEqual(published.user_id, "default_user")
         with patch.object(
             learning_path_router,
             "learning_path_store",
@@ -254,7 +254,7 @@ class TestAdaptiveDurableRoutes(unittest.TestCase):
         ):
             fetched = self.client.get(f"/learning-paths/{start['learning_path_id']}")
         self.assertEqual(fetched.status_code, 200, fetched.text)
-        self.assertEqual(fetched.json()["user_id"], "user-1")
+        self.assertEqual(fetched.json()["user_id"], "default_user")
 
     def test_switch_to_plan_precedes_mastery_termination(self) -> None:
         fake_path = _path(title="Review path")

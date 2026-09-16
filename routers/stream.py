@@ -28,10 +28,11 @@ Agent 流水线是单向的，选 SSE 更简单，不需要额外依赖。
 """
 import json
 import logging
-from fastapi import APIRouter
+from fastapi import Depends, APIRouter
 from fastapi.responses import StreamingResponse
 from agents.orchestrator import orchestrator
 from routers.orchestrator import RunRequest
+from services.auth import require_user_id
 from services.tracing import build_trace_config
 from services.request_context import current_request_id, safe_sse_error
 
@@ -72,7 +73,7 @@ def _sse(payload: dict) -> str:
 
 
 @router.post("/stream")
-async def stream_agent(req: RunRequest):
+async def stream_agent(req: RunRequest, subject: str = Depends(require_user_id)):
     """Multi-Agent 流式执行入口。
 
     与 POST /agent/run 功能完全相同，但以 SSE 流式返回每个节点的执行进度。
@@ -98,6 +99,8 @@ async def stream_agent(req: RunRequest):
             }
         }
     """
+    # 请求体里自报的 user_id 不作数：身份只来自 Authorization 头解析出的主体。
+    req.user_id = subject
     async def _event_generator():
         final_state: dict = {}
 

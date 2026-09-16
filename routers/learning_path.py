@@ -4,7 +4,7 @@ import logging
 import re
 
 from chromadb.errors import ChromaError, NotFoundError
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import Depends, APIRouter, Header, HTTPException, Query
 from pydantic import BaseModel, ValidationError
 
 from models.learning_path import (
@@ -13,6 +13,7 @@ from models.learning_path import (
     LearningPathProgress,
     LearningPathResource,
 )
+from services.auth import require_user_id
 from services.idempotency import IdempotencyConflictError, normalize_idempotency_key
 from services.vectorstore import DEFAULT_DOCUMENT_OWNER
 from services.learning_path import (
@@ -125,8 +126,11 @@ async def create_learning_path(document_id: str):
 async def create_learning_path_resource(
     request: CreateLearningPathRequest,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    subject: str = Depends(require_user_id),
 ) -> LearningPathResource:
     """创建或重放一个不可变、可跨刷新恢复的学习路径资源。"""
+    # 请求体里自报的 user_id 不作数：身份只来自 Authorization 头解析出的主体。
+    request.user_id = subject
     try:
         key = normalize_idempotency_key(idempotency_key)
     except ValueError as exc:
