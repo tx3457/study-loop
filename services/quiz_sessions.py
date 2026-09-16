@@ -454,11 +454,25 @@ class QuizSessionStore:
             import psycopg
             from psycopg.conninfo import conninfo_to_dict
 
-            connection_parameters = conninfo_to_dict(self._database_url)
-            if "options" in connection_parameters:
-                existing_options = (connection_parameters.get("options") or "").strip()
-            else:
-                existing_options = os.getenv("PGOPTIONS", "").strip()
+            try:
+                connection_parameters = conninfo_to_dict(self._database_url)
+            except Exception:
+                raise ValueError("PostgreSQL Quiz session DATABASE_URL is invalid") from None
+            explicit_options = connection_parameters.get("options")
+            environment_options = os.getenv("PGOPTIONS", "").strip()
+            service_configured = bool(
+                connection_parameters.get("service") or os.getenv("PGSERVICE")
+            )
+            if service_configured and explicit_options is None and not environment_options:
+                raise ValueError(
+                    "PostgreSQL service DSNs must expose connection options "
+                    "through DATABASE_URL or PGOPTIONS so Quiz session "
+                    "safety limits can be merged without silently discarding "
+                    "service-file options"
+                )
+            existing_options = (
+                str(explicit_options) if explicit_options is not None else environment_options
+            ).strip()
             bounded_options = (
                 f"-c lock_timeout={self._postgres_lock_timeout_ms}ms "
                 f"-c statement_timeout={self._postgres_statement_timeout_ms}ms"
