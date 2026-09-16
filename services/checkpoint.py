@@ -19,8 +19,6 @@ LangGraph Durable Checkpointer
         result = await orch.ainvoke({"action": "quiz", ...}, config=config)
         # 进程崩溃后,用同 thread_id 再次 ainvoke → 自动恢复
 
-env 开关:
-  CHECKPOINT_ENABLED=false → 上层应跳过 checkpointer 路径,用原 orchestrator 单例
 """
 import logging
 import os
@@ -29,11 +27,6 @@ from pathlib import Path
 from typing import AsyncIterator
 
 logger = logging.getLogger(__name__)
-
-
-def checkpoint_enabled() -> bool:
-    """env 开关,ablation 实验或测试时可关闭"""
-    return os.getenv("CHECKPOINT_ENABLED", "true").lower() in ("1", "true", "yes")
 
 
 def default_checkpoint_path() -> str:

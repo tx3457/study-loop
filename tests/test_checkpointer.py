@@ -9,7 +9,6 @@
 跑法:
   python -m pytest tests/test_checkpointer.py -q
 """
-import os
 import sys
 import tempfile
 import unittest
@@ -126,23 +125,6 @@ class TestCompileWithCheckpointerFactory(unittest.IsolatedAsyncioTestCase):
                 ckpt_orch = compile_with_checkpointer(cp)
                 # 不同对象:新编译的 graph 是带 checkpointer 的副本
                 self.assertIsNot(orchestrator, ckpt_orch)
-
-
-class TestCheckpointEnabledFlag(unittest.TestCase):
-    """env 开关契约"""
-
-    def test_default_enabled(self):
-        from services import checkpoint
-        os.environ.pop("CHECKPOINT_ENABLED", None)
-        self.assertTrue(checkpoint.checkpoint_enabled())
-
-    def test_disabled_when_env_false(self):
-        from services import checkpoint
-        os.environ["CHECKPOINT_ENABLED"] = "false"
-        try:
-            self.assertFalse(checkpoint.checkpoint_enabled())
-        finally:
-            os.environ.pop("CHECKPOINT_ENABLED", None)
 
 
 if __name__ == "__main__":
