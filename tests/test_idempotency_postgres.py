@@ -424,7 +424,12 @@ class TestPostgresIdempotencyRuntimeBounds(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(done, "pg_sleep ignored the configured statement timeout")
         self.assertIsInstance(exception, psycopg.errors.QueryCanceled)
 
-        decision = await store.begin(
+        # 恢复检查换一个正常超时的 store。100ms 是为了让 pg_sleep(1) 必然被
+        # 取消才设的；拿它去跑一次真实查询——首次调用还要建表——在慢一点的
+        # runner 上会因为建表本身超时而误报成回归。这里要验证的是超时之后
+        # store 仍然可用，不是它能在 100ms 内完成建表。
+        recovered = self._new_store(postgres_lock_timeout_ms=2_000)
+        decision = await recovered.begin(
             f"postgres-{uuid.uuid4().hex}",
             "agent.autonomous",
             {"query": "statement retry"},

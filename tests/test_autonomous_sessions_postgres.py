@@ -400,7 +400,12 @@ class TestPostgresAutonomousSessionStore(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(completed, "pg_sleep ignored the configured statement timeout")
         self.assertIsInstance(exception, psycopg.errors.QueryCanceled)
-        self.assertIsNone(await store.inspect("missing-after-statement-timeout"))
+        # 恢复检查换一个正常超时的 store。100ms 是为了让 pg_sleep(1) 必然被
+        # 取消才设的；拿它去跑一次真实查询——首次调用还要建表——在慢一点的
+        # runner 上会因为建表本身超时而误报成回归。这里要验证的是超时之后
+        # store 仍然可用，不是它能在 100ms 内完成建表。
+        recovered = self._new_store(postgres_lock_timeout_ms=2_000)
+        self.assertIsNone(await recovered.inspect("missing-after-statement-timeout"))
 
     async def test_concurrent_upgrade_of_legacy_inflight_row_is_fail_closed(
         self,
