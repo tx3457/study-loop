@@ -86,7 +86,12 @@ def normalize_idempotency_key(value: object) -> str | None:
     return key
 
 
-def _fingerprint(operation: str, payload: dict[str, Any]) -> str:
+def request_fingerprint(operation: str, payload: dict[str, Any]) -> str:
+    """同一个请求必须永远算出同一个指纹，否则幂等收据认不出重放。
+
+    allow_nan=False 是这个保证的一部分：NaN 序列化成的 "NaN" 不是合法 JSON，
+    而且 NaN != NaN，一旦放进 payload，同一个请求每次都会算出不同的指纹。
+    """
     canonical = json.dumps(
         {"operation": operation, "payload": payload},
         ensure_ascii=False,
@@ -191,7 +196,7 @@ class IdempotencyStore:
                 self._begin_sync,
                 key,
                 operation,
-                _fingerprint(operation, payload),
+                request_fingerprint(operation, payload),
                 owner_token,
                 recovery_token,
             )
@@ -296,7 +301,7 @@ class IdempotencyStore:
             self._reconcile_completed_sync,
             key,
             operation,
-            _fingerprint(operation, payload),
+            request_fingerprint(operation, payload),
             response_json,
             allow_effect_started,
         )
@@ -314,7 +319,7 @@ class IdempotencyStore:
             self._recovery_token_sync,
             key,
             operation,
-            _fingerprint(operation, payload),
+            request_fingerprint(operation, payload),
         )
 
     async def abort(self, lease: ReceiptLease) -> bool:

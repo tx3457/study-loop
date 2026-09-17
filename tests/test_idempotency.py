@@ -18,7 +18,7 @@ from services.autonomous_sessions import AutonomousSessionStore
 from services.idempotency import (
     IdempotencyConflictError,
     IdempotencyStore,
-    _fingerprint,
+    request_fingerprint,
 )
 from services.tool_registry import tool_registry
 
@@ -451,7 +451,7 @@ class TestIdempotencyStore(unittest.IsolatedAsyncioTestCase):
         legacy_path = str(Path(self.tmp.name) / "legacy-receipts.sqlite3")
         operation = "agent.autonomous"
         payload = {"query": "legacy"}
-        fingerprint = _fingerprint(operation, payload)
+        fingerprint = request_fingerprint(operation, payload)
         with closing(sqlite3.connect(legacy_path)) as connection:
             connection.execute(
                 """
@@ -1124,7 +1124,7 @@ class TestAutonomousIdempotencyBoundary(unittest.TestCase):
         running_id = "cancel-http-running"
         self._seed_session(running_id)
         running = asyncio.run(self.session_store.claim(
-            running_id, autonomous_router._request_fingerprint("continue", {"x": 1})
+            running_id, request_fingerprint("continue", {"x": 1})
         ))
 
         with patch.object(
@@ -1161,7 +1161,7 @@ class TestAutonomousIdempotencyBoundary(unittest.TestCase):
             decision.lease,
             "update_learning_profile",
         ))
-        fingerprint = autonomous_router._request_fingerprint(
+        fingerprint = request_fingerprint(
             "agent.autonomous.continue", payload
         )
         claim = asyncio.run(self.session_store.claim(

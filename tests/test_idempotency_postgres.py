@@ -187,7 +187,7 @@ class TestPostgresIdempotencyStore(unittest.IsolatedAsyncioTestCase):
         table_name = f"studyloop_idem_old_{uuid.uuid4().hex[:16]}"
         operation = "agent.autonomous"
         payload = {"query": "legacy pending"}
-        fingerprint = idempotency_module._fingerprint(operation, payload)
+        fingerprint = idempotency_module.request_fingerprint(operation, payload)
         legacy_key = f"postgres-{uuid.uuid4().hex}"
         with psycopg.connect(TEST_DATABASE_URL) as connection:
             connection.execute(

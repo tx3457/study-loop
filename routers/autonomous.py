@@ -49,6 +49,7 @@ from services.idempotency import (
     ReceiptLease,
     abort_idempotency_claim,
     normalize_idempotency_key,
+    request_fingerprint,
     request_idempotency,
 )
 from services.llm import _client as _client, llm_chat
@@ -945,17 +946,6 @@ async def _validate_replayed_response(response_payload: dict) -> AutonomousRespo
     return response
 
 
-def _request_fingerprint(operation: str, payload: dict) -> str:
-    canonical = json.dumps(
-        {"operation": operation, "payload": payload},
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
 def _initial_conversation_id_for_recovery_token(recovery_token: str) -> str:
     digest = hashlib.sha256(
         f"agent.autonomous:{recovery_token}".encode("utf-8")
@@ -1031,7 +1021,7 @@ async def _recover_continue_outcome_from_session(
 ) -> AutonomousResponse | None:
     """Repair an ACK-lost continue receipt from its completed session outcome."""
     payload = req.model_dump(mode="json")
-    expected_fingerprint = _request_fingerprint(
+    expected_fingerprint = request_fingerprint(
         "agent.autonomous.continue", payload
     )
     inspection = await autonomous_sessions.inspect(req.conversation_id)
@@ -1916,7 +1906,7 @@ async def continue_autonomous(
             raise RuntimeError("idempotency claim returned without ownership data")
 
     # 数据库 CAS 认领 session，跨进程也只允许一个续跑 owner。
-    continue_fingerprint = _request_fingerprint(
+    continue_fingerprint = request_fingerprint(
         "agent.autonomous.continue", req.model_dump(mode="json")
     )
     try:

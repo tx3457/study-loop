@@ -1,5 +1,3 @@
-import hashlib
-import json
 import logging
 import re
 
@@ -14,7 +12,11 @@ from models.learning_path import (
     LearningPathResource,
 )
 from services.auth import require_user_id
-from services.idempotency import IdempotencyConflictError, normalize_idempotency_key
+from services.idempotency import (
+    IdempotencyConflictError,
+    normalize_idempotency_key,
+    request_fingerprint,
+)
 from services.vectorstore import DEFAULT_DOCUMENT_OWNER
 from services.learning_path import (
     LearningPathEvidenceUnavailableError,
@@ -33,19 +35,6 @@ logger = logging.getLogger(__name__)
 
 _RESOURCE_OPERATION = "web_learning_path_create_v1"
 _PATH_ID_PATTERN = re.compile(r"^lp_[0-9a-f]{32}$")
-
-
-def _request_fingerprint(request: CreateLearningPathRequest) -> str:
-    canonical = json.dumps(
-        {
-            "operation": _RESOURCE_OPERATION,
-            "payload": request.model_dump(mode="json"),
-        },
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _resource(record: LearningPathRecord) -> LearningPathResource:
@@ -138,7 +127,9 @@ async def create_learning_path_resource(
     if key is None:
         raise HTTPException(status_code=400, detail="缺少 Idempotency-Key")
 
-    fingerprint = _request_fingerprint(request)
+    fingerprint = request_fingerprint(
+        _RESOURCE_OPERATION, request.model_dump(mode="json")
+    )
     existing = await _find_created_path(key, request, fingerprint)
     if existing is not None:
         return _resource(existing)
