@@ -1,5 +1,6 @@
 import logging
 import uuid
+from collections import OrderedDict
 
 from fastapi import Depends, APIRouter, Header
 from fastapi.responses import StreamingResponse
@@ -25,7 +26,23 @@ from services.idempotency import (
 from services.request_context import current_request_id, safe_sse_error
 from services.tool_scope import build_business_tool_scope_guard
 
-conversations: dict[str, list] = {}
+# 进程内对话历史：只在单 worker 拓扑下成立，进程重启即丢失，不跨副本共享。
+# 用有界 LRU 限制会话数——没有上限的话，每个新出现的 conversation_id 都会
+# 永久占住一份历史。淘汰模式与 services/vectorstore.py 的 _bm25_cache 一致。
+MAX_TRACKED_CONVERSATIONS = 200
+
+conversations: "OrderedDict[str, list]" = OrderedDict()
+
+
+def _touch_history(conversation_id: str) -> list:
+    """取出该会话的历史并标记为最近使用，超出上限时淘汰最久未用的会话。"""
+    history = conversations.pop(conversation_id, [])
+    conversations[conversation_id] = history
+    while len(conversations) > MAX_TRACKED_CONVERSATIONS:
+        conversations.popitem(last=False)
+    return history
+
+
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
@@ -52,17 +69,15 @@ async def llm_service_stream(request:ChatRequest):
     return StreamingResponse(_safe_stream(), media_type="text/event-stream")
 
 @router.post("/chat/history")
-async def llm_service_history(request:HistoryRequest):
-    conversations.setdefault(request.conversation_id, [])
-    conversations[request.conversation_id].append({"role":"user","content":request.message})
-    response = await chat_history(conversations[request.conversation_id])
-    conversations[request.conversation_id].append({"role":"assistant","content":response})
+async def llm_service_history(request: HistoryRequest):
+    history = _touch_history(request.conversation_id)
+    history.append({"role": "user", "content": request.message})
+    response = await chat_history(history)
+    history.append({"role": "assistant", "content": response})
 
     # 超过阈值时自动压缩旧消息，保持 context 窗口可控
-    if len(conversations[request.conversation_id]) > COMPRESS_THRESHOLD:
-        conversations[request.conversation_id] = await compress_chat_history(
-            conversations[request.conversation_id]
-        )
+    if len(history) > COMPRESS_THRESHOLD:
+        conversations[request.conversation_id] = await compress_chat_history(history)
 
     return response
 
