@@ -65,6 +65,19 @@ the supported bundled deployment remains one backend worker and one replica.
 Embedded Chroma plus in-process BM25/ingest coordination are not a supported
 multi-process data plane; `DATABASE_URL` alone does not remove that boundary.
 
+Dependabot reports four ChromaDB advisories with no patched release:
+GHSA-36p7-vc44-83pf and GHSA-f4j7-r4q5-qw2c (code injection through the
+`/api/v2/.../collections` endpoints when a request supplies a model
+repository with `trust_remote_code`), GHSA-2wm9-hf6c-p5cr and
+GHSA-xph7-9rjv-w5fr (missing tenant, database and collection checks in
+`SimpleRBACAuthorizationProvider`). All four describe the ChromaDB HTTP
+server. This project embeds Chroma through `PersistentClient` against a
+local directory: it serves no Chroma endpoint, accepts no Chroma HTTP
+request, and configures no tenant or RBAC provider, so none of the four is
+reachable here. Pointing the retrieval layer at a separate Chroma server
+through `HttpClient` would bring all four into scope, and that deployment
+needs its own review.
+
 ## Known boundaries
 
 - Tool schemas constrain what the model is asked to emit. Required arguments,
