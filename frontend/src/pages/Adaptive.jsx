@@ -613,6 +613,7 @@ export default function Adaptive() {
             onChange={event => setReq(current => ({ ...current, goal: event.target.value }))}
             placeholder="例如：快速排序与归并排序"
             disabled={formLocked}
+            maxLength={4000}
           />
         </div>
         <div className="form-row">
@@ -639,6 +640,7 @@ export default function Adaptive() {
               }))}
               placeholder="选择已建库的文档"
               disabled={formLocked}
+              maxLength={512}
             />
             <datalist id="adp-doc-list">
               {documents.map(document => <option key={document} value={document} />)}
@@ -789,6 +791,7 @@ export default function Adaptive() {
                     placeholder="输入你的答案"
                     disabled={busy || pendingLocked}
                     aria-labelledby={questionId}
+                    maxLength={4000}
                   />
                 )}
               </div>

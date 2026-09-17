@@ -33,6 +33,9 @@ import './Autonomous.css'
 
 const DEFAULT_USER_ID = 'default_user'
 const AUTONOMOUS_REQUEST_DEADLINE_MS = 120_000
+// 写本地存储失败时的统一前缀。错误横幅靠它区分「请求失败但草稿还在」和
+// 「草稿本身没写进去」——后者绝不能再向用户承诺回答已保留。
+const STORAGE_FAILURE_PREFIX = '浏览器无法保存'
 
 const initialState = {
   phase: 'idle',     // idle | running | awaiting | continuing | done | error
@@ -474,7 +477,7 @@ export default function Autonomous() {
       setState(current => ({
         ...current,
         phase: 'error',
-        error: '浏览器无法保存执行恢复信息，请检查存储权限后重试',
+        error: `${STORAGE_FAILURE_PREFIX}执行恢复信息，请检查存储权限后重试`,
         retryBlocked: false,
       }))
       return
@@ -523,7 +526,8 @@ export default function Autonomous() {
     if (!stored) {
       setState(current => ({
         ...current,
-        error: '浏览器无法保存待提交回答，请检查存储权限后重试',
+        error: `${STORAGE_FAILURE_PREFIX}待提交回答，请检查存储权限后重试。`
+          + '回答尚未提交，刷新后需要重新输入。',
       }))
       return
     }
@@ -545,10 +549,19 @@ export default function Autonomous() {
     )
     if (stored) {
       adoptRecovery(stored)
+      // 上一次写失败留下的横幅必须撤掉：草稿这次已经存进去了，再挂着
+      // 「草稿未能留存」就是假陈述。其它类型的错误（如提交失败）保留，
+      // 返回同一个对象时 React 会跳过这次渲染。
+      setState(current => (
+        current.error?.startsWith(STORAGE_FAILURE_PREFIX)
+          ? { ...current, error: null }
+          : current
+      ))
     } else {
       setState(current => ({
         ...current,
-        error: '浏览器无法保存回答草稿，请检查存储权限后重试',
+        error: `${STORAGE_FAILURE_PREFIX}回答草稿，请检查存储权限后重试。`
+          + '草稿未能留存，刷新后会丢失。',
       }))
     }
   }
@@ -668,6 +681,7 @@ export default function Autonomous() {
             }))}
             placeholder="例如：帮我规划学习 RAG 的路径，然后出 3 道选择题"
             disabled={formLocked}
+            maxLength={8000}
           />
         </div>
 
@@ -709,6 +723,7 @@ export default function Autonomous() {
               }}
               placeholder="留空让 Agent 主动询问"
               disabled={formLocked}
+              maxLength={512}
             />
             <datalist id="doc-list">
               {documents.map(d => <option key={d} value={d} />)}
@@ -945,12 +960,15 @@ export default function Autonomous() {
               onKeyDown={e => {
                 if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) handleContinue()
               }}
+              maxLength={8000}
             />
             {state.error && (
               <div className="modal-error" role="alert">
                 {state.error.startsWith('取消失败：')
                   ? `${state.error}。会话与草稿仍已保留。`
-                  : `回答提交失败：${state.error}。你的回答已保留，可以重试。`}
+                  : state.error.startsWith(STORAGE_FAILURE_PREFIX)
+                    ? state.error
+                    : `回答提交失败：${state.error}。你的回答已保留，可以重试。`}
               </div>
             )}
             <div className="modal-actions">

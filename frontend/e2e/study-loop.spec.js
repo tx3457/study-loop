@@ -2171,6 +2171,75 @@ test('adaptive loads documents on entry and refresh clears the recovered error',
   expect(unexpectedRequests).toEqual([])
 })
 
+test('long-form inputs stop at their bound instead of surfacing as a storage failure', async ({ page }) => {
+  // 这些框原先没有 maxLength：超出上限时 recovery 的归一化返回 null，而调用方
+  // 把 null 一律当成写入失败，于是超长文本被报成「浏览器无法保存…请检查存储
+  // 权限」，请求一次都发不出去。控件先挡住，就不会走到那条误导性的提示。
+  const starts = []
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md'] } }
+    }
+    if (request.method() === 'POST' && path === '/agent/adaptive/start') {
+      starts.push(await request.postDataJSON())
+      return {
+        body: adaptiveSnapshot({
+          adaptive_session_id: 'adapt-bounded',
+          // 用简答题，这样答题框是 input 而不是 radio，能断言它的上限。
+          questions: [{
+            index: 0,
+            question: '用一句话说明首字母的作用',
+            options: null,
+            type: 'short_answer',
+          }],
+        }),
+      }
+    }
+    if (request.method() === 'POST' && path === '/agent/autonomous') {
+      return {
+        body: {
+          awaiting_user_input: true,
+          conversation_id: 'bounded-hitl',
+          user_question: '你希望重点学习哪一章？',
+          rounds_used: 1,
+          steps: [],
+          tools_called: ['ask_user'],
+          truncated: false,
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/adaptive')
+  const goal = page.getByLabel('学习目标')
+  await expect(goal).toHaveAttribute('maxlength', '4000')
+  await expect(page.getByLabel('文档 ID')).toHaveAttribute('maxlength', '512')
+  await goal.fill('目'.repeat(4100))
+  expect(await goal.inputValue()).toHaveLength(4000)
+
+  await page.getByLabel('文档 ID').fill('notes.md')
+  await page.getByRole('button', { name: '开始自适应辅导' }).click()
+
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  expect(starts).toHaveLength(1)
+  expect(starts[0].goal).toHaveLength(4000)
+  // 答题框和下面的 HITL 回答框才是真正会把用户卡在半途的两个。
+  await expect(
+    page.getByRole('textbox', { name: '用一句话说明首字母的作用' })
+  ).toHaveAttribute('maxlength', '4000')
+
+  await page.goto('/autonomous')
+  await expect(page.getByLabel('你的学习目标')).toHaveAttribute('maxlength', '8000')
+  await expect(page.getByLabel('文档 ID（可选）')).toHaveAttribute('maxlength', '512')
+
+  await page.getByLabel('你的学习目标').fill('规划学习路径')
+  await page.getByRole('button', { name: '开始执行' }).click()
+  await expect(page.getByText('你希望重点学习哪一章？')).toBeVisible()
+  await expect(page.getByLabel('你的回答')).toHaveAttribute('maxlength', '8000')
+  expect(unexpectedRequests).toEqual([])
+})
+
 test('adaptive start response loss retries the same intent with the same key', async ({ page }) => {
   const starts = []
   const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
@@ -5754,6 +5823,52 @@ test('document upload waits for the authoritative list and never treats a 409 as
   await expect(page.getByText('完成，已从文档列表同步确认')).toHaveCount(0)
   await expect(page.getByRole('heading', { name: 'notes.md' })).toBeVisible()
   expect(uploadRequests).toBe(1)
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('a recovered draft write clears the storage-failure banner it left behind', async ({ page }) => {
+  // 写成功后不撤掉横幅的话，页面会一边挂着「草稿未能留存，刷新后会丢失」
+  // 一边其实已经存好了。这条文案比原来的泛化提示具体，挂错了就是明确的假陈述。
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'POST' && path === '/agent/autonomous') {
+      return {
+        body: {
+          awaiting_user_input: true,
+          conversation_id: 'draft-banner',
+          user_question: '你希望重点学习哪一章？',
+          rounds_used: 1,
+          steps: [],
+          tools_called: ['ask_user'],
+          truncated: false,
+        },
+      }
+    }
+    return null
+  })
+
+  await page.addInitScript((key) => {
+    const original = Storage.prototype.setItem
+    globalThis.__blockDraftWrites = false
+    Storage.prototype.setItem = function setItem(name, value) {
+      if (globalThis.__blockDraftWrites && name === key) {
+        throw new DOMException('quota exceeded', 'QuotaExceededError')
+      }
+      return original.call(this, name, value)
+    }
+  }, AUTONOMOUS_SESSION_KEY)
+
+  await page.goto('/autonomous')
+  await page.getByLabel('你的学习目标').fill('规划学习路径')
+  await page.getByRole('button', { name: '开始执行' }).click()
+  await expect(page.getByText('你希望重点学习哪一章？')).toBeVisible()
+
+  await page.evaluate(() => { globalThis.__blockDraftWrites = true })
+  await page.getByLabel('你的回答').fill('第三章')
+  await expect(page.getByRole('alert')).toContainText('草稿未能留存')
+
+  await page.evaluate(() => { globalThis.__blockDraftWrites = false })
+  await page.getByLabel('你的回答').fill('第三章和第四章')
+  await expect(page.getByRole('alert')).toHaveCount(0)
   expect(unexpectedRequests).toEqual([])
 })
 
