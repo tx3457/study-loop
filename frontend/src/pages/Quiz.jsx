@@ -1136,8 +1136,27 @@ export default function Quiz() {
 
   /* ── 重新开始 ──────────────────────────────────────────────────── */
   const handleRestart = () => {
+    // 「再来一轮」的本意是用同样的设置再做一次，所以普通练习必须原样保留
+    // config——清掉的话「开始答题」会因为没有文档而 disabled。
+    // 但从学习路径阶段启动的这一轮不同：阶段已经做完，绑定留着会让文档与
+    // 主题控件保持 disabled 且无从改回，下一轮请求也仍带 learning_path_source。
+    const launched = Boolean(config.learning_path_source)
+      || readQuizPreset(location.search).hasIntent
     clearSession()
     setError(null)
+    if (!launched) return
+    // URL 上的 launch/path 参数要和 config 一起清：只清 config 的话，下一次
+    // handleStart 仍会从 location.search 读出作废的 preset，把它写进新一轮的
+    // 恢复记录，记录随即因与请求不符被判无效。
+    // 和 preset effect 的 !hasIntent 分支解除同样的三项：出题数量、难度和
+    // 题型是用户自己调的，「再来一轮」不该把它们一起打回默认。
+    setConfig(current => ({
+      ...current,
+      document_id: '',
+      description: '',
+      learning_path_source: undefined,
+    }))
+    navigate('/quiz', { replace: true })
   }
 
   const navigateToLearningPath = (target) => {

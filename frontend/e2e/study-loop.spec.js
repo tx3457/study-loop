@@ -3440,6 +3440,83 @@ test('adaptive ignores a late start response after reset and a newer start', asy
   }
 })
 
+test('quiz restart releases the learning path binding instead of carrying it into the next round', async ({ page }) => {
+  // clearSession() 不动 config，而 navigateToLearningPath / startIncomingQuiz
+  // 都在它后面补了 setConfig——只有 handleRestart 漏了。漏掉时下一轮请求仍带
+  // learning_path_source，文档与主题控件也因绑定存在保持 disabled，页面上没有
+  // 任何说明，用户改不回来。
+  const pathId = `lp_${'a'.repeat(32)}`
+  const starts = []
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['notes.md', 'other.md'] } }
+    }
+    if (request.method() === 'POST' && path === '/session/start') {
+      const body = await request.postDataJSON()
+      starts.push(body)
+      return {
+        body: {
+          session_id: `quiz-${starts.length}`,
+          total: 1,
+          questions: [{ index: 0, question: '首字母是什么？', options: ['Alpha', 'Beta'] }],
+          // 绑定必须原样回显，否则客户端按「路径回显不匹配」终止本次启动。
+          learning_path_source: body.learning_path_source ?? null,
+          learning_path_completion: null,
+          expires_at: FUTURE_EXPIRES_AT,
+        },
+      }
+    }
+    if (request.method() === 'POST' && /^\/session\/quiz-\d+\/answer$/.test(path)) {
+      return {
+        body: {
+          correct: true,
+          correct_answer: 'Alpha',
+          explanation: '回答正确',
+          is_last: true,
+          next_index: null,
+        },
+      }
+    }
+    if (request.method() === 'GET' && /^\/session\/quiz-\d+\/result$/.test(path)) {
+      return {
+        body: {
+          session_id: path.split('/')[2],
+          document_id: 'notes.md',
+          total: 1,
+          correct: 1,
+          score: 1,
+          details: [],
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto(
+    '/quiz?document_id=notes.md&topic=阶段主题'
+    + `&launch_id=restart-launch-1234&path_id=${pathId}&stage_id=1`,
+  )
+  await page.getByRole('button', { name: '开始答题' }).click()
+  await page.getByRole('button', { name: /Alpha/ }).click()
+  await page.getByRole('button', { name: '提交答案' }).click()
+  await page.getByRole('button', { name: '查看结果' }).click()
+  await page.getByRole('button', { name: '再来一轮' }).click()
+
+  await expect(page.getByRole('combobox', { name: '学习文档' })).toBeEnabled()
+  await page.getByRole('combobox', { name: '学习文档' }).selectOption('other.md')
+  await page.getByRole('button', { name: '开始答题' }).click()
+  await expect(page.getByRole('button', { name: /Alpha/ })).toBeVisible()
+
+  expect(starts).toHaveLength(2)
+  expect(starts[0]).toMatchObject({
+    document_id: 'notes.md',
+    learning_path_source: { learning_path_id: pathId, stage_id: 1 },
+  })
+  expect(starts[1].document_id).toBe('other.md')
+  expect(starts[1].learning_path_source ?? null).toBeNull()
+  expect(unexpectedRequests).toEqual([])
+})
+
 test('quiz restart clears errors and prior grading and learning reports', async ({ page }) => {
   let starts = 0
   const answerRequests = []
