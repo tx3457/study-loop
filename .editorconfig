@@ -1,0 +1,23 @@
+# 与 pyproject.toml 的 ruff 设置和前端的两空格风格保持一致。
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+
+[*.py]
+indent_size = 4
+max_line_length = 100
+
+[*.{js,jsx,css,html,json,yml,yaml}]
+indent_size = 2
+
+[*.md]
+# Markdown 用行尾两个空格表示换行，不能一律裁掉。
+trim_trailing_whitespace = false
+
+[Makefile]
+indent_style = tab
