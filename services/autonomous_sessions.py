@@ -1049,7 +1049,7 @@ class AutonomousSessionStore:
                 if float(expires_at) <= now:
                     connection.execute(
                         f"DELETE FROM {_TABLE} WHERE conversation_id = {p} "
-                        "AND state = 'in_flight' AND claim_token = {p}",
+                        f"AND state = 'in_flight' AND claim_token = {p}",
                         (conversation_id, current_token),
                     )
                     return SessionClaim(claimed=False, reason="expired")

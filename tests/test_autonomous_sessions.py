@@ -415,6 +415,29 @@ class TestAutonomousSessionStore(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(claim.reason, "expired")
         self.assertIsNone(await store.inspect("conv-expired"))
 
+    async def test_abandoned_in_flight_row_expires_instead_of_raising(self):
+        """in_flight 行的认领租约和整行 TTL 同时过期后，续跑必须得到 expired。
+
+        这条分支上的 DELETE 语句曾漏写 f 前缀，{p} 作为字面量进入 SQL，
+        claim 直接抛 sqlite3.OperationalError。调用方把它翻成 500，而不是
+        本该返回的 404，并且每次重试都会再烧掉一个 receipt。
+        触发条件是 worker 认领后崩溃、且期间没有 save/handoff 碰过这张表
+        （_purge_expired 和 _reap_stale_claims 都只在那两条路径上跑，
+        而 reap 的 UPDATE 带 expires_at > now，整行过期后就不再匹配）。
+        """
+        store = self._store(ttl_seconds=100, lease_seconds=10)
+        await store.save("conv-abandoned", _payload("abandoned"))
+        first = await store.claim("conv-abandoned", _fingerprint("reply"))
+        self.assertTrue(first.claimed)
+
+        self.now[0] += 101
+
+        claim = await store.claim("conv-abandoned", _fingerprint("reply"))
+
+        self.assertFalse(claim.claimed)
+        self.assertEqual(claim.reason, "expired")
+        self.assertIsNone(await store.inspect("conv-abandoned"))
+
     async def test_completed_tombstone_expires_without_consuming_capacity(self):
         store = self._store(ttl_seconds=10, max_count=1)
         await store.save("conv-done", _payload("done"))
