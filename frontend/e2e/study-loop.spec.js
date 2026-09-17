@@ -7235,6 +7235,88 @@ test('Dashboard persists wrong-practice intent before navigation and reload reus
   ).toEqual([])
 })
 
+test('Dashboard reuses a pending practice key when the same intent is started again', async ({ page }) => {
+  // 上一条覆盖的是刷新 /quiz（走 Quiz.recoverQuiz 里的 start_idempotency_key）。
+  // 这条走的是另一条路：不刷新，导航回 Dashboard 再次发起同一个意图。
+  // Dashboard.handleRepractice 曾无条件生成新键，服务端按新键又建一个持久
+  // 会话，旧的被孤儿化却仍占容量，答完后学习历史还会多出一条记录。
+  const problems = trackBrowserProblems(page)
+  const practiceKeys = []
+  const entry = {
+    entry_id: 'a.md:0',
+    document_id: 'a.md',
+    question: 'a.md 的错题',
+    options: ['错误', '正确'],
+    question_type: 'choice',
+    correct_answer: '正确',
+    explanation: '解析',
+    user_answer: '错误',
+    knowledge_gap: '测试',
+    session_id: 'a.md-session',
+  }
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') {
+      return { body: { documents: ['a.md'] } }
+    }
+    if (request.method() === 'GET' && path === '/user/default_user/sessions') {
+      return { body: [] }
+    }
+    if (request.method() === 'GET' && path === '/user/default_user/profile') {
+      return {
+        body: { topic_mastery: { 'a.md': 0.3 }, weak_points: [], total_sessions: 1 },
+      }
+    }
+    if (request.method() === 'GET' && path === '/wrong-questions/a.md') {
+      return { body: { document_id: 'a.md', total: 1, entries: [entry] } }
+    }
+    if (request.method() === 'POST' && path === '/wrong-questions/a.md/practice') {
+      practiceKeys.push(await request.headerValue('idempotency-key'))
+      if (practiceKeys.length === 1) {
+        return { status: 503, body: { detail: '重练响应暂时不可用' } }
+      }
+      return {
+        body: {
+          session_id: 'reused-a-practice',
+          total: 1,
+          questions: [{
+            index: 0,
+            question: 'a.md 的错题',
+            options: ['错误', '正确'],
+            type: 'choice',
+          }],
+          revision: 1,
+          expires_at: FUTURE_EXPIRES_AT,
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/dashboard')
+  await page.getByLabel('错题文档').selectOption('a.md')
+  await page.getByRole('button', { name: '开始重练（1）' }).click()
+  await expect(page).toHaveURL(/\/quiz$/)
+  await expect(page.getByRole('alert')).toContainText('重练响应暂时不可用')
+
+  await page.getByRole('link', { name: '学习报告' }).click()
+  await expect(page).toHaveURL(/\/dashboard$/)
+  await page.getByLabel('错题文档').selectOption('a.md')
+  await page.getByRole('button', { name: '开始重练（1）' }).click()
+
+  // 同一个尚未建立会话的意图不是冲突，不该要求用户在两个同名记录之间选择。
+  await expect(page.getByRole('button', { name: '放弃并开始错题重练' })).toHaveCount(0)
+  await expect(page).toHaveURL(/\/quiz$/)
+  await expect(page.getByRole('group', { name: 'a.md 的错题' })).toBeVisible()
+
+  expect(practiceKeys).toHaveLength(2)
+  expect(practiceKeys[0]).toMatch(UUID_V4_PATTERN)
+  expect(practiceKeys[1]).toBe(practiceKeys[0])
+  expect(unexpectedRequests).toEqual([])
+  expect(
+    problems.filter(problem => !problem.includes('503 (Service Unavailable)')),
+  ).toEqual([])
+})
+
 test('a response from an unmounted Quiz cannot overwrite a newer Dashboard recovery', async ({ page }) => {
   const problems = trackBrowserProblems(page)
   let releaseAnswer

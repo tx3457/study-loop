@@ -10,6 +10,7 @@ import {
 import {
   createWrongQuestionQuizRecovery,
   readQuizRecovery,
+  sameQuizIntent,
   writeQuizRecovery,
 } from '../state/quizRecovery'
 import './Dashboard.css'
@@ -174,15 +175,24 @@ export default function Dashboard() {
     if (!wrongDoc) return
     setPracticeError(null)
     try {
-      const nextRecovery = createWrongQuestionQuizRecovery(
+      const candidate = createWrongQuestionQuizRecovery(
         wrongDoc,
         createIdempotencyKey(),
       )
-      if (!nextRecovery) {
+      if (!candidate) {
         throw new Error('无法创建错题重练恢复记录，请刷新页面后重试')
       }
       const currentRecovery = readQuizRecovery()
-      if (currentRecovery) {
+      // 与 Quiz.handleStart / Adaptive.handleStart 一致：同一个还没建立会话的
+      // 意图必须沿用原来的幂等键。换新键服务端会按新键再建一个持久会话，旧的
+      // 被孤儿化但仍占容量，答完后学习历史还会多出一条记录。
+      const reusable = Boolean(
+        currentRecovery
+        && !currentRecovery.session
+        && sameQuizIntent(currentRecovery.intent, candidate.intent)
+      )
+      const nextRecovery = reusable ? currentRecovery : candidate
+      if (currentRecovery && !reusable) {
         setPracticeConflict({ currentRecovery, nextRecovery })
         return
       }
