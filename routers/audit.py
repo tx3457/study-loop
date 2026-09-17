@@ -74,7 +74,11 @@ def _serialize(records, include_payload: bool) -> list[dict]:
 
 
 @router.get("/{run_id}")
-def get_audit_by_run(run_id: str, limit: int = 50, include_payload: bool = False):
+def get_audit_by_run(
+    run_id: str,
+    limit: int = Query(50, ge=1, le=500),
+    include_payload: bool = False,
+):
     """按 run_id 查询工具调用；完整 payload 受环境开关保护。"""
     records = tool_registry.get_audit(run_id=run_id, limit=limit)
     return {

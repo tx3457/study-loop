@@ -9,7 +9,9 @@ import unittest
 from unittest.mock import patch
 
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
+from main import app
 from routers.audit import _redact, _serialize
 from services.tool_registry import EffectMode, Tool, ToolMetadata, logger, tool_registry
 from services.tools import dispatch_tool
@@ -135,3 +137,29 @@ class TestAuditFailureRedaction(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAuditLimitBounds(unittest.TestCase):
+    """GET /audit/{run_id} 的 limit 必须和同文件的 GET /audit 落在同一条边界上。
+
+    limit 没有约束时，get_audit 内部的 items[-limit:] 在 limit=0 上退化成
+    items[0:]：本该返回 0 条，实际返回全部记录；limit=-1 同理返回除第一条
+    外的全部。两者都绕过了调用方以为存在的上限。
+    """
+
+    def setUp(self):
+        self.client = TestClient(app, raise_server_exceptions=False)
+
+    def test_non_positive_limit_is_rejected(self):
+        for limit in (0, -1):
+            with self.subTest(limit=limit):
+                response = self.client.get(f"/audit/run-x?limit={limit}")
+                self.assertEqual(response.status_code, 422)
+
+    def test_limit_above_ceiling_is_rejected(self):
+        response = self.client.get("/audit/run-x?limit=501")
+        self.assertEqual(response.status_code, 422)
+
+    def test_limit_within_bounds_is_accepted(self):
+        response = self.client.get("/audit/run-x?limit=50")
+        self.assertEqual(response.status_code, 200)
