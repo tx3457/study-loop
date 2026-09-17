@@ -9,16 +9,16 @@ StudyLoop 是一个基于个人学习材料的 AI 自适应学习系统：从文
 ## 产品演示
 
 <p align="center">
-  <a href="docs/assets/autonomous-grounded.png">
-    <img src="docs/assets/autonomous-grounded.png" width="100%" alt="StudyLoop 自主学习 Agent 展示检索引用、最终回答和工具执行过程">
+  <a href="docs/assets/autonomous-grounded.webp">
+    <img src="docs/assets/autonomous-grounded.webp" width="100%" alt="StudyLoop 自主学习 Agent 展示检索引用、最终回答和工具执行过程">
   </a>
 </p>
 
 <p align="center"><sub>选择学习材料后，Agent 调用受限业务工具，并把本轮检索证据与执行过程返回到界面。</sub></p>
 
 <p align="center">
-  <a href="docs/assets/hitl-resume.png"><img src="docs/assets/hitl-resume.png" width="49%" alt="StudyLoop 展示 Agent 中断、用户补充和恢复后的带引用回答"></a>
-  <a href="docs/assets/learning-loop.png"><img src="docs/assets/learning-loop.png" width="49%" alt="StudyLoop 根据学习进度展示分阶段学习路径和解锁状态"></a>
+  <a href="docs/assets/hitl-resume.webp"><img src="docs/assets/hitl-resume.webp" width="49%" alt="StudyLoop 展示 Agent 中断、用户补充和恢复后的带引用回答"></a>
+  <a href="docs/assets/learning-loop.webp"><img src="docs/assets/learning-loop.webp" width="49%" alt="StudyLoop 根据学习进度展示分阶段学习路径和解锁状态"></a>
 </p>
 
 <p align="center"><sub>左：HITL 中断、补充与恢复的完整流程；右：学习路径按完成状态依次解锁。截图使用仓库内的反向传播示例材料展示同一条学习流程。</sub></p>
