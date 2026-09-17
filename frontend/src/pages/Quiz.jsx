@@ -395,6 +395,20 @@ export default function Quiz() {
   const gradingInFlight = useRef(false)
   const reportingInFlight = useRef(false)
 
+  /**
+   * 作废进行中的批改与报告请求。
+   *
+   * 递进 epoch 让已经在路上的响应回来时认不出自己（守卫会丢弃它），同时清掉
+   * in-flight 标记好让新请求发得出去。两件事必须一起做：只递进 epoch，新请求
+   * 会被 in-flight 标记挡住；只清标记，迟到的响应会盖掉新状态。
+   */
+  const abandonGradingAndReport = () => {
+    gradingRequestEpoch.current += 1
+    reportRequestEpoch.current += 1
+    gradingInFlight.current = false
+    reportingInFlight.current = false
+  }
+
   // 配置
   const [config, setConfig] = useState(() => ({ ...DEFAULT_QUIZ_CONFIG }))
 
@@ -507,10 +521,7 @@ export default function Quiz() {
     }
     const stored = persistRecovery(updatedRecord)
 
-    gradingRequestEpoch.current += 1
-    reportRequestEpoch.current += 1
-    gradingInFlight.current = false
-    reportingInFlight.current = false
+    abandonGradingAndReport()
     setGrading(false)
     setReporting(false)
     setSubmitting(false)
@@ -847,10 +858,7 @@ export default function Quiz() {
   /* ── 开始答题 ──────────────────────────────────────────────────── */
   const handleStart = () => {
     if (!config.document_id) return
-    gradingRequestEpoch.current += 1
-    reportRequestEpoch.current += 1
-    gradingInFlight.current = false
-    reportingInFlight.current = false
+    abandonGradingAndReport()
     setPhase('loading')
     setError(null)
     setGradingReport(null)
@@ -1089,10 +1097,7 @@ export default function Quiz() {
     recoveryInFlight.current = false
     discardRecovery()
     setRecoveryReady(true)
-    gradingRequestEpoch.current += 1
-    reportRequestEpoch.current += 1
-    gradingInFlight.current = false
-    reportingInFlight.current = false
+    abandonGradingAndReport()
     setPhase('setup')
     setSessionId(null)
     setQuestions([])
