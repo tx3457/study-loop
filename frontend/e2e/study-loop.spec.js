@@ -653,6 +653,15 @@ test('learning path create deadline preserves its receipt and retries the exact 
     ) {
       return { body: queryTarget }
     }
+    if (
+      request.method() === 'GET'
+      && path === `/learning-paths/${canonical.learning_path_id}`
+    ) {
+      // 恢复成功后页面把 URL 同步到 canonical，恢复 effect 因此再跑一轮。
+      // 它是否真的发出这次 GET，取决于 resource 与 URL 在同一批渲染里的先后；
+      // 两种时序读到的都是同一份资源，后面的断言在两种情况下都成立。
+      return { body: canonical }
+    }
     if (request.method() === 'POST' && path === '/learning-paths') {
       attempts.push({
         key: await request.headerValue('idempotency-key'),
