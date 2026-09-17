@@ -187,6 +187,35 @@ def _mark_untrusted_observation(run_id: str, result: str) -> None:
         tool_registry.mark_run_untrusted_content(run_id)
 
 
+def _block_tool_call(
+    messages: list,
+    outcomes: list,
+    *,
+    call_id: str,
+    name: str,
+    arguments: dict,
+    error: str,
+    reason: str,
+) -> None:
+    """记录一次被拒绝的工具调用。
+
+    transcript 和 outcomes 必须一起写：只写 outcomes，模型下一轮看不到自己
+    被拒绝，会原样重试同一个调用；只写 messages，调用方拿不到 blocked_reason。
+    两边的 reason 也必须是同一个值，否则审计记录与模型看到的理由对不上。
+    这个函数存在就是为了让上面三件事不可能被写漏。
+    """
+    result = json.dumps({"error": error, "reason": reason}, ensure_ascii=False)
+    messages.append({"role": "tool", "tool_call_id": call_id, "content": result})
+    outcomes.append(ToolCallOutcome(
+        call_id=call_id,
+        name=name,
+        arguments=arguments,
+        kind="blocked",
+        result=result,
+        blocked_reason=reason,
+    ))
+
+
 async def run_tool_round(
     messages: list,
     *,
@@ -444,21 +473,12 @@ async def run_tool_round(
         reason = "mixed_control_batch_rejected"
         logger.warning("[tool_loop] rejected multi-call batch containing control tool")
         for tc, name, args, _, _, _ in parsed_calls:
-            result = json.dumps({
-                "error": "控制工具必须单独调用，本轮所有工具均未执行",
-                "reason": reason,
-            }, ensure_ascii=False)
-            messages.append({
-                "role": "tool", "tool_call_id": tc.id, "content": result,
-            })
-            outcomes.append(ToolCallOutcome(
-                call_id=tc.id,
-                name=name,
-                arguments=args,
-                kind="blocked",
-                result=result,
-                blocked_reason=reason,
-            ))
+            _block_tool_call(
+                messages, outcomes,
+                call_id=tc.id, name=name, arguments=args,
+                error="控制工具必须单独调用，本轮所有工具均未执行",
+                reason=reason,
+            )
         return ToolRoundResult(
             assistant_message=msg,
             has_tool_calls=True,
@@ -475,21 +495,12 @@ async def run_tool_round(
     ) in parsed_calls:
         if args_error:
             reason = "invalid_tool_arguments"
-            result = json.dumps({
-                "error": "工具参数必须是 JSON 对象",
-                "reason": reason,
-            }, ensure_ascii=False)
-            messages.append({
-                "role": "tool", "tool_call_id": tc.id, "content": result,
-            })
-            outcomes.append(ToolCallOutcome(
-                call_id=tc.id,
-                name=name,
-                arguments={},
-                kind="blocked",
-                result=result,
-                blocked_reason=reason,
-            ))
+            _block_tool_call(
+                messages, outcomes,
+                call_id=tc.id, name=name, arguments={},
+                error="工具参数必须是 JSON 对象",
+                reason=reason,
+            )
             continue
 
         # 单独出现的控制工具交回调用方处理（不 dispatch，由调用方补 tool message）
@@ -513,22 +524,12 @@ async def run_tool_round(
             continue
 
         if precomputed_binding_reason:
-            reason = precomputed_binding_reason
-            result = json.dumps({
-                "error": f"工具 {name} 的安全绑定已变化，本轮未执行",
-                "reason": reason,
-            }, ensure_ascii=False)
-            messages.append({
-                "role": "tool", "tool_call_id": tc.id, "content": result,
-            })
-            outcomes.append(ToolCallOutcome(
-                call_id=tc.id,
-                name=name,
-                arguments=args,
-                kind="blocked",
-                result=result,
-                blocked_reason=reason,
-            ))
+            _block_tool_call(
+                messages, outcomes,
+                call_id=tc.id, name=name, arguments=args,
+                error=f"工具 {name} 的安全绑定已变化，本轮未执行",
+                reason=precomputed_binding_reason,
+            )
             continue
 
         # 调用级范围约束必须发生在 dispatch 前，避免模型先看到越界工具输出，
@@ -536,21 +537,12 @@ async def run_tool_round(
         if business_tool_guard is not None:
             guard_reason = precomputed_guard_reason
             if guard_reason:
-                result = json.dumps({
-                    "error": "工具调用超出当前请求允许范围，本轮未执行",
-                    "reason": guard_reason,
-                }, ensure_ascii=False)
-                messages.append({
-                    "role": "tool", "tool_call_id": tc.id, "content": result,
-                })
-                outcomes.append(ToolCallOutcome(
-                    call_id=tc.id,
-                    name=name,
-                    arguments=args,
-                    kind="blocked",
-                    result=result,
-                    blocked_reason=guard_reason,
-                ))
+                _block_tool_call(
+                    messages, outcomes,
+                    call_id=tc.id, name=name, arguments=args,
+                    error="工具调用超出当前请求允许范围，本轮未执行",
+                    reason=guard_reason,
+                )
                 continue
 
         # interrupt-capable 调用方在 LLM await 前绑定 Tool 对象、handler 与
@@ -567,21 +559,12 @@ async def run_tool_round(
             ):
                 reason = "replay_safety_binding_changed"
                 logger.warning(f"[tool_loop] blocked changed tool binding: {name}")
-                result = json.dumps({
-                    "error": f"工具 {name} 的安全绑定已变化，本轮未执行",
-                    "reason": reason,
-                }, ensure_ascii=False)
-                messages.append({
-                    "role": "tool", "tool_call_id": tc.id, "content": result,
-                })
-                outcomes.append(ToolCallOutcome(
-                    call_id=tc.id,
-                    name=name,
-                    arguments=args,
-                    kind="blocked",
-                    result=result,
-                    blocked_reason=reason,
-                ))
+                _block_tool_call(
+                    messages, outcomes,
+                    call_id=tc.id, name=name, arguments=args,
+                    error=f"工具 {name} 的安全绑定已变化，本轮未执行",
+                    reason=reason,
+                )
                 continue
 
         # 业务工具：dispatch（自带参数校验/超时/重试/audit）并回灌。真正的
@@ -612,26 +595,17 @@ async def run_tool_round(
             # result that may be fed back to the model and ignored.
             raise
         except ToolPolicyViolation as exc:
-            result = json.dumps({
-                "error": "工具调用违反安全策略",
-                "reason": exc.reason,
-            }, ensure_ascii=False)
             logger.warning(
                 "[tool_loop] policy blocked: tool=%s reason=%s",
                 name,
                 exc.reason,
             )
-            messages.append({
-                "role": "tool", "tool_call_id": tc.id, "content": result,
-            })
-            outcomes.append(ToolCallOutcome(
-                call_id=tc.id,
-                name=name,
-                arguments=args,
-                kind="blocked",
-                result=result,
-                blocked_reason=exc.reason,
-            ))
+            _block_tool_call(
+                messages, outcomes,
+                call_id=tc.id, name=name, arguments=args,
+                error="工具调用违反安全策略",
+                reason=exc.reason,
+            )
             continue
         except SideEffectAmbiguousError:
             logger.warning(
