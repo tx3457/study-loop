@@ -28,6 +28,7 @@ from fastapi import HTTPException
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import routers.autonomous as au
+import services.autonomous_plan as autonomous_plan
 import services.tool_loop as tool_loop
 import services.tools as tool_module
 from routers.autonomous import AutonomousRequest, ContinueRequest
@@ -776,8 +777,12 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
                 "ask", "ask_user", '{"question":"continue?"}'
             )]),
         ])
-        with self.assertLogs(au.logger, level="WARNING") as captured, patch.object(
+        # 计划生成住在 services.autonomous_plan，它对 _client 和 logger 各持一份
+        # 绑定。捕获 root logger 而不是某一个模块的，断言才覆盖两边的输出。
+        with self.assertLogs(level="WARNING") as captured, patch.object(
             au, "_client", start_client
+        ), patch.object(
+            autonomous_plan, "_client", start_client
         ), patch.object(
             au, "check_injection", AsyncMock(return_value=(False, ""))
         ):

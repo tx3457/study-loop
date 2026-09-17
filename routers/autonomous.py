@@ -43,6 +43,7 @@ from services.autonomous_sessions import (
     SessionCapacityError,
     SessionPayloadTooLargeError,
 )
+from services.autonomous_plan import generate_plan
 from services.injection import check_injection, check_output_leak
 from services.idempotency import (
     IdempotencyConflictError,
@@ -71,9 +72,6 @@ MAX_AUTONOMOUS_ROUNDS = 8
 _SESSION_SCHEMA_VERSION = 3
 _RESPONSE_SCHEMA_VERSION = 2
 PLAN_SKIP_QUERY_LEN = 80               # 短于此长度的 query 跳过 plan 阶段
-PLAN_TOTAL_TIMEOUT_SECONDS = 20.0
-PLAN_TRANSPORT_RETRIES = 1
-PLAN_SEMANTIC_ATTEMPTS = 2
 _GROUNDING_ABSTENTION = "现有检索证据不足，无法提供满足完整引用约束的回答。"
 
 # 业务工具白名单由 run_tool_round 从 ToolRegistry 派生，不在路由中硬编码。
@@ -84,14 +82,6 @@ _CONTROL_TOOLS = build_control_tools(
     ask_user_resume_hint="调用后循环会暂停，等用户回答后通过 /agent/autonomous/continue 续跑。"
 )
 _REACT_SYSTEM = build_react_system_prompt()
-
-
-_PLAN_SYSTEM = (
-    "你是 ReAct Agent 的规划助手。任务：把用户的学习目标拆解为 2-5 个可执行步骤。\n\n"
-    "输出格式严格按以下编号列表：\n"
-    "1. <第一步描述>\n2. <第二步描述>\n...\n"
-    "不要输出任何解释，只输出编号列表。"
-)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1073,135 +1063,6 @@ def _build_state_summary(
     return "\n".join(parts)
 
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Plan 阶段（可选）
-# ═══════════════════════════════════════════════════════════════════════════
-_NUMBERED_PLAN_LINE = re.compile(r"^(\d+)\s*[.)）、]\s*(.+)$")
-_NAMED_PLAN_LINE = re.compile(r"^步骤\s*(\d+)\s*[:：]\s*(.+)$")
-_BULLET_PLAN_LINE = re.compile(r"^[-*+•]\s+(.+)$")
-_BARE_TOOL_CALL = re.compile(
-    r"^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*\([^\n]*\)\s*;?$"
-)
-
-
-def _strip_inline_markdown(text: str) -> str:
-    value = text.strip()
-    for marker in ("**", "__", "`"):
-        if (
-            value.startswith(marker)
-            and value.endswith(marker)
-            and len(value) > 2 * len(marker)
-        ):
-            value = value[len(marker):-len(marker)].strip()
-    return value
-
-
-def _parse_plan(plan_text: str) -> list[str]:
-    """Parse only an explicit 2-5 item plan, never prose or tool payloads."""
-    raw = plan_text.strip()
-    if not raw or raw[0] in "[{":
-        return []
-
-    steps: list[str] = []
-    numbered_indexes: list[int] = []
-    marker_kinds: set[str] = set()
-    for raw_line in raw.splitlines():
-        line = re.sub(r"^#{1,6}\s+", "", raw_line.strip())
-        if not line:
-            continue
-
-        match = _NUMBERED_PLAN_LINE.fullmatch(line)
-        if match:
-            marker_kinds.add("numbered")
-            numbered_indexes.append(int(match.group(1)))
-            body = match.group(2)
-        else:
-            match = _NAMED_PLAN_LINE.fullmatch(line)
-            if match:
-                marker_kinds.add("numbered")
-                numbered_indexes.append(int(match.group(1)))
-                body = match.group(2)
-            else:
-                match = _BULLET_PLAN_LINE.fullmatch(line)
-                if not match:
-                    return []
-                marker_kinds.add("bullet")
-                body = match.group(1)
-
-        step = _strip_inline_markdown(body)
-        if not step or step[0] in "[{" or _BARE_TOOL_CALL.fullmatch(step):
-            return []
-        steps.append(step)
-
-    if not 2 <= len(steps) <= 5 or len(marker_kinds) != 1:
-        return []
-    if numbered_indexes and numbered_indexes != list(range(1, len(steps) + 1)):
-        return []
-    return steps
-
-
-def _plan_diagnostic(finish_reason: object, steps: list[str]) -> str:
-    if finish_reason != "stop":
-        return "invalid_finish_reason"
-    return "valid" if steps else "invalid_format"
-
-
-async def _generate_plan_within_budget(query: str) -> list[str]:
-    for attempt in range(1, PLAN_SEMANTIC_ATTEMPTS + 1):
-        system_prompt = _PLAN_SYSTEM
-        if attempt > 1:
-            system_prompt += (
-                "\n上次响应结构无效。重新输出完整的 2-5 步编号列表，"
-                "不要输出解释、JSON 或裸工具调用。"
-            )
-        response = await llm_chat(
-            [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": query},
-            ],
-            client=_client,
-            max_retries=PLAN_TRANSPORT_RETRIES,
-            total_timeout=PLAN_TOTAL_TIMEOUT_SECONDS,
-        )
-        choice = response.choices[0]
-        raw_plan = choice.message.content or ""
-        if check_output_leak(raw_plan)[0]:
-            logger.warning("[autonomous] plan output blocked by safety policy")
-            return []
-        steps = _parse_plan(raw_plan)
-        diagnostic = _plan_diagnostic(
-            getattr(choice, "finish_reason", None), steps
-        )
-        if diagnostic == "valid":
-            logger.info(
-                "[autonomous] plan accepted: attempt=%s step_count=%s",
-                attempt,
-                len(steps),
-            )
-            return steps
-        logger.warning(
-            "[autonomous] plan rejected: attempt=%s diagnostic=%s step_count=%s",
-            attempt,
-            diagnostic,
-            len(steps),
-        )
-    return []
-
-
-async def _generate_plan(query: str) -> list[str]:
-    """Generate an isolated plan under one total deadline."""
-    try:
-        return await asyncio.wait_for(
-            _generate_plan_within_budget(query),
-            timeout=PLAN_TOTAL_TIMEOUT_SECONDS,
-        )
-    except Exception as exc:
-        logger.warning(
-            "[autonomous] plan generation failed: error_type=%s",
-            type(exc).__name__,
-        )
-    return []
-
 
 # ═══════════════════════════════════════════════════════════════════════════
 # 核心：ReAct Loop（拆出来供主入口和 continue 端点复用）
@@ -1652,7 +1513,7 @@ async def _execute_autonomous(
         plan: list[str] = []
         logger.info(f"[autonomous] skip plan (query len={len(req.query.strip())})")
     else:
-        plan = await _generate_plan(req.query)
+        plan = await generate_plan(req.query)
         logger.info("[autonomous] plan generated: steps=%d", len(plan))
 
     # 构造初始 messages；工具调用由 ReAct 自主决策

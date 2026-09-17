@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-import routers.autonomous as autonomous
+import services.autonomous_plan as autonomous_plan
 
 
 def _completion(content: str, *, finish_reason: str = "stop"):
@@ -29,7 +29,7 @@ def _completion(content: str, *, finish_reason: str = "stop"):
     ],
 )
 def test_parse_plan_accepts_supported_lists(text, expected):
-    assert autonomous._parse_plan(text) == expected
+    assert autonomous_plan._parse_plan(text) == expected
 
 
 @pytest.mark.parametrize(
@@ -47,14 +47,14 @@ def test_parse_plan_accepts_supported_lists(text, expected):
     ],
 )
 def test_parse_plan_rejects_non_plan_or_out_of_bounds(text):
-    assert autonomous._parse_plan(text) == []
+    assert autonomous_plan._parse_plan(text) == []
 
 
 def test_generate_plan_isolates_context_and_bounds_transport():
     mocked_chat = AsyncMock(return_value=_completion("1. 检索资料\n2. 总结证据"))
 
-    with patch.object(autonomous, "llm_chat", mocked_chat):
-        result = asyncio.run(autonomous._generate_plan("制定学习计划"))
+    with patch.object(autonomous_plan, "llm_chat", mocked_chat):
+        result = asyncio.run(autonomous_plan.generate_plan("制定学习计划"))
 
     assert result == ["检索资料", "总结证据"]
     joined = "\n".join(
@@ -65,7 +65,7 @@ def test_generate_plan_isolates_context_and_bounds_transport():
     assert mocked_chat.await_args.kwargs["max_retries"] == 1
     assert (
         mocked_chat.await_args.kwargs["total_timeout"]
-        == autonomous.PLAN_TOTAL_TIMEOUT_SECONDS
+        == autonomous_plan.PLAN_TOTAL_TIMEOUT_SECONDS
     )
 
 
@@ -74,8 +74,8 @@ def test_generate_plan_retries_invalid_semantics_once_then_accepts():
         _completion("我建议先检索再总结。"),
         _completion("1. 检索资料\n2. 总结证据"),
     ])
-    with patch.object(autonomous, "llm_chat", mocked_chat):
-        result = asyncio.run(autonomous._generate_plan("制定学习计划"))
+    with patch.object(autonomous_plan, "llm_chat", mocked_chat):
+        result = asyncio.run(autonomous_plan.generate_plan("制定学习计划"))
     assert result == ["检索资料", "总结证据"]
     assert mocked_chat.await_count == 2
 
@@ -85,8 +85,8 @@ def test_generate_plan_requires_stop_and_two_to_five_steps():
         _completion("1. 检索资料\n2. 总结证据", finish_reason="length"),
         _completion("1. 仍然只有一步"),
     ])
-    with patch.object(autonomous, "llm_chat", mocked_chat):
-        result = asyncio.run(autonomous._generate_plan("制定学习计划"))
+    with patch.object(autonomous_plan, "llm_chat", mocked_chat):
+        result = asyncio.run(autonomous_plan.generate_plan("制定学习计划"))
     assert result == []
     assert mocked_chat.await_count == 2
 
@@ -96,28 +96,28 @@ def test_generate_plan_enforces_one_deadline_across_attempts():
         await asyncio.Event().wait()
 
     mocked_chat = AsyncMock(side_effect=never_returns)
-    with patch.object(autonomous, "llm_chat", mocked_chat), patch.object(
-        autonomous, "PLAN_TOTAL_TIMEOUT_SECONDS", 0.01
+    with patch.object(autonomous_plan, "llm_chat", mocked_chat), patch.object(
+        autonomous_plan, "PLAN_TOTAL_TIMEOUT_SECONDS", 0.01
     ):
-        result = asyncio.run(autonomous._generate_plan("制定学习计划"))
+        result = asyncio.run(autonomous_plan.generate_plan("制定学习计划"))
     assert result == []
     assert mocked_chat.await_count == 1
 
 
 def test_generate_plan_propagates_cancellation():
     mocked_chat = AsyncMock(side_effect=asyncio.CancelledError())
-    with patch.object(autonomous, "llm_chat", mocked_chat):
+    with patch.object(autonomous_plan, "llm_chat", mocked_chat):
         with pytest.raises(asyncio.CancelledError):
-            asyncio.run(autonomous._generate_plan("制定学习计划"))
+            asyncio.run(autonomous_plan.generate_plan("制定学习计划"))
 
 
 def test_generate_plan_logs_only_structural_diagnostics(caplog):
     secret = "不要记录 SECRET-PLAN-TEXT"
     mocked_chat = AsyncMock(side_effect=[_completion(secret), _completion(secret)])
     with caplog.at_level(logging.WARNING), patch.object(
-        autonomous, "llm_chat", mocked_chat
+        autonomous_plan, "llm_chat", mocked_chat
     ):
-        result = asyncio.run(autonomous._generate_plan("制定学习计划"))
+        result = asyncio.run(autonomous_plan.generate_plan("制定学习计划"))
     assert result == []
     assert "SECRET-PLAN-TEXT" not in caplog.text
     assert "invalid_format" in caplog.text
