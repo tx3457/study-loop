@@ -1,25 +1,16 @@
+import {
+  DEFAULT_USER_ID,
+  boundedText,
+  isIdempotencyKey,
+  isObject,
+} from './recoveryValidation.js'
+
 export const AUTONOMOUS_RECOVERY_STORAGE_KEY = 'study-loop.autonomous.recovery.v2'
 export const LEGACY_AUTONOMOUS_AWAITING_STORAGE_KEY = 'study-loop.autonomous.awaiting.v1'
 
 const SCHEMA_VERSION = 2
-const DEFAULT_USER_ID = 'default_user'
-const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u
 const CONVERSATION_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/u
 const RECOVERY_KINDS = new Set(['pending_start', 'awaiting', 'pending_continue'])
-
-function isObject(value) {
-  return value != null && typeof value === 'object' && !Array.isArray(value)
-}
-
-function boundedText(value, maxLength, { allowBlank = false } = {}) {
-  return typeof value === 'string'
-    && value.length <= maxLength
-    && (allowBlank || value.trim().length > 0)
-}
-
-function isIdempotencyKey(value) {
-  return typeof value === 'string' && IDEMPOTENCY_KEY_PATTERN.test(value.trim())
-}
 
 function normalizeRequest(value) {
   if (

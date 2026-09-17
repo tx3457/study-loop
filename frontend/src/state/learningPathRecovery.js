@@ -1,23 +1,14 @@
+import {
+  DEFAULT_USER_ID,
+  IDEMPOTENCY_KEY_PATTERN,
+  LEARNING_PATH_ID_PATTERN,
+  boundedText,
+  isObject,
+} from './recoveryValidation.js'
+
 export const LEARNING_PATH_RECOVERY_STORAGE_KEY = 'study-loop.learning-path.recovery.v1'
 
 const SCHEMA_VERSION = 1
-const DEFAULT_USER_ID = 'default_user'
-const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u
-const PATH_ID_PATTERN = /^lp_[0-9a-f]{32}$/u
-
-function isObject(value) {
-  return value != null && typeof value === 'object' && !Array.isArray(value)
-}
-
-function textLength(value) {
-  return Array.from(value.trim()).length
-}
-
-function boundedText(value, maxLength) {
-  return typeof value === 'string'
-    && textLength(value) > 0
-    && textLength(value) <= maxLength
-}
 
 function normalizeIntent(value) {
   if (
@@ -90,7 +81,7 @@ export function normalizeLearningPathResource(value) {
     !isObject(value)
     || value.schema_version !== SCHEMA_VERSION
     || typeof value.learning_path_id !== 'string'
-    || !PATH_ID_PATTERN.test(value.learning_path_id)
+    || !LEARNING_PATH_ID_PATTERN.test(value.learning_path_id)
     || value.user_id !== DEFAULT_USER_ID
     || typeof value.created_at !== 'number'
     || !Number.isFinite(value.created_at)
@@ -125,7 +116,7 @@ export function normalizeLearningPathResource(value) {
 }
 
 export function isLearningPathId(value) {
-  return typeof value === 'string' && PATH_ID_PATTERN.test(value)
+  return typeof value === 'string' && LEARNING_PATH_ID_PATTERN.test(value)
 }
 
 export function normalizeLearningPathRecovery(value) {
@@ -138,7 +129,7 @@ export function normalizeLearningPathRecovery(value) {
   if (
     !intent
     || !IDEMPOTENCY_KEY_PATTERN.test(key)
-    || (pathId != null && (typeof pathId !== 'string' || !PATH_ID_PATTERN.test(pathId)))
+    || (pathId != null && (typeof pathId !== 'string' || !LEARNING_PATH_ID_PATTERN.test(pathId)))
   ) {
     return null
   }

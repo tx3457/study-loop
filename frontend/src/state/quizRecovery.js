@@ -1,24 +1,13 @@
+import {
+  LEARNING_PATH_ID_PATTERN,
+  boundedText,
+  isIdempotencyKey,
+  isObject,
+} from './recoveryValidation.js'
+
 export const QUIZ_RECOVERY_STORAGE_KEY = 'study-loop.quiz.recovery.v1'
 
 const SCHEMA_VERSION = 1
-const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u
-const LEARNING_PATH_ID_PATTERN = /^lp_[0-9a-f]{32}$/u
-
-function isObject(value) {
-  return value != null && typeof value === 'object' && !Array.isArray(value)
-}
-
-function isNonEmptyString(value) {
-  return typeof value === 'string' && value.trim().length > 0
-}
-
-function isBoundedText(value, maxLength) {
-  return isNonEmptyString(value) && value.trim().length <= maxLength
-}
-
-function isIdempotencyKey(value) {
-  return typeof value === 'string' && IDEMPOTENCY_KEY_PATTERN.test(value.trim())
-}
 
 function normalizeLaunchId(value) {
   if (value == null) return null
@@ -45,9 +34,8 @@ function normalizeLaunchPreset(value) {
   if (value == null) return null
   if (
     !isObject(value)
-    || !isBoundedText(value.document_id, 512)
-    || typeof value.topic !== 'string'
-    || value.topic.trim().length > 4000
+    || !boundedText(value.document_id, 512)
+    || !boundedText(value.topic, 4000, { allowBlank: true })
   ) {
     return null
   }
@@ -71,15 +59,14 @@ function normalizeStandardRequest(value) {
   const source = normalizeLearningPathSource(value?.learning_path_source)
   if (
     !isObject(value)
-    || !isBoundedText(value.document_id, 512)
-    || typeof value.description !== 'string'
-    || value.description.trim().length > 4000
+    || !boundedText(value.document_id, 512)
+    || !boundedText(value.description, 4000, { allowBlank: true })
     || !Number.isInteger(value.count)
     || value.count < 1
     || value.count > 10
     || !['easy', 'medium', 'hard'].includes(value.difficulty)
     || !['choice', 'true_false', 'short_answer'].includes(value.type)
-    || !isBoundedText(value.user_id, 128)
+    || !boundedText(value.user_id, 128)
     || (value.learning_path_source != null && !source)
   ) {
     return null
@@ -99,8 +86,8 @@ function normalizeStandardRequest(value) {
 function normalizeWrongQuestionRequest(value) {
   if (
     !isObject(value)
-    || !isBoundedText(value.document_id, 512)
-    || !isBoundedText(value.user_id, 128)
+    || !boundedText(value.document_id, 512)
+    || !boundedText(value.user_id, 128)
   ) {
     return null
   }
@@ -131,7 +118,7 @@ function normalizeSession(value) {
   if (value == null) return null
   if (
     !isObject(value)
-    || !isBoundedText(value.session_id, 256)
+    || !boundedText(value.session_id, 256)
     || !Number.isInteger(value.revision)
     || value.revision < 1
     || typeof value.expires_at !== 'number'
@@ -154,7 +141,7 @@ function normalizePendingAnswer(value) {
     || !isIdempotencyKey(value.idempotency_key)
     || !Number.isInteger(value.question_index)
     || value.question_index < 0
-    || !isBoundedText(value.answer, 4000)
+    || !boundedText(value.answer, 4000)
   ) {
     return null
   }

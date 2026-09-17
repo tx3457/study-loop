@@ -1,9 +1,15 @@
+import {
+  DEFAULT_USER_ID,
+  LEARNING_PATH_ID_PATTERN,
+  boundedText,
+  optionalText,
+  isIdempotencyKey,
+  isObject,
+} from './recoveryValidation.js'
+
 export const ADAPTIVE_RECOVERY_STORAGE_KEY = 'study-loop.adaptive.recovery.v1'
 
 const SCHEMA_VERSION = 1
-const DEFAULT_USER_ID = 'default_user'
-const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/u
-const LEARNING_PATH_ID_PATTERN = /^lp_[0-9a-f]{32}$/u
 const QUESTION_TYPES = new Set(['choice', 'true_false', 'short_answer'])
 const ACTIONS = new Set([
   'advance',
@@ -20,37 +26,12 @@ const TERMINATE_REASONS = new Set([
   'switch_to_plan',
 ])
 
-function isObject(value) {
-  return value != null && typeof value === 'object' && !Array.isArray(value)
-}
-
-function textLength(value) {
-  return Array.from(value.trim()).length
-}
-
-function boundedText(value, maxLength) {
-  return typeof value === 'string'
-    && textLength(value) > 0
-    && textLength(value) <= maxLength
-}
-
-function isIdempotencyKey(value) {
-  return typeof value === 'string' && IDEMPOTENCY_KEY_PATTERN.test(value.trim())
-}
-
 function finiteOptionalScore(value) {
   return value == null || (
     typeof value === 'number'
     && Number.isFinite(value)
     && value >= 0
     && value <= 1
-  )
-}
-
-function optionalText(value, maxLength) {
-  return value == null || (
-    typeof value === 'string'
-    && value.length <= maxLength
   )
 }
 
@@ -263,10 +244,8 @@ export function normalizeAdaptiveSnapshot(value, expectedSessionId = null) {
     || value.trajectory.length === 0
     || value.trajectory.length > 100
     || (value.lesson != null && typeof value.lesson !== 'string')
-    || typeof value.summary !== 'string'
-    || value.summary.length > 40000
-    || typeof value.terminate_reason !== 'string'
-    || value.terminate_reason.length > 128
+    || !boundedText(value.summary, 40000, { allowBlank: true })
+    || !boundedText(value.terminate_reason, 128, { allowBlank: true })
     || (value.learning_path != null && !isObject(value.learning_path))
     || !Number.isInteger(value.revision)
     || value.revision < 1
