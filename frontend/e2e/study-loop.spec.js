@@ -3440,6 +3440,105 @@ test('adaptive ignores a late start response after reset and a newer start', asy
   }
 })
 
+test('session endpoints escape a session id that is not URL safe', async ({ page }) => {
+  // quizRecovery 对 session_id 只有 boundedText(…, 256)，/ 和 . 都是允许的。
+  // 未编码地插进模板串时浏览器会就地规范化，quiz-1/../evil 变成 evil，请求
+  // 落到另一条会话路径上。GET /session/{id} 一直是编码的，另外四个端点不是。
+  const sessionId = 'quiz-1/../evil'
+  const encoded = encodeURIComponent(sessionId)
+  const seenSessionPaths = []
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (path.startsWith('/session/')) {
+      seenSessionPaths.push(`${request.method()} ${path}`)
+    }
+    if (request.method() === 'GET' && path === `/session/${encoded}`) {
+      return { body: quizSnapshot({ sessionId }) }
+    }
+    if (request.method() === 'POST' && path === `/session/${encoded}/answer`) {
+      return {
+        body: {
+          correct: true,
+          correct_answer: 'Alpha',
+          explanation: '回答正确',
+          is_last: true,
+          next_index: null,
+          revision: 2,
+          expires_at: FUTURE_EXPIRES_AT,
+        },
+      }
+    }
+    if (request.method() === 'GET' && path === `/session/${encoded}/result`) {
+      return {
+        body: {
+          session_id: sessionId,
+          document_id: 'notes.md',
+          total: 1,
+          correct: 1,
+          score: 1,
+          details: [],
+        },
+      }
+    }
+    if (request.method() === 'POST' && path === `/session/${encoded}/grade`) {
+      return {
+        body: {
+          session_id: sessionId,
+          total: 1,
+          correct: 1,
+          score: 1,
+          grades: [{
+            index: 0,
+            question: '请选择首字母',
+            user_answer: 'Alpha',
+            correct_answer: 'Alpha',
+            is_correct: true,
+            ai_feedback: null,
+            knowledge_gap: null,
+          }],
+        },
+      }
+    }
+    if (request.method() === 'POST' && path === `/session/${encoded}/report`) {
+      return {
+        body: {
+          session_id: sessionId,
+          document_id: 'notes.md',
+          overall_score: 1,
+          topic_mastery: [],
+          strengths: ['首字母'],
+          weaknesses: [],
+          recommendations: ['继续练习'],
+          summary: '转义会话的学习报告摘要',
+        },
+      }
+    }
+    return null
+  })
+
+  await page.addInitScript(({ key, value }) => {
+    sessionStorage.setItem(key, JSON.stringify(value))
+  }, { key: QUIZ_RECOVERY_KEY, value: quizRecovery({ sessionId }) })
+
+  await page.goto('/quiz')
+  await page.getByRole('button', { name: /Alpha/ }).click()
+  await page.getByRole('button', { name: '提交答案' }).click()
+  // 四个被修的端点都要真正走到：只停在 answer 的话，另外三个漏改也是绿的。
+  await page.getByRole('button', { name: '查看结果' }).click()
+  await page.getByRole('button', { name: 'AI 批改讲解' }).click()
+  await expect(page.getByRole('heading', { name: 'AI 批改报告' })).toBeVisible()
+  await page.getByRole('button', { name: '学习评估报告' }).click()
+  await expect(page.getByText('转义会话的学习报告摘要')).toBeVisible()
+
+  expect(seenSessionPaths).toEqual([
+    `GET /session/${encoded}`,
+    `POST /session/${encoded}/answer`,
+    `GET /session/${encoded}/result`,
+    `POST /session/${encoded}/grade`,
+    `POST /session/${encoded}/report`,
+  ])
+  expect(unexpectedRequests).toEqual([])
+})
+
 test('quiz restart releases the learning path binding instead of carrying it into the next round', async ({ page }) => {
   // clearSession() 不动 config，而 navigateToLearningPath / startIncomingQuiz
   // 都在它后面补了 setConfig——只有 handleRestart 漏了。漏掉时下一轮请求仍带

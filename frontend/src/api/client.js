@@ -226,7 +226,7 @@ export async function submitAnswer(sessionId, {
   idempotency_key,
   signal,
 }) {
-  return request(`/session/${sessionId}/answer`, {
+  return request(`/session/${encodeURIComponent(sessionId)}/answer`, {
     method: 'POST',
     signal,
     headers: {
@@ -239,12 +239,12 @@ export async function submitAnswer(sessionId, {
 
 /** 获取答题结果 */
 export async function getSessionResult(sessionId, { signal } = {}) {
-  return request(`/session/${sessionId}/result`, { signal })
+  return request(`/session/${encodeURIComponent(sessionId)}/result`, { signal })
 }
 
 /** AI 批改 */
 export async function gradeSession(sessionId, { signal } = {}) {
-  return request(`/session/${sessionId}/grade`, { method: 'POST', signal })
+  return request(`/session/${encodeURIComponent(sessionId)}/grade`, { method: 'POST', signal })
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -288,7 +288,7 @@ export async function startWrongQuestionPractice(
 
 /** 学习评估报告 */
 export async function generateReport(sessionId, { signal } = {}) {
-  return request(`/session/${sessionId}/report`, { method: 'POST', signal })
+  return request(`/session/${encodeURIComponent(sessionId)}/report`, { method: 'POST', signal })
 }
 
 /* ═══════════════════════════════════════════════════════════════════
