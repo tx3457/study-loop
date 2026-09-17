@@ -7003,7 +7003,12 @@ test('Dashboard requires an explicit choice before replacing Quiz recovery', asy
   await page.getByRole('button', { name: '放弃并开始错题重练' }).click()
 
   await expect(page).toHaveURL(/\/quiz$/)
-  await expect(page.getByText('只属于新材料的错题')).toBeVisible()
+  // 这句题干在 Dashboard 的错题预览里也有（同一份 wrongEntry），只按文字找会在
+  // 跳转瞬间命中尚未卸载的 Dashboard 节点，于是下面的计数断言跑在 practice
+  // 请求之前。作答用的 radiogroup 只有 practice 响应渲染出题目后才存在。
+  await expect(
+    page.getByRole('group', { name: '只属于新材料的错题' })
+  ).toBeVisible()
   expect(practiceStarts).toBe(1)
   expect(
     await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), QUIZ_RECOVERY_KEY)
@@ -7123,7 +7128,11 @@ test('Dashboard starts a persisted wrong-question practice in Quiz', async ({ pa
   await page.getByRole('button', { name: '开始重练（2）' }).click()
 
   await expect(page).toHaveURL(/\/quiz$/)
-  await expect(page.getByText('RRF 的作用是什么？')).toBeVisible()
+  // 同上：题干在 Dashboard 的错题预览里也有，按文字找会命中尚未卸载的
+  // Dashboard 节点，practiceKey 那时还没被 practice 请求赋值。
+  await expect(
+    page.getByRole('group', { name: 'RRF 的作用是什么？' })
+  ).toBeVisible()
   expect(practiceKey).toMatch(UUID_V4_PATTERN)
   expect(
     await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), QUIZ_RECOVERY_KEY)
