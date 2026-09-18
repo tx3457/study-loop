@@ -74,8 +74,7 @@ docker compose up --build -d --wait
 | --- | --- |
 | Web | React 19, React Router, Vite |
 | API | FastAPI, Pydantic, Uvicorn |
-| Agent | bounded tool loop, server-authoritative tool bindings, durable HITL pause/resume |
-| Experimental | LangGraph supervisor graphs (opt-in) |
+| Agent and workflows | LangGraph, LangChain |
 | Retrieval | Chroma, BM25, optional query rewriting / HyDE / reranking |
 | State | PostgreSQL, SQLite, learner-memory snapshots |
 | Delivery and quality | Docker Compose, GitHub Actions, Pytest, Playwright |
@@ -84,9 +83,7 @@ docker compose up --build -d --wait
 
 Web 产品主线包括文档管理、学习路径、答题练习、自主 Agent、自适应辅导和学习报告。
 
-`/chat/tools` 是工具循环最小的调用入口：单次请求、无服务端会话、最多 3 轮，与 `/agent/autonomous` 共用同一份 `run_tool_round`。它没有 Web 界面，但可以直接调用。
-
-其余默认注册、在认证门内、同样没有 Web 界面的端点：`/chat/stream` 是基础流式对话；`/chat/history` 的多轮历史存在进程内（有界 LRU，进程重启即丢失，不跨副本共享），超过阈值时用 LLM 摘要压缩旧消息；`/agent/run` 与 `/agent/stream` 是 orchestrator 调试入口；`/eval/ab` 运行 A/B 评测并会真实消耗模型额度，见 [`docs/EVALUATION.md`](docs/EVALUATION.md)；`/generate/quiz/native` 是不走学习路径的单次出题。`/agent/tutor/*` supervisor 图是架构实验，只有进程启动时 `MAS_SUPERVISOR_ENABLED=true` 才注册路由。
+另有若干默认注册、在认证门内但没有 Web 界面的端点，可以直接调用；它们的执行风格与停止条件见[架构与执行边界](docs/ARCHITECTURE.md)。
 
 引用校验保证片段 ID 来自本轮、指定文档范围内的检索结果，但不等同于对回答中每一项事实完成语义核验。文档删除是“仅删除材料”，不会级联清除已经形成的学习历史和会话工件。完整边界见架构与安全文档。
 

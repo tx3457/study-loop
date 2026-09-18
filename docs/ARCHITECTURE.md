@@ -39,13 +39,22 @@ workflow rather than an unconstrained tool Agent.
 | `/agent/tutor/assist` (Lab) | The embedded assistant uses the same tool loop; `ask_user` pauses through LangGraph `interrupt` | SQLite checkpointer + `thread_id`; at most 8 assistant rounds | Experimental tool-using Agent with HITL |
 | `/agent/adaptive/*` | The model selects a structured teaching action; application code executes a known branch | Adaptive session state, mastery/round stop rules | Agentic workflow |
 | `/agent/tutor/start` and `/agent/tutor/submit` | A supervisor node reasons over the full observation and dispatches the next worker with `Command(goto=...)`; workers flow back to it for the next decision | SQLite checkpointer + `thread_id`; `interrupt` per answer turn, at most 8 handoffs | Supervisor-based Multi-Agent with HITL |
-| `/agent/run` and quiz/critic/reviser graphs | Node order and retry routes are encoded by the developer | Graph state and bounded revision counts | Predefined LangGraph workflow |
+| `/agent/run`, `/agent/stream` and quiz/critic/reviser graphs | Node order and retry routes are encoded by the developer | Graph state and bounded revision counts | Predefined LangGraph workflow |
+| `/chat/stream` | No decision loop: a single model call streamed back to the caller | No server session; ends when the stream closes | Streaming chat completion |
+| `/chat/history` | No decision loop; earlier turns are replayed as context and the model summarises the older ones once they pass a threshold | In-process bounded LRU: lost on restart and not shared across replicas | Multi-turn chat completion |
+| `/generate/quiz/native` | No decision loop: one structured generation outside the learning path | No server session; ends with the returned quiz | Structured generation |
 | document retrieval and learner memory | No autonomous decision loop | Chroma/BM25 and Store-compatible memory | RAG / application memory |
 
 The optional supervisor graph is experimental: it has no Web surface and is not
 registered in FastAPI unless `MAS_SUPERVISOR_ENABLED=true` at process startup.
 The `/agent/tutor/*` routes are a Lab surface for architecture experiments, not
 part of the product surface.
+
+`/chat/*`, `/generate/quiz/native`, `/agent/run` and `/agent/stream` are
+registered by default and sit behind the authentication gate, but none of them
+has a Web surface; they are called directly. `/eval/ab` is the same kind of
+operator entry point and spends real model credits on every call, so it is
+documented separately in [Evaluation](EVALUATION.md).
 
 ## Tool loop
 
