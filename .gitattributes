@@ -5,3 +5,6 @@
 *.jpeg binary
 *.gif binary
 *.pdf binary
+
+# Preserve captured test stdout verbatim, including diagnostic padding.
+docs/lightrag/verification/**/*.txt -whitespace

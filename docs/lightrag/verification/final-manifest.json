@@ -46,7 +46,7 @@
     "semantic_truth_evaluated": false
   },
   "public_web_limit": "MCP handshake succeeded; public query empty; fetch rejected reserved Fake-IP DNS address. Successful public retrieval not claimed.",
-  "file_count": 140,
+  "file_count": 141,
   "file_sha256": {
     ".dockerignore": "887b5d533715a6e0df0a839e670f39fddcaf0bb449688fda202651081f7a35ee",
     ".env.example": "0c532ba1cf33bed0bd72cee61f64dbc4f8c10736831b0d54a303f37c15fc61a5",
@@ -135,7 +135,7 @@
     "graph_service/locks.py": "d538e2b393663229269366e30ebb3c636d8ad8f8446de1c7cd79214202ee2895",
     "graph_service/main.py": "f826aafa084a8f7598efe3cba21c11c2fd7184de3bebac9d266b1c642c80d070",
     "graph_service/materials.py": "e968cd31a06bf5d94ff1c5151c8bb5c591064425fbbb774e55c388b14e06f67f",
-    "graph_service/repository.py": "762269ab67736c73111b51ee476f2026a6237685fe19a677eea3e195fc515842",
+    "graph_service/repository.py": "58410b7a81c0a724b4ee4d1eaf15189c1b63013d57cc9888b906c2c57fe8b54a",
     "graph_service/requirements.txt": "bdf5111c3623d5dca6ffd4ca56820074d73230823824557977659a79ee370735",
     "graph_service/service.py": "b538a69d12eb1d447d28c090b107bb05eb01dc61d8571499a73e6b29d7e45f77",
     "graph_service/worker.py": "42f43a1b223dfcdd1629d9ccfd2cc08f09e10ace66fe0445f2fb18f69a2b1ccf",
@@ -187,7 +187,8 @@
     "tests/test_knowledge_gateway.py": "491aa642b1cb579dff19c68fbd34d910ede608359c0a6b0c0df7f4608940d4ac",
     "tests/test_knowledge_web.py": "90e42167cc3756095a84f7cef766c0d66043de5edc03c92184ad31bd2e3f93a8",
     "tests/test_mcp_servers.py": "f23602a33d2e3a1318e6d739ca84f12dccc2116c32d39c0d0fb74b737c8d87b0",
-    "tests/test_scoped_tool_registry.py": "ee8fa2d676c78c25a67900204ebb4b2ba61c623008e73ea3edc7435c17d8d43a"
+    "tests/test_scoped_tool_registry.py": "ee8fa2d676c78c25a67900204ebb4b2ba61c623008e73ea3edc7435c17d8d43a",
+    ".gitattributes": "ae507381c102cb0b3cd87495f8d8e5f8ba8c93e7c371bcd3bc7e19e72f91de1f"
   },
   "prior_delivery_manifest": "docs/lightrag/verification/before-review-fixes/final-manifest.json"
 }

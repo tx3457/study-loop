@@ -307,7 +307,7 @@ class Repository:
                         active_version_id,
                     )
             await connection.execute(
-                "UPDATE sl_jobs SET status='succeeded',stage='published',revision=$2,error_code=NULL," 
+                "UPDATE sl_jobs SET status='succeeded',stage='published',revision=$2,error_code=NULL,"
                 "updated_at=now() WHERE id=$1",
                 job["id"],
                 revision,
