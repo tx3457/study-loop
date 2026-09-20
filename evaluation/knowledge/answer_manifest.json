@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "evaluation_id": "knowledge_answer_small_v1",
+  "frozen_at": "2026-09-20T04:04:32+08:00",
+  "hash_algorithm": "sha256",
+  "files": {
+    "answer_protocol.json": "727540269a0ba4995a6028aac212fe30718d61c5a2540e2cbbeb408b0b7fb675"
+  },
+  "files_payload_sha256": "f9608c3bdafb9441c025a6a2508d6cff669d7796ab5b7f5724246550963444b2",
+  "parent_retrieval_manifest_sha256": "92f371f3e258972ce848612961d88cfbefa526a98a8a976a05ad6566785453d0",
+  "required_parent_hashes": {
+    "manifest_files_payload_sha256": "cbd05c42372084ba4fe00eb888ce9b42bc73df7251ca27e2f6b98ce74f316911",
+    "questions.json": "97a561f66e083de5e5b7f8b5feb0c99daf9202c821e704e87b58deb9ac678b6d",
+    "sources.json": "0f5548c89fa48c156272b1a5cebb629391e17be80f9acd4515b0a77c624b1c15"
+  },
+  "live_model_calls_before_freeze": false
+}

@@ -39,11 +39,15 @@ def mcp_live_enabled() -> bool:
 def _live_server_configs() -> list[StdioMCPServerConfig]:
     """live MCP server 清单。默认接 duckduckgo-mcp-server（无 key，search + fetch_content）。"""
     uvx = os.getenv("UVX_PATH", "uvx")
+    bundled = os.getenv("MCP_DDG_COMMAND", "").strip()
+    arguments = ["--ref-url-threshold", "0"]
+    if not bundled:
+        arguments = ["--from", "duckduckgo-mcp-server==0.7.0", "duckduckgo-mcp-server", *arguments]
     return [
         StdioMCPServerConfig(
             server_name="ddg",
-            command=uvx,
-            args=["duckduckgo-mcp-server"],
+            command=bundled or uvx,
+            args=arguments,
             read_only_tools=frozenset({"search", "fetch_content"}),
         ),
     ]

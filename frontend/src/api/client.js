@@ -300,7 +300,9 @@ export async function runAutonomous({
   query,
   user_id = 'default_user',
   document_id = null,
+  knowledge_base_id = null,
   grounding_required = false,
+  web_enabled = false,
   idempotency_key,
   signal,
 }) {
@@ -311,7 +313,14 @@ export async function runAutonomous({
       'Content-Type': 'application/json',
       ...(idempotency_key ? { 'Idempotency-Key': idempotency_key } : {}),
     },
-    body: JSON.stringify({ query, user_id, document_id, grounding_required }),
+    body: JSON.stringify({
+      query,
+      user_id,
+      document_id,
+      knowledge_base_id,
+      grounding_required,
+      web_enabled,
+    }),
   })
 }
 
@@ -345,6 +354,143 @@ export async function cancelAutonomous(conversationId, { signal } = {}) {
 export async function getAudit(runId) {
   return request(`/audit/${encodeURIComponent(runId)}`)
 }
+
+/* ═══════════════════════════════════════════════════════════════════
+   Knowledge bases
+   ═══════════════════════════════════════════════════════════════════ */
+
+const jsonMutation = (method, body, idempotencyKey = null) => ({
+  method,
+  headers: {
+    'Content-Type': 'application/json',
+    ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}),
+  },
+  body: JSON.stringify(body),
+})
+
+export const getKnowledgeCapabilities = ({ signal } = {}) =>
+  request('/knowledge-bases/capabilities', { signal })
+
+export const getKnowledgeBases = ({ signal } = {}) =>
+  request('/knowledge-bases', { signal })
+
+export const createKnowledgeBase = (body, idempotencyKey) =>
+  request('/knowledge-bases', jsonMutation('POST', body, idempotencyKey))
+
+export const getKnowledgeBase = (knowledgeBaseId, { signal } = {}) =>
+  request(`/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}`, { signal })
+
+export const updateKnowledgeBase = (knowledgeBaseId, body, idempotencyKey) =>
+  request(
+    `/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}`,
+    jsonMutation('PATCH', body, idempotencyKey),
+  )
+
+export const deleteKnowledgeBase = (knowledgeBaseId, expectedRevision, idempotencyKey) =>
+  request(
+    `/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}`,
+    jsonMutation('DELETE', { expected_revision: expectedRevision }, idempotencyKey),
+  )
+
+export const getKnowledgeDocuments = (
+  knowledgeBaseId,
+  { signal, limit = 50, offset = 0 } = {},
+) => {
+  const query = new URLSearchParams({ limit: String(limit), offset: String(offset) })
+  return request(
+    `/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents?${query}`,
+    { signal },
+  )
+}
+
+export async function uploadKnowledgeDocument(knowledgeBaseId, file, expectedRevision, idempotencyKey) {
+  const formData = new FormData()
+  formData.append('file', file)
+  formData.append('expected_revision', String(expectedRevision))
+  return request(`/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/upload`, {
+    method: 'POST',
+    headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {},
+    body: formData,
+  })
+}
+
+export async function replaceKnowledgeDocument(
+  knowledgeBaseId,
+  documentId,
+  file,
+  expectedRevision,
+  idempotencyKey,
+) {
+  const formData = new FormData()
+  formData.append('file', file)
+  formData.append('expected_revision', String(expectedRevision))
+  return request(
+    `/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/${encodeURIComponent(documentId)}`,
+    {
+      method: 'PUT',
+      headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {},
+      body: formData,
+    },
+  )
+}
+
+export const deleteKnowledgeDocument = (knowledgeBaseId, documentId, expectedRevision, idempotencyKey) =>
+  request(
+    `/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/${encodeURIComponent(documentId)}`,
+    jsonMutation('DELETE', { expected_revision: expectedRevision }, idempotencyKey),
+  )
+
+export const importLegacyDocument = (knowledgeBaseId, legacyDocumentId, expectedRevision, idempotencyKey) =>
+  request(
+    `/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/documents/import-legacy`,
+    jsonMutation('POST', {
+      legacy_document_id: legacyDocumentId,
+      expected_revision: expectedRevision,
+    }, idempotencyKey),
+  )
+
+export function getKnowledgeGraph(knowledgeBaseId, { search = '', focus = '', signal } = {}) {
+  const query = new URLSearchParams({ limit_nodes: '200', limit_edges: '400' })
+  if (search.trim()) query.set('search', search.trim())
+  if (focus.trim()) query.set('focus', focus.trim())
+  return request(`/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/graph?${query}`, { signal })
+}
+
+export const getKnowledgeSource = (knowledgeBaseId, sourceVersionId, { signal } = {}) =>
+  request(
+    `/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/sources/${encodeURIComponent(sourceVersionId)}`,
+    { signal },
+  )
+
+export const createKnowledgeCorrection = (knowledgeBaseId, body, idempotencyKey) =>
+  request(
+    `/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/corrections`,
+    jsonMutation('POST', body, idempotencyKey),
+  )
+
+export const importWebSnapshot = (knowledgeBaseId, snapshotId, expectedRevision, idempotencyKey) =>
+  request(
+    `/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/web-import`,
+    jsonMutation('POST', {
+      snapshot_id: snapshotId,
+      expected_revision: expectedRevision,
+    }, idempotencyKey),
+  )
+
+export const getKnowledgeJob = (jobId, { signal } = {}) =>
+  request(`/knowledge-jobs/${encodeURIComponent(jobId)}`, { signal })
+
+export const retryKnowledgeJob = (jobId, expectedRevision, idempotencyKey) =>
+  request(
+    `/knowledge-jobs/${encodeURIComponent(jobId)}/retry`,
+    jsonMutation('POST', { expected_revision: expectedRevision }, idempotencyKey),
+  )
+
+export const rebuildKnowledgeBase = (knowledgeBaseId, expectedRevision, idempotencyKey) =>
+  request(
+    `/knowledge-bases/${encodeURIComponent(knowledgeBaseId)}/rebuild`,
+    jsonMutation('POST', { expected_revision: expectedRevision }, idempotencyKey),
+  )
 
 /* ═══════════════════════════════════════════════════════════════════
    Adaptive Learning Loop

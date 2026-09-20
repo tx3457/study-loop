@@ -179,15 +179,19 @@ class ToolRegistry:
 
     def __new__(cls):
         if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._tools: dict[str, Tool] = {}
-            cls._instance._audit_log: list[ToolCallRecord] = []
-            cls._instance._run_effect_digests: dict[
-                str, set[tuple[str, str]]
-            ] = {}
-            cls._instance._run_effect_attempts: set[str] = set()
-            cls._instance._run_untrusted_content: set[str] = set()
+            cls._instance = cls.isolated()
         return cls._instance
+
+    @classmethod
+    def isolated(cls) -> "ToolRegistry":
+        """Create request-local authority without changing the legacy singleton."""
+        instance = object.__new__(cls)
+        instance._tools = {}
+        instance._audit_log = []
+        instance._run_effect_digests = {}
+        instance._run_effect_attempts = set()
+        instance._run_untrusted_content = set()
+        return instance
 
     # ── 注册 / 查询 ──────────────────────────────────────────────────────
     def register(self, tool: Tool) -> None:

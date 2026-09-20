@@ -1,0 +1,13 @@
+{
+  "reference_count": 12,
+  "invalid_reference_count": 0,
+  "invalid_references": [],
+  "status": "pass",
+  "database": "http_reviewfix",
+  "vector_tables": [
+    "lightrag_vdb_entity_deterministic_contract_v1_64d",
+    "lightrag_vdb_relation_deterministic_contract_v1_64d"
+  ],
+  "read_only": true,
+  "model_calls": 0
+}

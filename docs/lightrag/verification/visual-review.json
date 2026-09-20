@@ -1,0 +1,35 @@
+{
+  "status": "pass",
+  "stack": "real HTTP backend and real LightRAG/PG with deterministic model callbacks",
+  "viewports": [
+    {
+      "width": 1440,
+      "height": 1000
+    },
+    {
+      "width": 390,
+      "height": 844
+    }
+  ],
+  "screenshots": [
+    "knowledge-desktop.png",
+    "knowledge-mobile.png",
+    "graph-desktop.png",
+    "graph-mobile.png",
+    "source-mobile.png"
+  ],
+  "checks": [
+    "document controls styled and legible",
+    "no raw entity IDs in graph selectors or lists",
+    "graph named entity/source controls",
+    "mobile source title and close visible",
+    "mobile source close interactive",
+    "no browser console errors observed"
+  ],
+  "fixed_findings": [
+    "unstyled graph actions",
+    "mobile navigation intercepted source close button"
+  ],
+  "test_evidence": "frontend-tests.txt",
+  "limits": "Synthetic graph fixture; bounded graph layout is not a large-corpus visual quality benchmark."
+}

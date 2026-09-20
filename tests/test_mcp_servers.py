@@ -34,6 +34,12 @@ class TestMcpLiveEnabled(unittest.TestCase):
 
 
 class TestServerConfigs(unittest.TestCase):
+    def test_bundled_executable_avoids_runtime_uvx_and_preserves_full_urls(self):
+        with patch.dict(os.environ, {"MCP_DDG_COMMAND": "/opt/studyloop-ddg/bin/duckduckgo-mcp-server"}):
+            config = ms._live_server_configs()[0]
+        self.assertEqual(config.command, "/opt/studyloop-ddg/bin/duckduckgo-mcp-server")
+        self.assertEqual(config.args, ["--ref-url-threshold", "0"])
+
     def test_default_ddg(self):
         cfgs = ms._live_server_configs()
         self.assertEqual(len(cfgs), 1)

@@ -37,6 +37,10 @@ def _payload(label: str) -> dict:
     }
 
 
+def _owned_payload(owner_id: str, label: str) -> dict:
+    return {**_payload(label), "user_id": owner_id}
+
+
 @unittest.skipUnless(TEST_DATABASE_URL, "TEST_DATABASE_URL is not configured")
 class TestPostgresAutonomousSessionStore(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
@@ -118,6 +122,176 @@ class TestPostgresAutonomousSessionStore(unittest.IsolatedAsyncioTestCase):
             postgres_tcp_user_timeout_ms=30_000,
             clock=lambda: self.now[0],
         )
+
+    def _raw_row(self, conversation_id: str):
+        from psycopg import sql
+
+        with self._admin_connect() as connection:
+            return connection.execute(
+                sql.SQL("SELECT * FROM {} WHERE conversation_id = %s").format(
+                    sql.Identifier(self.table_name)
+                ),
+                (conversation_id,),
+            ).fetchone()
+
+    async def test_owner_bound_operations_are_opaque_and_non_mutating(self):
+        inspect_id = f"{self.conversation_id}-inspect"
+        await self.store.save(inspect_id, _owned_payload("alice", "inspect"))
+        inspect_before = self._raw_row(inspect_id)
+        self.assertIsNone(await self.store.inspect(inspect_id, owner_id="bob"))
+        self.assertEqual(self._raw_row(inspect_id), inspect_before)
+        self.assertEqual(
+            (await self.store.inspect(inspect_id, owner_id="alice")).payload["user_id"],
+            "alice",
+        )
+
+        claim_id = f"{self.conversation_id}-claim"
+        await self.store.save(claim_id, _owned_payload("alice", "claim"))
+        claim_before = self._raw_row(claim_id)
+        rejected = await self.store.claim(claim_id, FINGERPRINT, owner_id="bob")
+        self.assertFalse(rejected.claimed)
+        self.assertEqual(rejected.reason, "missing")
+        self.assertEqual(self._raw_row(claim_id), claim_before)
+        accepted = await self.store.claim(claim_id, FINGERPRINT, owner_id="alice")
+        self.assertTrue(accepted.claimed)
+
+        discard_id = f"{self.conversation_id}-discard"
+        await self.store.save(discard_id, _owned_payload("alice", "discard"))
+        discard_before = self._raw_row(discard_id)
+        rejected_discard = await self.store.discard_paused(discard_id, owner_id="bob")
+        self.assertFalse(rejected_discard.discarded)
+        self.assertEqual(rejected_discard.reason, "missing")
+        self.assertEqual(self._raw_row(discard_id), discard_before)
+        accepted_discard = await self.store.discard_paused(discard_id, owner_id="alice")
+        self.assertTrue(accepted_discard.discarded)
+
+    async def test_owner_bound_completed_replay_is_opaque(self):
+        await self.store.save(self.conversation_id, _owned_payload("alice", "completed"))
+        claimed = await self.store.claim(
+            self.conversation_id, FINGERPRINT, owner_id="alice"
+        )
+        outcome = {"response_schema_version": 2, "final_answer": "owner secret"}
+        self.assertTrue(
+            await self.store.finish(self.conversation_id, claimed.claim_token, outcome)
+        )
+        before = self._raw_row(self.conversation_id)
+
+        rejected = await self.store.claim(
+            self.conversation_id, FINGERPRINT, owner_id="bob"
+        )
+        self.assertEqual(rejected.reason, "missing")
+        self.assertIsNone(rejected.outcome)
+        self.assertEqual(self._raw_row(self.conversation_id), before)
+        replay = await self.store.claim(
+            self.conversation_id, FINGERPRINT, owner_id="alice"
+        )
+        self.assertEqual(replay.reason, "completed")
+        self.assertEqual(replay.outcome, outcome)
+
+    async def test_owner_mismatch_precedes_postgres_expiry_mutations(self):
+        store = self._new_store(ttl_seconds=10)
+        await store.save(self.conversation_id, _owned_payload("alice", "expired"))
+        self.now[0] += 11
+        before = self._raw_row(self.conversation_id)
+
+        self.assertIsNone(await store.inspect(self.conversation_id, owner_id="bob"))
+        rejected_claim = await store.claim(
+            self.conversation_id, FINGERPRINT, owner_id="bob"
+        )
+        self.assertEqual(rejected_claim.reason, "missing")
+        rejected_discard = await store.discard_paused(
+            self.conversation_id, owner_id="bob"
+        )
+        self.assertEqual(rejected_discard.reason, "missing")
+        self.assertEqual(self._raw_row(self.conversation_id), before)
+
+        authorized = await store.claim(
+            self.conversation_id, FINGERPRINT, owner_id="alice"
+        )
+        self.assertEqual(authorized.reason, "expired")
+        self.assertIsNone(self._raw_row(self.conversation_id))
+
+    async def test_exists_without_reaping_preserves_corrupt_expired_postgres_row(self):
+        from psycopg import sql
+
+        store = self._new_store(ttl_seconds=10)
+        await store.save(self.conversation_id, _owned_payload("alice", "exists"))
+        with self._admin_connect() as connection:
+            connection.execute(
+                sql.SQL("UPDATE {} SET payload_json = '{{' WHERE conversation_id = %s").format(
+                    sql.Identifier(self.table_name)
+                ),
+                (self.conversation_id,),
+            )
+        self.now[0] += 11
+        before = self._raw_row(self.conversation_id)
+
+        self.assertTrue(await store.exists_without_reaping(self.conversation_id))
+        self.assertFalse(await store.exists_without_reaping(f"missing-{uuid.uuid4().hex}"))
+        self.assertEqual(self._raw_row(self.conversation_id), before)
+
+    async def test_durable_owner_survives_postgres_payload_corruption(self):
+        from psycopg import sql
+
+        await self.store.save(
+            self.conversation_id, _owned_payload("alice", "durable owner")
+        )
+        with self._admin_connect() as connection:
+            connection.execute(
+                sql.SQL("UPDATE {} SET payload_json = '{{' WHERE conversation_id = %s").format(
+                    sql.Identifier(self.table_name)
+                ),
+                (self.conversation_id,),
+            )
+        before = self._raw_row(self.conversation_id)
+
+        self.assertTrue(await self.store.owned(self.conversation_id, "alice"))
+        self.assertFalse(await self.store.owned(self.conversation_id, "bob"))
+        rejected = await self.store.claim(
+            self.conversation_id, FINGERPRINT, owner_id="bob"
+        )
+        self.assertEqual(rejected.reason, "missing")
+        self.assertEqual(self._raw_row(self.conversation_id), before)
+        accepted = await self.store.claim(
+            self.conversation_id, FINGERPRINT, owner_id="alice"
+        )
+        self.assertTrue(accepted.claimed)
+        self.assertEqual(accepted.reason, "invalid_payload")
+
+    async def test_postgres_handoff_preserves_owner_and_rejects_owner_change(self):
+        source_id = f"{self.conversation_id}-owner-source"
+        target_id = f"{self.conversation_id}-owner-target"
+        await self.store.save(source_id, _owned_payload("alice", "source"))
+        claim = await self.store.claim(source_id, FINGERPRINT, owner_id="alice")
+        before = self._raw_row(source_id)
+        outcome = {
+            "response_schema_version": 2,
+            "awaiting_user_input": True,
+            "conversation_id": target_id,
+        }
+
+        with self.assertRaises(ValueError):
+            await self.store.handoff(
+                source_id,
+                claim.claim_token,
+                target_id,
+                _owned_payload("bob", "wrong owner"),
+                outcome,
+            )
+        self.assertEqual(self._raw_row(source_id), before)
+        self.assertIsNone(self._raw_row(target_id))
+
+        self.assertTrue(
+            await self.store.handoff(
+                source_id,
+                claim.claim_token,
+                target_id,
+                _owned_payload("alice", "same owner"),
+                outcome,
+            )
+        )
+        self.assertTrue(await self.store.owned(target_id, "alice"))
+        self.assertFalse(await self.store.owned(target_id, "bob"))
 
     async def _assert_finishes_with_database_error_while_blocked(
         self,
@@ -414,6 +588,7 @@ class TestPostgresAutonomousSessionStore(unittest.IsolatedAsyncioTestCase):
 
         table_name = f"studyloop_auto_old_{uuid.uuid4().hex[:16]}"
         legacy_id = f"legacy-{uuid.uuid4().hex}"
+        legacy_owned_id = f"legacy-owned-{uuid.uuid4().hex}"
         with self._admin_connect() as connection:
             connection.execute(
                 sql.SQL("""
@@ -442,6 +617,20 @@ class TestPostgresAutonomousSessionStore(unittest.IsolatedAsyncioTestCase):
                 (
                     legacy_id,
                     '{"legacy":true}',
+                ),
+            )
+            connection.execute(
+                sql.SQL("""
+                INSERT INTO {} (
+                    conversation_id, payload_json, state, claim_token,
+                    progress_started, created_at, updated_at, expires_at,
+                    claimed_at
+                ) VALUES (%s, %s, 'paused', NULL, 0,
+                          900, 900, 2000, NULL)
+            """).format(sql.Identifier(table_name)),
+                (
+                    legacy_owned_id,
+                    '{"legacy":true,"user_id":"alice"}',
                 ),
             )
 
@@ -481,6 +670,9 @@ class TestPostgresAutonomousSessionStore(unittest.IsolatedAsyncioTestCase):
                     second.status(legacy_id),
                 )
                 self.assertEqual(states, ["in_flight", "in_flight"])
+                self.assertFalse(await first.owned(legacy_id, "alice"))
+                self.assertTrue(await first.owned(legacy_owned_id, "alice"))
+                self.assertFalse(await second.owned(legacy_owned_id, "bob"))
                 self.now[0] += 11
                 decision = await first.claim(legacy_id, FINGERPRINT)
                 self.assertFalse(decision.claimed)

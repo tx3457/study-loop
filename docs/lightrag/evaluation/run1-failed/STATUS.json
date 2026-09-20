@@ -1,0 +1,11 @@
+{
+  "completed_questions": 0,
+  "error_message": "LightRAG did not flush the canonical source version",
+  "error_type": "RuntimeError",
+  "evaluation_id": "knowledge_retrieval_small_v1",
+  "failed_question_id": null,
+  "failed_stage": "corpus_ingestion",
+  "live_models_authorized": true,
+  "run_id": "1dde8bb1a4184ffd95896a57ed8dc88e",
+  "status": "failed"
+}

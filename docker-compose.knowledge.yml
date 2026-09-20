@@ -1,0 +1,66 @@
+# Optional extension: docker compose --env-file .env --env-file .env.knowledge
+#   -f docker-compose.yml -f docker-compose.knowledge.yml up --build -d --wait
+services:
+  backend:
+    build:
+      args:
+        INSTALL_KNOWLEDGE_WEB: "true"
+    environment:
+      KNOWLEDGE_BASES_ENABLED: ${KNOWLEDGE_BASES_ENABLED:-true}
+      KNOWLEDGE_SERVICE_URL: http://knowledge-service:8081
+      KNOWLEDGE_SERVICE_TOKEN: ${KNOWLEDGE_SERVICE_TOKEN:?Set KNOWLEDGE_SERVICE_TOKEN}
+      MCP_DDG_COMMAND: /opt/studyloop-ddg/bin/duckduckgo-mcp-server
+      MCP_LIVE_ENABLED: ${MCP_LIVE_ENABLED:-false}
+
+  knowledge-postgres:
+    image: pgvector/pgvector:0.8.6-pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
+    environment:
+      POSTGRES_USER: studyloop_graph
+      POSTGRES_DB: studyloop_graph
+      POSTGRES_PASSWORD: ${KNOWLEDGE_POSTGRES_PASSWORD:?Set KNOWLEDGE_POSTGRES_PASSWORD}
+    volumes:
+      - knowledge-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U studyloop_graph -d studyloop_graph"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  knowledge-service:
+    build:
+      context: .
+      dockerfile: graph_service/Dockerfile
+    environment:
+      KNOWLEDGE_DATABASE_URL: postgresql://studyloop_graph@knowledge-postgres:5432/studyloop_graph
+      PGPASSWORD: ${KNOWLEDGE_POSTGRES_PASSWORD:?Set KNOWLEDGE_POSTGRES_PASSWORD}
+      POSTGRES_HOST: knowledge-postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: studyloop_graph
+      POSTGRES_DATABASE: studyloop_graph
+      POSTGRES_PASSWORD: ${KNOWLEDGE_POSTGRES_PASSWORD:?Set KNOWLEDGE_POSTGRES_PASSWORD}
+      POSTGRES_SSL_MODE: disable
+      KNOWLEDGE_SERVICE_TOKEN: ${KNOWLEDGE_SERVICE_TOKEN:?Set KNOWLEDGE_SERVICE_TOKEN}
+      KNOWLEDGE_MATERIALS_DIR: /var/lib/study-loop/materials
+      KNOWLEDGE_WORKING_DIR: /var/lib/study-loop/workspaces
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      LLM_EMBEDDING_MODEL: ${LLM_EMBEDDING_MODEL:-}
+      EMBEDDING_DIM: ${KNOWLEDGE_EMBEDDING_DIM:?Set the embedding model output dimension}
+    volumes:
+      - knowledge-materials:/var/lib/study-loop
+    depends_on:
+      knowledge-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/health/ready', timeout=5).read()"]
+      interval: 10s
+      timeout: 6s
+      start_period: 30s
+      retries: 5
+
+volumes:
+  knowledge-pgdata:
+  knowledge-materials:

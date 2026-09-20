@@ -1,0 +1,21 @@
+{
+  "status": "failed_source_consistency",
+  "database": "knowledge_restore_run3",
+  "workspace": "kb_59a19d659af4c5219d90f342c3b83d7c4f099c4e",
+  "active_source_version_id": "2e049c8e-3279-4df2-9530-e67d2af41a15",
+  "deleted_source_version_id": "a0697f56-8500-48ec-ad0d-c72461f646f8",
+  "deleted_document_id": "47785ce1-ab67-44ea-bb30-e63bbf1b01a6",
+  "node_table": "lightrag_graph_nodes",
+  "node_id": "Unified",
+  "node_source_id": "2e049c8e-3279-4df2-9530-e67d2af41a15-chunk-000<SEP>a0697f56-8500-48ec-ad0d-c72461f646f8-chunk-000",
+  "entity_vector_table": "lightrag_vdb_entity_deterministic_contract_v1_64d",
+  "entity_vector_chunk_ids": [
+    "2e049c8e-3279-4df2-9530-e67d2af41a15-chunk-000",
+    "a0697f56-8500-48ec-ad0d-c72461f646f8-chunk-000"
+  ],
+  "deleted_chunk_absent_from_text_storage": true,
+  "deleted_source_absent_from_doc_status": true,
+  "public_citation_filter_prevented_deleted_chunk_citation": true,
+  "cause": "SDK document deletion uses original entity names; rename/merge changed graph identity before per-document deletion.",
+  "original_restore_drill_limit": "Original checks passed but did not compare all graph/vector source IDs to active chunks. The original receipt is retained separately; it is insufficient final acceptance evidence."
+}

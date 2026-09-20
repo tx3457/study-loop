@@ -1,0 +1,20 @@
+{
+  "status": "pass",
+  "completed_at": "2026-09-19T21:14:08.435634+00:00",
+  "removed_task_database_container": "studyloop-lightrag-contract-40cf",
+  "remaining_task_containers": [],
+  "verified_task_ports_closed": [
+    32769,
+    49181,
+    49184,
+    49185,
+    5173,
+    55541,
+    45563,
+    60717,
+    60433,
+    34345,
+    37977
+  ],
+  "retained": "Built validation images and temporary evidence/environments remain; production services and user volumes were not modified."
+}

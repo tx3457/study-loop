@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "license": "Original synthetic evaluation text created for StudyLoop; no external corpus.",
+  "domains": [
+    {
+      "domain_id": "machine_learning",
+      "title": "Machine learning fundamentals",
+      "sources": [
+        {
+          "source_id": "ml_optimization",
+          "title": "Optimization during training",
+          "text": "Stochastic gradient descent updates model parameters from small batches rather than the entire training set. A learning rate that is too large can make loss oscillate or diverge, while a very small rate can make progress slow. Momentum keeps a running contribution from earlier gradients, which can smooth noisy updates and accelerate movement along directions that remain consistent. A scheduler may reduce the learning rate later in training when improvement stalls."
+        },
+        {
+          "source_id": "ml_regularization",
+          "title": "Controlling overfitting",
+          "text": "Regularization reduces a model's tendency to memorize training examples. L2 regularization adds a penalty based on squared parameter magnitudes and therefore discourages unnecessarily large weights. Dropout randomly masks a fraction of hidden activations during training, so the network cannot rely on one fixed set of features. Both strengths are hyperparameters: excessive L2 or dropout can cause underfitting, so their values should be selected with validation data."
+        },
+        {
+          "source_id": "ml_evaluation",
+          "title": "Evaluation and model selection",
+          "text": "A validation set supports hyperparameter selection, whereas the test set should remain untouched until the final evaluation. Cross-validation repeats training across several folds when data is limited and summarizes variation across the folds. Accuracy can conceal poor performance on an imbalanced classification task. Precision, recall, F1, and a confusion matrix reveal different error patterns; the metric should match the practical cost of false positives and false negatives."
+        }
+      ]
+    },
+    {
+      "domain_id": "educational_biology",
+      "title": "Introductory human biology",
+      "sources": [
+        {
+          "source_id": "bio_cells",
+          "title": "Cells, membranes, and energy",
+          "text": "The cell membrane is a selectively permeable boundary made mainly from a phospholipid bilayer with embedded proteins. It regulates which substances enter or leave the cell. Mitochondria use energy-rich molecules in cellular respiration to produce much of the cell's ATP. ATP can then power processes such as active transport across the membrane. Red blood cells are a useful exception in humans because mature red blood cells do not contain mitochondria."
+        },
+        {
+          "source_id": "bio_immunity",
+          "title": "Innate and adaptive immunity",
+          "text": "Innate immunity responds quickly through barriers, inflammation, and cells that recognize broad signs of infection. Adaptive immunity develops more slowly on first exposure and uses lymphocytes that recognize specific targets. Some activated lymphocytes become memory cells. Vaccination presents a safe form or component of a target so adaptive memory can form without the full disease, allowing a faster and stronger response during a later exposure."
+        },
+        {
+          "source_id": "bio_homeostasis",
+          "title": "Homeostasis of glucose and temperature",
+          "text": "Homeostasis keeps internal conditions within workable ranges by feedback. After a meal raises blood glucose, pancreatic beta cells release insulin, promoting glucose uptake and storage. When blood glucose falls, pancreatic alpha cells release glucagon, promoting the release of stored glucose. Temperature control also uses feedback: sweating and wider skin blood vessels increase heat loss, while shivering generates heat when the body is cold. Fever temporarily shifts the regulated temperature target during an immune response."
+        }
+      ]
+    }
+  ]
+}

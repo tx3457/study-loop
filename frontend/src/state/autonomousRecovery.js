@@ -5,10 +5,11 @@ import {
   isObject,
 } from './recoveryValidation.js'
 
-export const AUTONOMOUS_RECOVERY_STORAGE_KEY = 'study-loop.autonomous.recovery.v2'
+export const AUTONOMOUS_RECOVERY_STORAGE_KEY = 'study-loop.autonomous.recovery.v3'
+export const PREVIOUS_AUTONOMOUS_RECOVERY_STORAGE_KEY = 'study-loop.autonomous.recovery.v2'
 export const LEGACY_AUTONOMOUS_AWAITING_STORAGE_KEY = 'study-loop.autonomous.awaiting.v1'
 
-const SCHEMA_VERSION = 2
+const SCHEMA_VERSION = 3
 const CONVERSATION_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/u
 const RECOVERY_KINDS = new Set(['pending_start', 'awaiting', 'pending_continue'])
 
@@ -21,8 +22,12 @@ function normalizeRequest(value) {
       value.document_id != null
       && !boundedText(value.document_id, 512)
     )
+    || (
+      value.knowledge_base_id != null
+      && !boundedText(value.knowledge_base_id, 128)
+    )
     || typeof value.grounding_required !== 'boolean'
-    || (value.grounding_required && value.document_id == null)
+    || typeof value.web_enabled !== 'boolean'
   ) {
     return null
   }
@@ -30,13 +35,20 @@ function normalizeRequest(value) {
   const documentId = value.document_id == null
     ? null
     : value.document_id.trim()
-  if (value.grounding_required && !documentId) return null
+  const knowledgeBaseId = value.knowledge_base_id == null
+    ? null
+    : value.knowledge_base_id.trim()
+  if (documentId && knowledgeBaseId) return null
+  if (value.grounding_required && !documentId && !knowledgeBaseId) return null
+  if (value.web_enabled && !knowledgeBaseId) return null
 
   return {
     query: value.query.trim(),
     user_id: DEFAULT_USER_ID,
     document_id: documentId,
-    grounding_required: value.grounding_required,
+    knowledge_base_id: knowledgeBaseId,
+    grounding_required: knowledgeBaseId ? true : value.grounding_required,
+    web_enabled: knowledgeBaseId ? value.web_enabled : false,
   }
 }
 
@@ -172,7 +184,7 @@ export function autonomousRecoveryToken(value) {
   return `awaiting:${recovery.conversation_id}`
 }
 
-function readCurrentV2(storage) {
+function readCurrentV3(storage) {
   const raw = storage.getItem(AUTONOMOUS_RECOVERY_STORAGE_KEY)
   if (!raw) return null
   try {
@@ -180,6 +192,19 @@ function readCurrentV2(storage) {
   } catch {
     return null
   }
+}
+
+function migrateV2(value) {
+  if (!isObject(value) || value.schema_version !== 2 || !isObject(value.request)) return null
+  return normalizeAutonomousRecovery({
+    ...value,
+    schema_version: SCHEMA_VERSION,
+    request: {
+      ...value.request,
+      knowledge_base_id: null,
+      web_enabled: false,
+    },
+  })
 }
 
 function migrateLegacy(value) {
@@ -191,6 +216,8 @@ function migrateLegacy(value) {
     user_id: value.request.user_id,
     document_id: value.request.document_id?.trim() || null,
     grounding_required: value.request.grounding_required === true,
+    knowledge_base_id: null,
+    web_enabled: false,
   })
   if (!request) return null
 
@@ -209,14 +236,26 @@ export function readAutonomousRecovery() {
     const storage = globalThis.sessionStorage
     if (!storage) return null
 
-    const rawV2 = storage.getItem(AUTONOMOUS_RECOVERY_STORAGE_KEY)
-    if (rawV2) {
-      const recovery = readCurrentV2(storage)
+    const rawV3 = storage.getItem(AUTONOMOUS_RECOVERY_STORAGE_KEY)
+    if (rawV3) {
+      const recovery = readCurrentV3(storage)
       if (recovery) {
         storage.removeItem(LEGACY_AUTONOMOUS_AWAITING_STORAGE_KEY)
         return recovery
       }
       storage.removeItem(AUTONOMOUS_RECOVERY_STORAGE_KEY)
+    }
+
+    const rawV2 = storage.getItem(PREVIOUS_AUTONOMOUS_RECOVERY_STORAGE_KEY)
+    if (rawV2) {
+      let migrated = null
+      try { migrated = migrateV2(JSON.parse(rawV2)) } catch { migrated = null }
+      storage.removeItem(PREVIOUS_AUTONOMOUS_RECOVERY_STORAGE_KEY)
+      if (migrated) {
+        storage.setItem(AUTONOMOUS_RECOVERY_STORAGE_KEY, JSON.stringify(migrated))
+        storage.removeItem(LEGACY_AUTONOMOUS_AWAITING_STORAGE_KEY)
+        return migrated
+      }
     }
 
     const legacyRaw = storage.getItem(LEGACY_AUTONOMOUS_AWAITING_STORAGE_KEY)
@@ -234,6 +273,7 @@ export function readAutonomousRecovery() {
   } catch {
     try {
       globalThis.sessionStorage?.removeItem(AUTONOMOUS_RECOVERY_STORAGE_KEY)
+      globalThis.sessionStorage?.removeItem(PREVIOUS_AUTONOMOUS_RECOVERY_STORAGE_KEY)
       globalThis.sessionStorage?.removeItem(LEGACY_AUTONOMOUS_AWAITING_STORAGE_KEY)
     } catch {
       // Storage can be unavailable in hardened browser contexts.
@@ -250,6 +290,7 @@ export function writeAutonomousRecovery(value) {
     if (!storage) return null
     storage.setItem(AUTONOMOUS_RECOVERY_STORAGE_KEY, JSON.stringify(recovery))
     storage.removeItem(LEGACY_AUTONOMOUS_AWAITING_STORAGE_KEY)
+    storage.removeItem(PREVIOUS_AUTONOMOUS_RECOVERY_STORAGE_KEY)
     return recovery
   } catch {
     return null
@@ -262,10 +303,11 @@ export function replaceAutonomousRecovery(expectedToken, value) {
   try {
     const storage = globalThis.sessionStorage
     if (!storage) return null
-    const current = readCurrentV2(storage)
+    const current = readCurrentV3(storage)
     if (autonomousRecoveryToken(current) !== expectedToken) return null
     storage.setItem(AUTONOMOUS_RECOVERY_STORAGE_KEY, JSON.stringify(replacement))
     storage.removeItem(LEGACY_AUTONOMOUS_AWAITING_STORAGE_KEY)
+    storage.removeItem(PREVIOUS_AUTONOMOUS_RECOVERY_STORAGE_KEY)
     return replacement
   } catch {
     return null
@@ -277,10 +319,11 @@ export function clearAutonomousRecovery(expectedToken = null) {
     const storage = globalThis.sessionStorage
     if (!storage) return false
     if (expectedToken != null) {
-      const current = readCurrentV2(storage)
+      const current = readCurrentV3(storage)
       if (autonomousRecoveryToken(current) !== expectedToken) return false
     }
     storage.removeItem(AUTONOMOUS_RECOVERY_STORAGE_KEY)
+    storage.removeItem(PREVIOUS_AUTONOMOUS_RECOVERY_STORAGE_KEY)
     storage.removeItem(LEGACY_AUTONOMOUS_AWAITING_STORAGE_KEY)
     return true
   } catch {

@@ -28,6 +28,7 @@ from services.tool_registry import (
     EffectMode,
     SideEffectAmbiguousError,
     ToolPolicyViolation,
+    ToolRegistry,
     tool_registry,
 )
 from services.tools import allowed_tool_names, dispatch_tool
@@ -170,7 +171,7 @@ class ToolRoundResult:
     outcomes: list[ToolCallOutcome] = field(default_factory=list)
 
 
-def _mark_untrusted_observation(run_id: str, result: str) -> None:
+def _mark_untrusted_observation(run_id: str, result: str, *, registry=None) -> None:
     """Taint the run when a tool result flags suspicious retrieved content.
 
     Parsing is best-effort: a tool may legitimately return non-JSON, and a
@@ -184,7 +185,7 @@ def _mark_untrusted_observation(run_id: str, result: str) -> None:
         logger.warning(
             "[tool_loop] untrusted content flagged; blocking further writes in this run"
         )
-        tool_registry.mark_run_untrusted_content(run_id)
+        (registry if registry is not None else tool_registry).mark_run_untrusted_content(run_id)
 
 
 def _block_tool_call(
@@ -233,6 +234,7 @@ async def run_tool_round(
     on_before_tool_calls: Callable[[], Awaitable[None]] | None = None,
     on_before_tool_dispatch: Callable[[], Awaitable[None]] | None = None,
     business_tool_guard: Callable[[str, dict], Optional[str]] | None = None,
+    registry: ToolRegistry | None = None,
     **llm_kwargs,
 ) -> ToolRoundResult:
     """跑单轮 tool-calling 并把结果回灌进 messages（原地 append）。
@@ -263,8 +265,9 @@ async def run_tool_round(
         ToolRoundResult。调用方据此决定继续 / 结束 / 暂停。
     """
     control_tools = control_tools or set()
+    active_registry = registry if registry is not None else tool_registry
     allowed = (
-        allowed_tool_names()
+        (allowed_tool_names() if registry is None else set(active_registry.list_tools()))
         if business_tool_allowlist is None
         else set(business_tool_allowlist)
     )
@@ -276,7 +279,7 @@ async def run_tool_round(
         safe_modes = {EffectMode.READ_ONLY, EffectMode.IDEMPOTENT}
         replay_safe_bindings = {}
         for name in allowed:
-            tool = tool_registry.get(name)
+            tool = active_registry.get(name)
             if tool is not None and tool.metadata.effect_mode in safe_modes:
                 replay_safe_bindings[name] = (
                     tool,
@@ -371,7 +374,7 @@ async def run_tool_round(
         )
         if can_bind and replay_safe_bindings is not None:
             replay_binding = replay_safe_bindings.get(name)
-            current = tool_registry.get(name)
+            current = active_registry.get(name)
             if (
                 replay_binding is None
                 or current is not replay_binding[0]
@@ -382,7 +385,7 @@ async def run_tool_round(
             else:
                 metadata_tool = replay_binding[0]
         elif can_bind:
-            metadata_tool = tool_registry.get(name)
+            metadata_tool = active_registry.get(name)
 
         guard_reason = None
         can_reach_guard = (
@@ -550,7 +553,7 @@ async def run_tool_round(
         # 避免仅凭名称白名单执行新的副作用实现。
         if replay_safe_bindings is not None:
             binding = replay_safe_bindings.get(name)
-            current = tool_registry.get(name)
+            current = active_registry.get(name)
             if (
                 binding is None
                 or current is not binding[0]
@@ -575,7 +578,8 @@ async def run_tool_round(
             len(args),
         )
         try:
-            result = await dispatch_tool(
+            dispatcher = dispatch_tool if registry is None else active_registry.invoke
+            result = await dispatcher(
                 name,
                 args,
                 run_id=run_id,
@@ -589,7 +593,7 @@ async def run_tool_round(
             # 不可信正文，就在回灌之前给本次 run 打 taint：之后模型的任何决策
             # 都可能是被那段正文操纵的，注册表据此拒绝非幂等写入。
             if run_id is not None:
-                _mark_untrusted_observation(run_id, result)
+                _mark_untrusted_observation(run_id, result, registry=active_registry)
         except IdempotencyConflictError:
             # Ownership loss is a request-level fencing event, not a tool
             # result that may be fed back to the model and ignored.

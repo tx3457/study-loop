@@ -1,0 +1,92 @@
+FF.                                                                      [100%]
+=================================== FAILURES ===================================
+_ test_document_pages_report_owner_scoped_totals_and_keep_later_documents_mutable _
+
+repository = <graph_service.repository.Repository object at 0x75cbde7ffad0>
+settings = Settings(database_url='postgresql://postgres:reviewfix-disposable-only@127.0.0.1:32770/graph_reviewfix', internal_toke...m_api_key=None, llm_base_url=None, embedding_api_key=None, embedding_base_url=None, index_config_version='lightrag-v1')
+
+    async def test_document_pages_report_owner_scoped_totals_and_keep_later_documents_mutable(repository, settings):
+        service, worker = build(repository, settings)
+        kb = await service.create_knowledge_base("alice", "Many documents")
+        for index in range(101):
+            payload = {**material(f"document {index}", index), "name": f"doc-{index:03}.txt"}
+            await service.ingest_document("alice", kb["id"], payload, idempotency_key=f"page-seed-{index}")
+            await worker.process_one()
+        other = await service.create_knowledge_base("alice", "Separate KB")
+        await service.ingest_document("alice", other["id"], material("separate"), idempotency_key="separate")
+        await worker.process_one()
+        # Timestamp ties need deterministic ID ordering to avoid page overlaps.
+        await repository.pool.execute(
+            "UPDATE sl_documents SET created_at='2026-09-20T00:00:00Z' WHERE knowledge_base_id=$1",
+            uuid.UUID(kb["id"]),
+        )
+        app = create_app(settings, service=service, worker=worker, manage_lifespan=False)
+        headers = {"Authorization": "Bearer test-token", "X-StudyLoop-Subject": "alice"}
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://test", headers=headers) as client:
+            first = (await client.get(f"/knowledge-bases/{kb['id']}/documents")).json()
+            second = (await client.get(f"/knowledge-bases/{kb['id']}/documents?offset=50&limit=50")).json()
+            last = (await client.get(f"/knowledge-bases/{kb['id']}/documents?offset=100&limit=50")).json()
+            for offset, page, size in [(0, first, 50), (50, second, 50), (100, last, 1)]:
+>               assert (page["total"], page["limit"], page["offset"]) == (101, 50, offset)
+                        ^^^^^^^^^^^^^
+E               KeyError: 'total'
+
+tests/graph_service/test_document_pagination.py:39: KeyError
+___________________ test_internal_auth_and_document_contract ___________________
+
+repository = <graph_service.repository.Repository object at 0x75cbdc61f550>
+settings = Settings(database_url='postgresql://postgres:reviewfix-disposable-only@127.0.0.1:32770/graph_reviewfix', internal_toke...m_api_key=None, llm_base_url=None, embedding_api_key=None, embedding_base_url=None, index_config_version='lightrag-v1')
+
+    async def test_internal_auth_and_document_contract(repository, settings) -> None:
+        engine = FakeEngine()
+        service = KnowledgeService(repository, MaterialStore(settings.materials_dir), engine)
+        worker = WriteWorker(repository, service, engine)
+        app = create_app(settings, service=service, worker=worker, manage_lifespan=False)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://service") as client:
+            assert (await client.get("/health/live")).status_code == 200
+            assert (await client.get("/knowledge-bases")).status_code == 401
+            headers = {
+                "Authorization": "Bearer test-token",
+                "X-StudyLoop-Subject": "alice",
+                "Idempotency-Key": "create-kb",
+            }
+            created = await client.post(
+                "/knowledge-bases",
+                headers=headers,
+                json={"name": "KB", "description": "private"},
+            )
+            assert created.status_code == 201
+            kb = created.json()
+            payload = {
+                "name": "notes.txt",
+                "kind": "file",
+                "content_base64": base64.b64encode(b"Alpha").decode(),
+                "parsed_blocks": [{"text": "Alpha", "metadata": {}}],
+                "expected_revision": 0,
+            }
+            queued = await client.post(
+                f"/knowledge-bases/{kb['id']}/documents",
+                headers={**headers, "Idempotency-Key": "api-upload"},
+                json=payload,
+            )
+            assert queued.status_code == 202
+            assert set(queued.json()) == {"job_id", "knowledge_base_id"}
+            documents = await client.get(
+                f"/knowledge-bases/{kb['id']}/documents", headers=headers
+            )
+            assert documents.status_code == 200
+>           assert set(documents.json()) == {"documents", "total", "limit", "offset"}
+E           AssertionError: assert {'documents'} == {'documents',...set', 'total'}
+E             
+E             Extra items in the right set:
+E             'total'
+E             'limit'
+E             'offset'
+E             Use -v to get more diff
+
+tests/graph_service/test_api.py:60: AssertionError
+=========================== short test summary info ============================
+FAILED tests/graph_service/test_document_pagination.py::test_document_pages_report_owner_scoped_totals_and_keep_later_documents_mutable
+FAILED tests/graph_service/test_api.py::test_internal_auth_and_document_contract
+2 failed, 1 passed in 0.67s

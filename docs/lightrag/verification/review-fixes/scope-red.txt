@@ -1,0 +1,164 @@
+FFFFFF                                                                   [100%]
+=================================== FAILURES ===================================
+__________ test_same_upload_key_cannot_replay_another_knowledge_base ___________
+
+repository = <graph_service.repository.Repository object at 0x7dc14040f950>
+settings = Settings(database_url='postgresql://postgres:reviewfix-disposable-only@127.0.0.1:32770/graph_reviewfix', internal_toke...m_api_key=None, llm_base_url=None, embedding_api_key=None, embedding_base_url=None, index_config_version='lightrag-v1')
+
+    async def test_same_upload_key_cannot_replay_another_knowledge_base(repository, settings):
+        service, worker = build(repository, settings)
+        a = await service.create_knowledge_base("alice", "A")
+        b = await service.create_knowledge_base("alice", "B")
+        app = create_app(settings, service=service, worker=worker, manage_lifespan=False)
+        headers = {"Authorization": "Bearer test-token", "X-StudyLoop-Subject": "alice",
+                   "Idempotency-Key": "one-upload-intent"}
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://test") as client:
+            first = await client.post(f"/knowledge-bases/{a['id']}/documents", headers=headers, json=material())
+            assert first.status_code == 202
+            retry = await client.post(f"/knowledge-bases/{a['id']}/documents", headers=headers, json=material())
+            assert retry.status_code == 202 and retry.json() == first.json()
+            other = await client.post(f"/knowledge-bases/{b['id']}/documents", headers=headers, json=material())
+>           assert other.status_code == 409
+E           assert 202 == 409
+E            +  where 202 = <Response [202 Accepted]>.status_code
+
+tests/graph_service/test_mutation_scope.py:50: AssertionError
+_____________ test_same_replace_key_cannot_replay_another_document _____________
+
+repository = <graph_service.repository.Repository object at 0x7dc14040f3d0>
+settings = Settings(database_url='postgresql://postgres:reviewfix-disposable-only@127.0.0.1:32770/graph_reviewfix', internal_toke...m_api_key=None, llm_base_url=None, embedding_api_key=None, embedding_base_url=None, index_config_version='lightrag-v1')
+
+    async def test_same_replace_key_cannot_replay_another_document(repository, settings):
+        service, worker = build(repository, settings)
+        kb = await service.create_knowledge_base("alice", "A")
+        for index, text in enumerate(["first document", "second document"]):
+            await service.ingest_document("alice", kb["id"], material(text, index), idempotency_key=f"seed-{index}")
+            await worker.process_one()
+        docs = (await service.list_documents("alice", kb["id"]))["documents"]
+        payload = material("replacement", 2)
+        first = await service.ingest_document("alice", kb["id"], payload,
+                                              document_id=docs[0]["id"], idempotency_key="replace-once")
+>       with pytest.raises(Conflict):
+E       Failed: DID NOT RAISE Conflict
+
+tests/graph_service/test_mutation_scope.py:65: Failed
+_ test_web_receipt_binds_kb_and_snapshot_and_replays_after_expiry[knowledge_base] _
+
+repository = <graph_service.repository.Repository object at 0x7dc1404f6e50>
+settings = Settings(database_url='postgresql://postgres:reviewfix-disposable-only@127.0.0.1:32770/graph_reviewfix', internal_toke...m_api_key=None, llm_base_url=None, embedding_api_key=None, embedding_base_url=None, index_config_version='lightrag-v1')
+changed_target = 'knowledge_base'
+
+    @pytest.mark.parametrize("changed_target", ["knowledge_base", "snapshot"])
+    async def test_web_receipt_binds_kb_and_snapshot_and_replays_after_expiry(repository, settings, changed_target):
+        service, worker = build(repository, settings)
+        a = await service.create_knowledge_base("alice", "A")
+        b = await service.create_knowledge_base("alice", "B")
+        now = datetime.now(timezone.utc)
+        payload = {"session_id": "session", "url": "https://example.org/reference", "title": "Reference",
+                   "text": "captured body", "content_hash": hashlib.sha256(b"captured body").hexdigest(),
+                   "fetched_at": now.isoformat(), "expires_at": (now + timedelta(days=7)).isoformat()}
+        first_snapshot = await service.create_web_snapshot("alice", payload)
+        second_snapshot = await service.create_web_snapshot("alice", payload)
+        first = await service.import_web_snapshot("alice", a["id"], first_snapshot["id"],
+                                                  expected_revision=0, idempotency_key="web-once")
+>       with pytest.raises(Conflict):
+E       Failed: DID NOT RAISE Conflict
+
+tests/graph_service/test_mutation_scope.py:89: Failed
+__ test_web_receipt_binds_kb_and_snapshot_and_replays_after_expiry[snapshot] ___
+
+repository = <graph_service.repository.Repository object at 0x7dc1404306d0>
+settings = Settings(database_url='postgresql://postgres:reviewfix-disposable-only@127.0.0.1:32770/graph_reviewfix', internal_toke...m_api_key=None, llm_base_url=None, embedding_api_key=None, embedding_base_url=None, index_config_version='lightrag-v1')
+changed_target = 'snapshot'
+
+    @pytest.mark.parametrize("changed_target", ["knowledge_base", "snapshot"])
+    async def test_web_receipt_binds_kb_and_snapshot_and_replays_after_expiry(repository, settings, changed_target):
+        service, worker = build(repository, settings)
+        a = await service.create_knowledge_base("alice", "A")
+        b = await service.create_knowledge_base("alice", "B")
+        now = datetime.now(timezone.utc)
+        payload = {"session_id": "session", "url": "https://example.org/reference", "title": "Reference",
+                   "text": "captured body", "content_hash": hashlib.sha256(b"captured body").hexdigest(),
+                   "fetched_at": now.isoformat(), "expires_at": (now + timedelta(days=7)).isoformat()}
+        first_snapshot = await service.create_web_snapshot("alice", payload)
+        second_snapshot = await service.create_web_snapshot("alice", payload)
+        first = await service.import_web_snapshot("alice", a["id"], first_snapshot["id"],
+                                                  expected_revision=0, idempotency_key="web-once")
+>       with pytest.raises(Conflict):
+E       Failed: DID NOT RAISE Conflict
+
+tests/graph_service/test_mutation_scope.py:89: Failed
+_ test_existing_resource_receipt_does_not_bypass_a_different_kb_path[correction] _
+
+repository = <graph_service.repository.Repository object at 0x7dc140430650>
+settings = Settings(database_url='postgresql://postgres:reviewfix-disposable-only@127.0.0.1:32770/graph_reviewfix', internal_toke...m_api_key=None, llm_base_url=None, embedding_api_key=None, embedding_base_url=None, index_config_version='lightrag-v1')
+operation = 'correction'
+
+    @pytest.mark.parametrize("operation", ["correction", "delete_document"])
+    async def test_existing_resource_receipt_does_not_bypass_a_different_kb_path(repository, settings, operation):
+        service, worker = build(repository, settings)
+        a = await service.create_knowledge_base("alice", "A")
+        b = await service.create_knowledge_base("alice", "B")
+        await service.ingest_document("alice", a["id"], material(), idempotency_key="seed")
+        await worker.process_one()
+        if operation == "correction":
+            entity_id = uuid.uuid4()
+            await repository.pool.execute(
+                "INSERT INTO sl_entities(id,knowledge_base_id,label,aliases) VALUES($1,$2,'Alpha','[]')",
+                entity_id, uuid.UUID(a["id"]),
+            )
+            async def mutate(kb_id):
+                return await service.create_correction("alice", kb_id,
+                    {"kind": "delete_entity", "entity_id": str(entity_id), "expected_revision": 1},
+                    idempotency_key="one-resource")
+        else:
+            doc = (await service.list_documents("alice", a["id"]))["documents"][0]
+            async def mutate(kb_id):
+                return await service.delete_document("alice", kb_id, doc["id"], 1, "one-resource")
+        first = await mutate(a["id"])
+        assert await mutate(a["id"]) == first
+>       with pytest.raises(Conflict):
+E       Failed: DID NOT RAISE Conflict
+
+tests/graph_service/test_mutation_scope.py:128: Failed
+_ test_existing_resource_receipt_does_not_bypass_a_different_kb_path[delete_document] _
+
+repository = <graph_service.repository.Repository object at 0x7dc1404c1310>
+settings = Settings(database_url='postgresql://postgres:reviewfix-disposable-only@127.0.0.1:32770/graph_reviewfix', internal_toke...m_api_key=None, llm_base_url=None, embedding_api_key=None, embedding_base_url=None, index_config_version='lightrag-v1')
+operation = 'delete_document'
+
+    @pytest.mark.parametrize("operation", ["correction", "delete_document"])
+    async def test_existing_resource_receipt_does_not_bypass_a_different_kb_path(repository, settings, operation):
+        service, worker = build(repository, settings)
+        a = await service.create_knowledge_base("alice", "A")
+        b = await service.create_knowledge_base("alice", "B")
+        await service.ingest_document("alice", a["id"], material(), idempotency_key="seed")
+        await worker.process_one()
+        if operation == "correction":
+            entity_id = uuid.uuid4()
+            await repository.pool.execute(
+                "INSERT INTO sl_entities(id,knowledge_base_id,label,aliases) VALUES($1,$2,'Alpha','[]')",
+                entity_id, uuid.UUID(a["id"]),
+            )
+            async def mutate(kb_id):
+                return await service.create_correction("alice", kb_id,
+                    {"kind": "delete_entity", "entity_id": str(entity_id), "expected_revision": 1},
+                    idempotency_key="one-resource")
+        else:
+            doc = (await service.list_documents("alice", a["id"]))["documents"][0]
+            async def mutate(kb_id):
+                return await service.delete_document("alice", kb_id, doc["id"], 1, "one-resource")
+        first = await mutate(a["id"])
+        assert await mutate(a["id"]) == first
+>       with pytest.raises(Conflict):
+E       Failed: DID NOT RAISE Conflict
+
+tests/graph_service/test_mutation_scope.py:128: Failed
+=========================== short test summary info ============================
+FAILED tests/graph_service/test_mutation_scope.py::test_same_upload_key_cannot_replay_another_knowledge_base
+FAILED tests/graph_service/test_mutation_scope.py::test_same_replace_key_cannot_replay_another_document
+FAILED tests/graph_service/test_mutation_scope.py::test_web_receipt_binds_kb_and_snapshot_and_replays_after_expiry[knowledge_base]
+FAILED tests/graph_service/test_mutation_scope.py::test_web_receipt_binds_kb_and_snapshot_and_replays_after_expiry[snapshot]
+FAILED tests/graph_service/test_mutation_scope.py::test_existing_resource_receipt_does_not_bypass_a_different_kb_path[correction]
+FAILED tests/graph_service/test_mutation_scope.py::test_existing_resource_receipt_does_not_bypass_a_different_kb_path[delete_document]
+6 failed in 0.61s

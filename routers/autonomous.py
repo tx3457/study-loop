@@ -23,9 +23,10 @@ import uuid
 from typing import Awaitable, Callable, Optional
 
 from fastapi import Depends, APIRouter, Header, HTTPException, Path as ApiPath
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, Field, ValidationError, model_serializer, model_validator
 
 from models.citation import CitationView, GroundingStatus
+from models.knowledge_evidence import SourceCitation
 from services.auth import require_user_id
 from services.citations import (
     CitationResolution,
@@ -53,6 +54,7 @@ from services.autonomous_snapshot import (
     session_to_payload as _session_to_payload,
 )
 from services.injection import check_injection, check_output_leak
+from services.knowledge_agent import KnowledgeAgentContext, KNOWLEDGE_SYSTEM_PROMPT
 from services.idempotency import (
     IdempotencyConflictError,
     ReceiptLease,
@@ -113,16 +115,34 @@ class AutonomousRequest(BaseModel):
         default=False,
         description="为 true 时，文档回答必须返回本轮检索得到的有效 chunk ID，否则安全弃答。",
     )
+    knowledge_base_id: Optional[str] = Field(
+        default=None, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+    )
+    web_enabled: bool = False
+
+    @model_serializer(mode="wrap")
+    def legacy_compatible_payload(self, handler):
+        payload = handler(self)
+        if self.knowledge_base_id is None:
+            payload.pop("knowledge_base_id", None)
+            payload.pop("web_enabled", None)
+        return payload
 
     @model_validator(mode="after")
     def require_document_for_strict_grounding(self):
+        if self.knowledge_base_id is not None:
+            if not self.knowledge_base_id.strip() or self.document_id is not None:
+                raise ValueError("knowledge_base_id and document_id are exclusive")
+            self.grounding_required = True
+        elif self.web_enabled:
+            raise ValueError("web_enabled requires a knowledge_base_id")
         if not self.query.strip():
             raise ValueError("query must not be blank")
         if not self.user_id.strip():
             raise ValueError("user_id must not be blank")
         if self.document_id is not None and not self.document_id.strip():
             raise ValueError("document_id must not be blank when supplied")
-        if self.grounding_required and (
+        if self.grounding_required and not self.knowledge_base_id and (
             self.document_id is None or not self.document_id.strip()
         ):
             raise ValueError("grounding_required requires a document_id")
@@ -171,6 +191,10 @@ class AutonomousResponse(BaseModel):
 
     # 可验证引用字段（向后兼容：旧客户端可忽略）
     citations: list[CitationView] = Field(default_factory=list)
+    source_citations: list[SourceCitation] = Field(default_factory=list)
+    knowledge_base_id: Optional[str] = None
+    web_enabled: bool = False
+    web_only: bool = False
     invalid_citation_ids: list[str] = Field(
         default_factory=list,
         description="兼容旧客户端的保留字段；服务端不回显模型生成的无效 ID 原文",
@@ -185,7 +209,9 @@ class AutonomousResponse(BaseModel):
     )
 
 
-async def _validate_replayed_response(response_payload: dict) -> AutonomousResponse:
+async def _validate_replayed_response(
+    response_payload: dict, *, knowledge_owner_id: str | None = None,
+) -> AutonomousResponse:
     """Validate durable responses against the current public state machine."""
     raw_schema_version = (
         response_payload.get("response_schema_version", 1)
@@ -205,6 +231,10 @@ async def _validate_replayed_response(response_payload: dict) -> AutonomousRespo
             status_code=410,
             detail="缓存响应格式无效；请重新开始",
         ) from exc
+    if response.knowledge_base_id is not None:
+        return await _validate_knowledge_replayed_response(response, owner_id=knowledge_owner_id)
+    if response.web_enabled or response.source_citations or response.web_only:
+        raise HTTPException(410, "缓存响应包含未经授权的知识库来源")
     citation_payload_invalid = any(
         not citation.chunk_id.strip()
         or not citation.document_id.strip()
@@ -333,7 +363,10 @@ async def _validate_replayed_response(response_payload: dict) -> AutonomousRespo
                 detail="缓存的暂停响应状态不一致；请重新开始",
             )
 
-        inspection = await autonomous_sessions.inspect(response.conversation_id)
+        inspection = await autonomous_sessions.inspect(
+            response.conversation_id,
+            **({"owner_id": knowledge_owner_id} if knowledge_owner_id is not None else {}),
+        )
         if inspection is None:
             raise HTTPException(
                 status_code=410,
@@ -436,6 +469,99 @@ async def _validate_replayed_response(response_payload: dict) -> AutonomousRespo
     return response
 
 
+async def _validate_knowledge_replayed_response(
+    response: AutonomousResponse, *, owner_id: str | None = None,
+) -> AutonomousResponse:
+    """Validate additive KB responses without relaxing the legacy replay contract."""
+    if not response.grounding_required or response.grounding_document_id or response.citations:
+        raise HTTPException(410, "缓存知识库范围无效；请重新开始")
+    for citation in response.source_citations:
+        if (
+            citation.kind == "kb_chunk" and citation.knowledge_base_id != response.knowledge_base_id
+        ) or (citation.kind == "web_snapshot" and not response.web_enabled):
+            raise HTTPException(410, "缓存引用超出知识库范围")
+    names = {"search_knowledge_base"}
+    if response.web_enabled:
+        names.update({"search_web", "fetch_web"})
+    if response.awaiting_user_input:
+        if (not response.conversation_id or not response.user_question or response.final_answer
+                or response.finalize_reason is not None or response.abstained
+                or response.source_citations or response.invalid_citation_count
+                or response.invalid_citation_ids or response.grounding_status != GroundingStatus.PENDING):
+            raise HTTPException(410, "缓存知识库暂停状态无效")
+        inspection = await autonomous_sessions.inspect(
+            response.conversation_id, **({"owner_id": owner_id} if owner_id is not None else {}),
+        )
+        if inspection is None or inspection.state not in {"paused", "in_flight"}:
+            raise HTTPException(410, "暂停会话已过期；请重新开始")
+        if inspection.state == "in_flight":
+            raise HTTPException(409, "conversation 正在续跑，请稍后重试")
+        try:
+            session = _session_from_payload(response.conversation_id, inspection.payload)
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(410, "暂停会话快照无效") from exc
+        state = session.knowledge_state
+        if (state is None or state.knowledge_base_id != response.knowledge_base_id
+                or state.web_enabled != response.web_enabled
+                or _pending_ask_question(session.messages, session.pending_ask_call_id) != response.user_question):
+            raise HTTPException(410, "暂停会话知识库范围不一致")
+        if owner_id is not None and owner_id != state.owner_id:
+            raise HTTPException(404, "暂停会话不存在")
+        context = KnowledgeAgentContext(state)
+        if context.fingerprint() != session.registry_sha256:
+            raise HTTPException(410, "暂停会话工具契约已变化")
+        await context.ensure_current(verify_web=True)
+    else:
+        if (response.conversation_id is not None or response.user_question is not None
+                or response.grounding_status == GroundingStatus.PENDING):
+            raise HTTPException(410, "缓存知识库终态无效")
+        if response.abstained:
+            if response.source_citations or response.grounding_status != GroundingStatus.ABSTAINED:
+                raise HTTPException(410, "缓存知识库弃答状态无效")
+        elif (not response.source_citations or response.invalid_citation_count
+              or response.invalid_citation_ids
+              or response.grounding_status != GroundingStatus.CITATION_IDS_VALID):
+            raise HTTPException(410, "缓存知识库回答缺少有效引用")
+    leaked = check_output_leak(response.final_answer)[0] or any(
+        check_output_leak(citation.model_dump_json())[0] for citation in response.source_citations
+    )
+    if response.user_question and check_output_leak(response.user_question)[0]:
+        raise HTTPException(410, "缓存的暂停问题未通过安全检查")
+    updates = {
+        "steps": _public_steps(response.steps, redact_details=response.abstained or leaked,
+                               business_tool_names=names),
+        "plan": [] if response.abstained or leaked else _public_plan(response.plan),
+        "web_only": bool(response.source_citations and all(
+            citation.kind == "web_snapshot" for citation in response.source_citations
+        )),
+    }
+    if not response.awaiting_user_input and not response.abstained and not leaked:
+        from services.knowledge_client import knowledge_client
+
+        historical_sources = []
+        for citation in response.source_citations:
+            source_status = "historical"
+            if citation.kind == "kb_chunk" and owner_id is not None:
+                try:
+                    current = await knowledge_client.request(
+                        "GET", f"/knowledge-bases/{citation.knowledge_base_id}/sources/{citation.source_version_id}",
+                        owner_id=owner_id,
+                    )
+                    candidate = current.json().get("source_status")
+                    if candidate in {"current", "historical", "deleted"}:
+                        source_status = candidate
+                except HTTPException as error:
+                    source_status = "deleted" if error.status_code == 404 else "unavailable"
+                except (ValueError, TypeError):
+                    source_status = "unavailable"
+            historical_sources.append(citation.model_copy(update={"source_status": source_status}))
+        updates["source_citations"] = historical_sources
+    if leaked or response.abstained:
+        updates.update(final_answer=_GROUNDING_ABSTENTION, source_citations=[], web_only=False,
+                       abstained=True, grounding_status=GroundingStatus.ABSTAINED)
+    return response.model_copy(update=updates)
+
+
 def _initial_conversation_id_for_recovery_token(recovery_token: str) -> str:
     digest = hashlib.sha256(
         f"agent.autonomous:{recovery_token}".encode("utf-8")
@@ -463,6 +589,7 @@ async def _recover_initial_pause_from_session(
     req: AutonomousRequest,
     *,
     recovery_token: str | None = None,
+    owner_id: str | None = None,
 ) -> AutonomousResponse | None:
     """Repair an ACK-lost start receipt from its deterministic pause snapshot."""
     payload = req.model_dump(mode="json")
@@ -477,7 +604,15 @@ async def _recover_initial_pause_from_session(
     conversation_id = _initial_conversation_id_for_recovery_token(
         recovery_token
     )
-    inspection = await autonomous_sessions.inspect(conversation_id)
+    inspection = await autonomous_sessions.inspect(
+        conversation_id, **({"owner_id": owner_id} if owner_id is not None else {}),
+    )
+    if inspection is None and owner_id is not None:
+        # This ID is derived from a private receipt recovery token already bound
+        # to the full authenticated initial request. Presence alone can identify
+        # corruption without reading an unowned payload or mutating its lease.
+        if await autonomous_sessions.exists_without_reaping(conversation_id):
+            raise HTTPException(410, detail="暂停会话数据无效；请重新开始")
     if inspection is None or inspection.state != "paused":
         return None
     try:
@@ -494,7 +629,7 @@ async def _recover_initial_pause_from_session(
             detail="暂停会话数据无效；请重新开始",
         ) from exc
     response = await _validate_replayed_response(
-        _paused_response(session).model_dump(mode="json")
+        _paused_response(session).model_dump(mode="json"), knowledge_owner_id=owner_id,
     )
     await request_idempotency.reconcile_completed(
         key,
@@ -508,13 +643,17 @@ async def _recover_initial_pause_from_session(
 async def _recover_continue_outcome_from_session(
     key: str,
     req: ContinueRequest,
+    *,
+    owner_id: str | None = None,
 ) -> AutonomousResponse | None:
     """Repair an ACK-lost continue receipt from its completed session outcome."""
     payload = req.model_dump(mode="json")
     expected_fingerprint = request_fingerprint(
         "agent.autonomous.continue", payload
     )
-    inspection = await autonomous_sessions.inspect(req.conversation_id)
+    inspection = await autonomous_sessions.inspect(
+        req.conversation_id, **({"owner_id": owner_id} if owner_id is not None else {}),
+    )
     if (
         inspection is None
         or inspection.state != "completed"
@@ -522,7 +661,7 @@ async def _recover_continue_outcome_from_session(
         or inspection.continue_fingerprint != expected_fingerprint
     ):
         return None
-    response = await _validate_replayed_response(inspection.outcome)
+    response = await _validate_replayed_response(inspection.outcome, knowledge_owner_id=owner_id)
     await request_idempotency.reconcile_completed(
         key,
         "agent.autonomous.continue",
@@ -587,11 +726,31 @@ async def _run_react_loop(
         Awaitable[AutonomousResponse | None],
     ] | None = None,
     initial_conversation_id: str | None = None,
+    knowledge_context: KnowledgeAgentContext | None = None,
 ) -> AutonomousResponse:
     """从 starting_round 开始跑 ReAct 循环。命中 finalize / ask_user / max_rounds 时返回。"""
     truncated = False
     final_answer = ""
     finalize_reason: Optional[str] = None
+
+    async def finish(*args, **kwargs):
+        if knowledge_context is not None:
+            await knowledge_context.ensure_current(verify_web=True)
+        return _build_response(*args, **kwargs, knowledge_context=knowledge_context)
+
+    active_registry = knowledge_context.registry if knowledge_context else tool_registry
+    controls = _CONTROL_TOOLS
+    if knowledge_context:
+        controls = build_control_tools(ask_user_resume_hint="暂停后通过 continue 端点恢复。")
+        controls[0]["function"]["parameters"]["properties"]["citation_ids"]["description"] = (
+            "本轮 evidence 中真实 evidence_id；不得自行构造来源 ID。"
+        )
+
+    async def guarded_dispatch():
+        if knowledge_context is not None:
+            await knowledge_context.ensure_current()
+        if on_before_tool_dispatch is not None:
+            await on_before_tool_dispatch()
 
     guard_business_tool = build_business_tool_scope_guard(
         user_id=user_id,
@@ -600,12 +759,18 @@ async def _run_react_loop(
     )
 
     for round_idx in range(starting_round, MAX_AUTONOMOUS_ROUNDS):
+        if knowledge_context is not None:
+            await knowledge_context.ensure_current()
         if on_before_round is not None:
             await on_before_round()
         # ── 注入 [Current state] 让 LLM 不健忘（仅本次调用，不持久化）──
         state_summary = _build_state_summary(
             steps, tools_called, plan, round_idx, evidence_registry
         )
+        if knowledge_context:
+            state_summary += "\n本轮可引用 evidence_ids：" + ", ".join(
+                list(knowledge_context.state.evidence)[-16:]
+            )
         state_msg = [
             {"role": "system", "content": build_react_decision_prompt(state_summary)}
         ]
@@ -613,7 +778,9 @@ async def _run_react_loop(
         # ── 单轮：run_tool_round 处理业务工具，控制工具交回本函数处理。──
         rr = await run_tool_round(
             messages,
-            tools=get_tool_definitions() + _CONTROL_TOOLS,
+            tools=(
+                active_registry.get_openai_schemas() if knowledge_context else get_tool_definitions()
+            ) + controls,
             client=_client,
             control_tools=CONTROL_TOOL_NAMES,
             run_id=run_id,
@@ -623,8 +790,9 @@ async def _run_react_loop(
             tool_choice="auto",
             extra_call_messages=state_msg,
             on_before_tool_calls=on_before_tool_calls,
-            on_before_tool_dispatch=on_before_tool_dispatch,
-            business_tool_guard=guard_business_tool,
+            on_before_tool_dispatch=guarded_dispatch if knowledge_context else on_before_tool_dispatch,
+            business_tool_guard=None if knowledge_context else guard_business_tool,
+            **({"registry": active_registry} if knowledge_context else {}),
         )
 
         # ── 无 tool_calls：LLM 直接给文字（视为隐式 finalize）──
@@ -635,7 +803,7 @@ async def _run_react_loop(
             else:
                 final_answer = "（LLM 未给出回复且未调用工具，循环结束）"
                 finalize_reason = "empty_response"
-            return _build_response(
+            return await finish(
                 plan, steps, tools_called, final_answer,
                 round_idx + 1, truncated, finalize_reason,
                 evidence_registry=evidence_registry,
@@ -685,7 +853,7 @@ async def _run_react_loop(
                     round_index=round_idx, tool_name="finalize", tool_args=public_tool_args,
                     observation_preview="(loop ended)",
                 ))
-                return _build_response(
+                return await finish(
                     plan, steps, tools_called, final_answer,
                     round_idx + 1, truncated, finalize_reason,
                     evidence_registry=evidence_registry,
@@ -731,7 +899,7 @@ async def _run_react_loop(
                         tool_args=fn_args,
                         blocked_reason="output_leak_blocked",
                     ))
-                    return _build_response(
+                    return await finish(
                         plan, steps, tools_called, question,
                         round_idx + 1, truncated, "ask_user_output_leak",
                         evidence_registry=evidence_registry,
@@ -759,14 +927,20 @@ async def _run_react_loop(
                     evidence_registry=evidence_registry,
                     grounding_required=grounding_required,
                     pending_ask_call_id=oc.call_id,
-                    registry_sha256=_current_registry_sha256(),
-                    semantic_reservation_digests=(
-                        tool_registry.snapshot_run_policy_state(run_id)
+                    registry_sha256=(
+                        knowledge_context.fingerprint() if knowledge_context else _current_registry_sha256()
                     ),
+                    semantic_reservation_digests=(
+                        active_registry.snapshot_run_policy_state(run_id)
+                    ),
+                    knowledge_state=knowledge_context.state if knowledge_context else None,
                 )
                 response = AutonomousResponse(
                     plan=_public_plan(plan),
-                    steps=_public_steps(steps),
+                    steps=_public_steps(
+                        steps, business_tool_names=knowledge_context.state.tool_names()
+                        if knowledge_context else None,
+                    ),
                     tools_called=list(dict.fromkeys(tools_called)),
                     rounds_used=round_idx + 1,
                     truncated=False,
@@ -780,7 +954,11 @@ async def _run_react_loop(
                     ),
                     grounding_required=grounding_required,
                     grounding_document_id=document_id,
+                    knowledge_base_id=knowledge_context.state.knowledge_base_id if knowledge_context else None,
+                    web_enabled=knowledge_context.state.web_enabled if knowledge_context else False,
                 )
+                if knowledge_context is not None:
+                    await knowledge_context.ensure_current(verify_web=True)
                 try:
                     if pause_session_saver is None:
                         await autonomous_sessions.save(
@@ -851,7 +1029,7 @@ async def _run_react_loop(
         )
         final_answer = f"执行被截断（{MAX_AUTONOMOUS_ROUNDS} 轮）"
 
-    return _build_response(
+    return await finish(
         plan, steps, tools_called, final_answer,
         MAX_AUTONOMOUS_ROUNDS, truncated, "max_rounds_truncated",
         evidence_registry=evidence_registry,
@@ -868,6 +1046,7 @@ def _build_response(
     grounding_document_id: Optional[str],
     citation_ids: list[str] | None = None,
     abstained: bool = False,
+    knowledge_context: KnowledgeAgentContext | None = None,
 ) -> AutonomousResponse:
     if not isinstance(final_answer, str):
         final_answer = "" if final_answer is None else str(final_answer)
@@ -883,8 +1062,11 @@ def _build_response(
         finalize_reason = "output_leak_blocked"
         abstained = True
 
-    resolution = resolve_citations(citation_ids, evidence_registry)
-    if grounding_document_id is None:
+    resolution = (
+        knowledge_context.resolve(citation_ids) if knowledge_context
+        else resolve_citations(citation_ids, evidence_registry)
+    )
+    if grounding_document_id is None and knowledge_context is None:
         # Unscoped tool observations are useful to the model, but public
         # citations need a persisted document boundary that can be replayed
         # and independently revalidated later.
@@ -929,11 +1111,20 @@ def _build_response(
 
     return AutonomousResponse(
         plan=[] if abstained else _public_plan(plan),
-        steps=_public_steps(steps, redact_details=abstained),
+        steps=_public_steps(
+            steps, redact_details=abstained,
+            business_tool_names=knowledge_context.state.tool_names() if knowledge_context else None,
+        ),
         tools_called=list(dict.fromkeys(tools_called)),
         rounds_used=rounds_used, truncated=truncated,
         final_answer=final_answer, finalize_reason=finalize_reason,
-        citations=[] if abstained else resolution.citations,
+        citations=[] if abstained or knowledge_context else resolution.citations,
+        source_citations=resolution.citations if knowledge_context and not abstained else [],
+        knowledge_base_id=knowledge_context.state.knowledge_base_id if knowledge_context else None,
+        web_enabled=knowledge_context.state.web_enabled if knowledge_context else False,
+        web_only=bool(knowledge_context and not abstained and resolution.citations and all(
+            citation.kind == "web_snapshot" for citation in resolution.citations
+        )),
         invalid_citation_ids=[],
         invalid_citation_count=len(resolution.invalid_ids),
         abstained=abstained,
@@ -951,7 +1142,10 @@ def _paused_response(session: AutonomousSession) -> AutonomousResponse:
         raise ValueError("persisted pause is missing its ask_user question")
     return AutonomousResponse(
         plan=_public_plan(session.plan),
-        steps=_public_steps(session.steps),
+        steps=_public_steps(
+            session.steps, business_tool_names=session.knowledge_state.tool_names()
+            if session.knowledge_state else None,
+        ),
         tools_called=list(dict.fromkeys(session.tools_called)),
         rounds_used=session.rounds_used,
         truncated=False,
@@ -965,6 +1159,8 @@ def _paused_response(session: AutonomousSession) -> AutonomousResponse:
         ),
         grounding_required=session.grounding_required,
         grounding_document_id=session.document_id,
+        knowledge_base_id=session.knowledge_state.knowledge_base_id if session.knowledge_state else None,
+        web_enabled=session.knowledge_state.web_enabled if session.knowledge_state else False,
     )
 
 
@@ -994,22 +1190,31 @@ async def _execute_autonomous(
             grounding_status=GroundingStatus.ABSTAINED,
             grounding_required=req.grounding_required,
             grounding_document_id=req.document_id,
+            knowledge_base_id=req.knowledge_base_id,
+            web_enabled=req.web_enabled,
         )
 
+    knowledge_context = None
+    if req.knowledge_base_id:
+        knowledge_context = await KnowledgeAgentContext.start(
+            req.knowledge_base_id, req.user_id, req.web_enabled, user_query=req.query,
+        )
     context_hint = f"\n\n当前用户 ID: {req.user_id}"
+    if knowledge_context:
+        context_hint += f"\n当前知识库：{req.knowledge_base_id}；联网允许：{req.web_enabled}。"
     if req.document_id:
         context_hint += (
             f"\n当前文档 ID: {req.document_id}"
             "\n所有 search_document 调用都必须使用这个文档 ID。"
         )
-    if req.grounding_required:
+    if req.grounding_required and not knowledge_context:
         context_hint += (
             "\n本次请求要求可验证引用：必须先调用 search_document，并在 finalize 的 "
             "citation_ids 中仅填写 observation 返回的真实 chunk_ids；证据不足时设置 abstained=true。"
         )
 
     # Plan 可选：短 query 跳过
-    if len(req.query.strip()) < PLAN_SKIP_QUERY_LEN:
+    if knowledge_context or len(req.query.strip()) < PLAN_SKIP_QUERY_LEN:
         plan: list[str] = []
         logger.info(f"[autonomous] skip plan (query len={len(req.query.strip())})")
     else:
@@ -1018,7 +1223,9 @@ async def _execute_autonomous(
 
     # 构造初始 messages；工具调用由 ReAct 自主决策
     messages: list = [
-        {"role": "system", "content": _REACT_SYSTEM + context_hint},
+        {"role": "system", "content": (
+            KNOWLEDGE_SYSTEM_PROMPT if knowledge_context else _REACT_SYSTEM
+        ) + context_hint},
         {"role": "user", "content": req.query},
     ]
     if plan:
@@ -1054,7 +1261,7 @@ async def _execute_autonomous(
                 session.conversation_id, inspection.payload
             )
             canonical = await _validate_replayed_response(
-                _paused_response(persisted).model_dump(mode="json")
+                _paused_response(persisted).model_dump(mode="json"), knowledge_owner_id=req.user_id,
             )
             if receipt_lease is not None:
                 # Initial pauses are only safe to repair from a clean pending
@@ -1111,6 +1318,7 @@ async def _execute_autonomous(
             save_initial_pause if receipt_lease is not None else None
         ),
         initial_conversation_id=_initial_conversation_id(receipt_lease),
+        knowledge_context=knowledge_context,
     )
 
 
@@ -1135,12 +1343,12 @@ async def autonomous_agent(
             )
         except IdempotencyConflictError as exc:
             if exc.reason in {"in_progress", "ambiguous"}:
-                recovered = await _recover_initial_pause_from_session(key, req)
+                recovered = await _recover_initial_pause_from_session(key, req, owner_id=subject)
                 if recovered is not None:
                     return recovered
             raise
         if decision.replayed:
-            return await _validate_replayed_response(decision.response)
+            return await _validate_replayed_response(decision.response, knowledge_owner_id=subject)
         receipt_lease = decision.lease
         if receipt_lease is None:
             raise RuntimeError("idempotency claim returned without ownership data")
@@ -1148,6 +1356,7 @@ async def autonomous_agent(
             key,
             req,
             recovery_token=receipt_lease.recovery_token,
+            owner_id=subject,
         )
         if recovered is not None:
             return recovered
@@ -1215,13 +1424,16 @@ async def cancel_autonomous_session(
         max_length=128,
         pattern=r"^[A-Za-z0-9_-]+$",
     ),
+    subject: str = Depends(require_user_id),
 ) -> dict[str, str]:
     """Cancel only a currently paused HITL session.
 
     A running owner is never interrupted by this endpoint. Missing, expired,
     and already-completed capabilities are idempotent no-ops for the browser.
     """
-    result = await autonomous_sessions.discard_paused(conversation_id)
+    result = await autonomous_sessions.discard_paused(
+        conversation_id, **({"owner_id": subject} if isinstance(subject, str) else {}),
+    )
     if result.reason == "in_progress":
         raise HTTPException(
             status_code=409,
@@ -1240,12 +1452,17 @@ async def continue_autonomous(
     idempotency_key: Optional[str] = Header(
         default=None, alias="Idempotency-Key"
     ),
+    subject: str = Depends(require_user_id),
 ) -> AutonomousResponse:
     """ask_user 后用户回答的续跑端点。
 
     协议：把 user_reply 作为 ask_user 的 tool response 填回 messages，从下一轮继续 ReAct。
     """
     key = normalize_idempotency_key(idempotency_key)
+    owner_id = subject if isinstance(subject, str) else None
+    if owner_id is not None:
+        if not await autonomous_sessions.owned(req.conversation_id, owner_id):
+            raise HTTPException(404, "conversation 不存在或已过期")
     receipt_lease = None
     if key:
         try:
@@ -1255,13 +1472,15 @@ async def continue_autonomous(
         except IdempotencyConflictError as exc:
             if exc.reason in {"in_progress", "ambiguous"}:
                 recovered = await _recover_continue_outcome_from_session(
-                    key, req
+                    key, req, owner_id=owner_id,
                 )
                 if recovered is not None:
                     return recovered
             raise
         if decision.replayed:
-            return await _validate_replayed_response(decision.response)
+            return await _validate_replayed_response(
+                decision.response, knowledge_owner_id=subject if isinstance(subject, str) else None,
+            )
         receipt_lease = decision.lease
         if receipt_lease is None:
             raise RuntimeError("idempotency claim returned without ownership data")
@@ -1272,7 +1491,8 @@ async def continue_autonomous(
     )
     try:
         claim = await autonomous_sessions.claim(
-            req.conversation_id, continue_fingerprint
+            req.conversation_id, continue_fingerprint,
+            **({"owner_id": owner_id} if owner_id is not None else {}),
         )
     except BaseException:
         await _abort_receipt(receipt_lease)
@@ -1285,7 +1505,7 @@ async def continue_autonomous(
                     status_code=410,
                     detail="续跑结果记录无效；请重新开始",
                 )
-            response = await _validate_replayed_response(claim.outcome)
+            response = await _validate_replayed_response(claim.outcome, knowledge_owner_id=owner_id)
             if receipt_lease is not None:
                 await request_idempotency.complete(
                     receipt_lease, response.model_dump(mode="json")
@@ -1330,6 +1550,11 @@ async def continue_autonomous(
             status_code=410,
             detail="暂停会话数据无效，已安全终止；请重新开始",
         ) from exc
+
+    if owner_id is not None and session.user_id != owner_id:
+        await autonomous_sessions.release(req.conversation_id, claim_token)
+        await _abort_receipt(receipt_lease)
+        raise HTTPException(404, "conversation 不存在或已过期")
 
     # 注入检测尚未改变 session 或执行工具；失败时把 clean claim 原子退回暂停态。
     try:
@@ -1408,10 +1633,16 @@ async def continue_autonomous(
         return response
 
     run_id = f"auto_cont_{uuid.uuid4().hex[:12]}"
+    knowledge_context = (
+        KnowledgeAgentContext(session.knowledge_state.model_copy(deep=True))
+        if session.knowledge_state is not None else None
+    )
+    active_registry = knowledge_context.registry if knowledge_context else tool_registry
     try:
-        if session.registry_sha256 != _current_registry_sha256():
+        fingerprint = knowledge_context.fingerprint() if knowledge_context else _current_registry_sha256()
+        if session.registry_sha256 != fingerprint:
             raise ValueError("persisted tool registry fingerprint is stale")
-        tool_registry.restore_run_policy_state(
+        active_registry.restore_run_policy_state(
             run_id,
             session.semantic_reservation_digests,
         )
@@ -1438,6 +1669,8 @@ async def continue_autonomous(
     # 能够区分"已提交且拿得到响应"和"已提交但引用未绑定"。
     response: AutonomousResponse | None = None
     try:
+        if knowledge_context is not None:
+            await knowledge_context.ensure_current(verify_web=True)
         response = await _run_react_loop(
             messages=resume_messages, plan=session.plan,
             steps=resume_steps, tools_called=resume_tools_called,
@@ -1450,6 +1683,7 @@ async def continue_autonomous(
             on_before_tool_calls=renew_ownership,
             on_before_tool_dispatch=mark_progress_before_tool_calls,
             pause_session_saver=handoff_to_next_pause,
+            knowledge_context=knowledge_context,
         )
         if not outcome_committed:
             outcome_commit_attempted = True
@@ -1475,6 +1709,7 @@ async def continue_autonomous(
                 recovered = await _recover_continue_outcome_from_session(
                     receipt_lease.key,
                     req,
+                    owner_id=owner_id,
                 )
             except Exception as recovery_exc:
                 raise IdempotencyConflictError("in_progress") from recovery_exc
@@ -1498,7 +1733,9 @@ async def continue_autonomous(
                 or isinstance(exc, IdempotencyConflictError)
             )
         ):
-            inspection = await autonomous_sessions.inspect(req.conversation_id)
+            inspection = await autonomous_sessions.inspect(
+                req.conversation_id, **({"owner_id": owner_id} if owner_id is not None else {}),
+            )
             if (
                 inspection is not None
                 and inspection.state == "completed"
@@ -1506,7 +1743,7 @@ async def continue_autonomous(
                 and inspection.continue_fingerprint == continue_fingerprint
             ):
                 recovered_response = await _validate_replayed_response(
-                    inspection.outcome
+                    inspection.outcome, knowledge_owner_id=owner_id,
                 )
                 if receipt_lease is not None:
                     await request_idempotency.reconcile_completed(
@@ -1595,6 +1832,8 @@ async def continue_autonomous(
             progressed,
             trajectory_progressed,
         )
+        if knowledge_context and isinstance(exc, HTTPException) and exc.status_code in {409, 410, 503}:
+            raise
         if isinstance(exc, Exception):
             raise HTTPException(
                 status_code=410,

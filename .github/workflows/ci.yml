@@ -87,6 +87,43 @@ jobs:
       - name: Audit pinned dependencies
         run: pip-audit -r requirements.txt --progress-spinner off
 
+  knowledge-contract:
+    name: LightRAG and knowledge-service contracts (fake model boundary)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.6-pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
+        env:
+          POSTGRES_USER: graph_ci
+          POSTGRES_PASSWORD: graph-ci-password
+          POSTGRES_DB: graph_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U graph_ci -d graph_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_GRAPH_SERVICE_DATABASE_URL: postgresql://graph_ci:graph-ci-password@127.0.0.1:5432/graph_ci
+      TEST_LIGHTRAG_DATABASE_URL: postgresql://graph_ci:graph-ci-password@127.0.0.1:5432/graph_ci
+      PYTHONPATH: ${{ github.workspace }}:${{ github.workspace }}/tests
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install isolated knowledge-service test dependencies
+        run: pip install -r graph_service/requirements.txt pytest pytest-asyncio ascii-colors
+      - name: Verify real SDK/storage contracts without paid models
+        run: python scripts/verify_lightrag_contract.py
+      - name: Verify knowledge-service state and real SDK integration
+        run: python -m pytest -q --confcutdir=tests/graph_service tests/graph_service
+      - name: Verify frozen evaluation inputs without live models
+        run: python scripts/evaluate_knowledge.py
+
   frontend:
     runs-on: ubuntu-latest
     timeout-minutes: 10

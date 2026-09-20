@@ -131,6 +131,17 @@ topology is not shipped by this repository today.
 
 ## Optional integrations
 
+The optional knowledge-base service adds a separate LightRAG data plane, described in
+[LIGHTRAG.md](LIGHTRAG.md). It owns source versions, canonical entity/edge identities,
+correction replay and a PostgreSQL-backed write queue. The existing document-centric
+learning path, Quiz and Adaptive routes retain their original scope.
+
+When Autonomous selects `knowledge_base_id`, it uses a request-local read-only tool registry
+and source citations. Its snapshot pins the knowledge-base revision/epoch and permitted web
+policy. Legacy request serialization and global tool fingerprints remain compatible. Both
+citation systems validate observed source identity and scope; neither proves semantic
+entailment for every generated statement.
+
 - Query rewriting, HyDE, multi-query retrieval, and cross-encoder reranking are
   feature-flagged and disabled in `.env.example` for a lightweight first run.
 - LangSmith, Langfuse, and live MCP integrations are opt-in and disabled by

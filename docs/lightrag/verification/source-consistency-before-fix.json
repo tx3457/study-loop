@@ -1,0 +1,18 @@
+{
+  "reference_count": 14,
+  "invalid_reference_count": 1,
+  "invalid_references": [
+    {
+      "workspace": "kb_59a19d659af4c5219d90f342c3b83d7c4f099c4e",
+      "chunk_id": "a0697f56-8500-48ec-ad0d-c72461f646f8-chunk-000"
+    }
+  ],
+  "status": "failed_source_consistency",
+  "database": "knowledge_restore_run3",
+  "vector_tables": [
+    "lightrag_vdb_entity_deterministic_contract_v1_64d",
+    "lightrag_vdb_relation_deterministic_contract_v1_64d"
+  ],
+  "read_only": true,
+  "model_calls": 0
+}

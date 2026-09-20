@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from models.knowledge_evidence import KnowledgeRunState
 
 from services.citations import EvidenceChunk, EvidenceRegistry
 from services.injection import check_output_leak
@@ -30,7 +31,7 @@ from services.tool_registry import tool_registry
 # 变成跑得完却存不下的会话。
 MAX_AUTONOMOUS_ROUNDS = 8
 
-_SESSION_SCHEMA_VERSION = 3
+_SESSION_SCHEMA_VERSION = 4
 
 
 @dataclass
@@ -49,6 +50,7 @@ class AutonomousSession:
     pending_ask_call_id: str                        # 待回答的 ask_user 工具 call_id
     registry_sha256: str = ""
     semantic_reservation_digests: tuple[tuple[str, str], ...] = ()
+    knowledge_state: KnowledgeRunState | None = None
 
 
 class StepRecord(BaseModel):
@@ -82,6 +84,7 @@ def public_steps(
     steps: list[StepRecord],
     *,
     redact_details: bool = False,
+    business_tool_names: set[str] | None = None,
 ) -> list[StepRecord]:
     """Return a public trajectory with unchecked answers and secrets removed."""
     public: list[StepRecord] = []
@@ -90,7 +93,11 @@ def public_steps(
         if (
             tool_name is not None
             and tool_name not in CONTROL_TOOL_NAMES
-            and tool_registry.get(tool_name) is None
+            and (
+                tool_name not in business_tool_names
+                if business_tool_names is not None
+                else tool_registry.get(tool_name) is None
+            )
         ):
             tool_name = "blocked_tool"
         tool_args = step.tool_args
@@ -208,7 +215,7 @@ class _AutonomousSessionPayload(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal[1, 2, 3]
+    schema_version: Literal[1, 2, 3, 4]
     messages: list[dict[str, object]] = Field(min_length=3, max_length=256)
     plan: list[str] = Field(max_length=6)
     steps: list[StepRecord] = Field(min_length=1, max_length=128)
@@ -218,6 +225,7 @@ class _AutonomousSessionPayload(BaseModel):
     document_id: Optional[str] = Field(default=None, max_length=512)
     evidence_registry: dict[str, _EvidenceChunkPayload]
     grounding_required: bool
+    knowledge_state: KnowledgeRunState | None = None
     pending_ask_call_id: str = Field(min_length=1, max_length=256)
     registry_sha256: str = Field(default="", pattern=r"^[0-9a-f]{64}$|^$")
     semantic_reservation_digests: list[tuple[str, str]] = Field(
@@ -227,12 +235,21 @@ class _AutonomousSessionPayload(BaseModel):
 
     @model_validator(mode="after")
     def validate_pause_boundary(self):
-        if self.schema_version == 3 and not self.registry_sha256:
+        if self.schema_version >= 3 and not self.registry_sha256:
             raise ValueError("v3 session is missing its registry fingerprint")
         if self.schema_version in {1, 2} and (
             self.registry_sha256 or self.semantic_reservation_digests
         ):
             raise ValueError("legacy session contains unsupported security state")
+        if self.knowledge_state is not None:
+            if self.schema_version < 4:
+                raise ValueError("legacy snapshot cannot gain knowledge scope")
+            if self.document_id is not None or self.evidence_registry:
+                raise ValueError("knowledge and legacy document scopes are exclusive")
+            if self.knowledge_state.owner_id != self.user_id or not self.grounding_required:
+                raise ValueError("knowledge snapshot has invalid authority")
+            if self.semantic_reservation_digests:
+                raise ValueError("knowledge snapshot must not contain write reservations")
         for tool_name, digest in self.semantic_reservation_digests:
             if not tool_name or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
                 raise ValueError("semantic reservation digest is invalid")
@@ -249,7 +266,7 @@ class _AutonomousSessionPayload(BaseModel):
         ):
             raise ValueError("session messages must retain system and user context")
 
-        if self.grounding_required and (
+        if self.grounding_required and self.knowledge_state is None and (
             self.document_id is None or not self.document_id.strip()
         ):
             raise ValueError("strict grounding snapshot is missing its document scope")
@@ -274,11 +291,12 @@ class _AutonomousSessionPayload(BaseModel):
         return self
 
 
-def current_registry_sha256() -> str:
+def current_registry_sha256(registry=None) -> str:
     """Fingerprint schemas and security metadata governing business dispatch."""
     contracts = []
-    for name in sorted(tool_registry.list_tools()):
-        tool = tool_registry.get(name)
+    selected_registry = registry if registry is not None else tool_registry
+    for name in sorted(selected_registry.list_tools()):
+        tool = selected_registry.get(name)
         if tool is None:
             continue
         contracts.append({
@@ -341,6 +359,7 @@ def _validate_profile_update_reservations(
 def _sanitize_snapshot_messages(
     raw_messages: list[dict[str, object]],
     pending_ask_call_id: str,
+    business_tool_names: set[str] | None = None,
 ) -> tuple[list[dict[str, object]], str]:
     """Return the minimum safe tool-call history needed for HITL resume."""
 
@@ -409,7 +428,11 @@ def _sanitize_snapshot_messages(
             if (
                 isinstance(function, dict)
                 and function_name not in CONTROL_TOOL_NAMES
-                and tool_registry.get(function_name) is None
+                and (
+                    function_name not in business_tool_names
+                    if business_tool_names is not None
+                    else tool_registry.get(function_name) is None
+                )
             ):
                 if isinstance(raw_call_id, str):
                     unknown_call_ids.add(raw_call_id)
@@ -448,10 +471,14 @@ def _sanitize_snapshot_messages(
 
 def session_to_payload(session: AutonomousSession) -> dict:
     messages, pending_ask_call_id = _sanitize_snapshot_messages(
-        session.messages, session.pending_ask_call_id
+        session.messages, session.pending_ask_call_id,
+        session.knowledge_state.tool_names() if session.knowledge_state else None,
     )
 
-    snapshot_steps = public_steps(session.steps)
+    snapshot_steps = public_steps(
+        session.steps,
+        business_tool_names=session.knowledge_state.tool_names() if session.knowledge_state else None,
+    )
     _validate_profile_update_reservations(
         snapshot_steps,
         list(session.semantic_reservation_digests),
@@ -475,6 +502,7 @@ def session_to_payload(session: AutonomousSession) -> dict:
             for chunk_id, evidence in session.evidence_registry.items()
         },
         grounding_required=session.grounding_required,
+        knowledge_state=session.knowledge_state,
         pending_ask_call_id=pending_ask_call_id,
         registry_sha256=(session.registry_sha256 or current_registry_sha256()),
         semantic_reservation_digests=list(
@@ -494,7 +522,7 @@ def session_from_payload(
         raise ValueError(
             "legacy session contains an update without a semantic receipt"
         )
-    if source_schema_version == 3:
+    if source_schema_version >= 3:
         _validate_profile_update_reservations(
             snapshot.steps,
             snapshot.semantic_reservation_digests,
@@ -508,10 +536,14 @@ def session_from_payload(
         migrated["registry_sha256"] = current_registry_sha256()
         migrated["semantic_reservation_digests"] = []
     migrated["messages"], migrated["pending_ask_call_id"] = _sanitize_snapshot_messages(
-        snapshot.messages, snapshot.pending_ask_call_id
+        snapshot.messages, snapshot.pending_ask_call_id,
+        snapshot.knowledge_state.tool_names() if snapshot.knowledge_state else None,
     )
     migrated["steps"] = [
-        step.model_dump(mode="json") for step in public_steps(snapshot.steps)
+        step.model_dump(mode="json") for step in public_steps(
+            snapshot.steps,
+            business_tool_names=snapshot.knowledge_state.tool_names() if snapshot.knowledge_state else None,
+        )
     ]
     migrated["plan"] = _safe_snapshot_plan(snapshot.plan)
     snapshot = _AutonomousSessionPayload.model_validate(migrated)
@@ -531,6 +563,7 @@ def session_from_payload(
         document_id=snapshot.document_id,
         evidence_registry=evidence_registry,
         grounding_required=snapshot.grounding_required,
+        knowledge_state=snapshot.knowledge_state,
         pending_ask_call_id=snapshot.pending_ask_call_id,
         registry_sha256=snapshot.registry_sha256,
         semantic_reservation_digests=tuple(

@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "evaluation_id": "knowledge_retrieval_small_v1",
+  "frozen": true,
+  "purpose": "Bounded retrieval characterization; it does not establish answer quality or production reliability.",
+  "corpus": {
+    "domain_count": 2,
+    "sources_per_domain": 3,
+    "source_granularity": "Each source is one baseline chunk and one GraphRAG document version."
+  },
+  "questions": {
+    "total": 12,
+    "per_domain": 6,
+    "case_counts_per_domain": {
+      "single_document": 3,
+      "cross_document": 2,
+      "unanswerable": 1
+    }
+  },
+  "methods": [
+    {
+      "method_id": "existing_hybrid_rrf",
+      "implementation": "services.vectorstore.hybrid_query_document",
+      "configuration": "BM25 plus configured dense embedding, RRF k=60, no query rewriting"
+    },
+    {
+      "method_id": "lightrag_mix",
+      "implementation": "graph_service.engine.LightRAGEngine.query",
+      "configuration": "LightRAG aquery_data mode=mix, top_k=40, chunk_top_k=20, SDK rerank disabled"
+    }
+  ],
+  "retrieval": {
+    "reported_top_k": 3,
+    "required_source_metric": "Recall@3 = retrieved required source IDs divided by required source IDs",
+    "unanswerable_metric": "Recall is null; report retrieved source count and whether any source was returned.",
+    "duplicate_policy": "Source IDs are deduplicated in first-retrieved order before scoring."
+  },
+  "answering": {
+    "enabled": false,
+    "reason": "Current documented comparison interfaces expose retrieval data but no shared answer-generation and citation boundary.",
+    "required_if_added_later": "Store generated answer, verified citations, provider token usage when returned, and a separately defined answer-quality rubric."
+  },
+  "execution": {
+    "live_call_gate": "--allow-live-models is mandatory",
+    "provider_failure": "Stop on the first provider failure, write STATUS.json, and do not change provider, model, seed, or method.",
+    "isolation": "Use a new temporary Chroma directory and unique disposable PostgreSQL workspaces. Never read or write user collections.",
+    "token_usage": "Record only usage returned by an invoked interface; otherwise store null with an unavailable reason."
+  }
+}

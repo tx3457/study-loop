@@ -10,12 +10,18 @@
  *   idle → running → (awaiting → continuing)* → done | error
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import {
   cancelAutonomous,
   createIdempotencyKey,
   runAutonomous,
   continueAutonomous,
   getDocuments,
+  getKnowledgeBase,
+  getKnowledgeBases,
+  getKnowledgeCapabilities,
+  getKnowledgeJob,
+  importWebSnapshot,
   isTerminalExecutionError,
 } from '../api/client'
 import {
@@ -43,7 +49,9 @@ const initialState = {
     query: '',
     user_id: DEFAULT_USER_ID,
     document_id: '',
+    knowledge_base_id: '',
     grounding_required: false,
+    web_enabled: false,
   },
   response: null,
   error: null,
@@ -64,7 +72,9 @@ function toFormRequest(request) {
     query: request?.query || '',
     user_id: DEFAULT_USER_ID,
     document_id: request?.document_id || '',
+    knowledge_base_id: request?.knowledge_base_id || '',
     grounding_required: request?.grounding_required === true,
+    web_enabled: request?.web_enabled === true,
   }
 }
 
@@ -85,6 +95,8 @@ function responseFromRecovery(recovery) {
       : 'not_requested',
     grounding_required: recovery.request.grounding_required,
     grounding_document_id: recovery.request.document_id,
+    knowledge_base_id: recovery.request.knowledge_base_id,
+    web_enabled: recovery.request.web_enabled,
   }
 }
 
@@ -110,7 +122,25 @@ function FormattedAnswer({ text }) {
   )
 }
 
+function safeExternalUrl(value) {
+  try {
+    const url = new URL(value)
+    return ['http:', 'https:'].includes(url.protocol) ? url.href : null
+  } catch {
+    return null
+  }
+}
+
+const SOURCE_STATUS_LABELS = {
+  current: '当前来源',
+  deleted: '来源已删除',
+  historical: '历史来源',
+  unavailable: '来源不可用',
+}
+
 export default function Autonomous() {
+  const [searchParams] = useSearchParams()
+  const deepLinkedKnowledgeBaseId = searchParams.get('knowledge_base_id') || ''
   const [restoredRecovery] = useState(() => readAutonomousRecovery())
   const [recovery, setRecovery] = useState(restoredRecovery)
   const recoveryRef = useRef(restoredRecovery)
@@ -126,7 +156,14 @@ export default function Autonomous() {
       : restoredRecovery.kind === 'pending_continue' ? 'continuing' : 'awaiting',
     request: toFormRequest(restoredRecovery.request),
     response: responseFromRecovery(restoredRecovery),
-  } : initialState)
+  } : {
+    ...initialState,
+    request: {
+      ...initialState.request,
+      knowledge_base_id: deepLinkedKnowledgeBaseId,
+      grounding_required: Boolean(deepLinkedKnowledgeBaseId),
+    },
+  })
   const [askReply, setAskReply] = useState(
     restoredRecovery?.kind === 'pending_continue'
       ? restoredRecovery.body.user_reply
@@ -135,6 +172,11 @@ export default function Autonomous() {
   const [documents, setDocuments] = useState([])
   const [documentsLoading, setDocumentsLoading] = useState(false)
   const [documentsError, setDocumentsError] = useState(null)
+  const [knowledgeBases, setKnowledgeBases] = useState([])
+  const [knowledgeWebAvailable, setKnowledgeWebAvailable] = useState(false)
+  const [knowledgeBaseRevision, setKnowledgeBaseRevision] = useState(null)
+  const [webImporting, setWebImporting] = useState(null)
+  const [webImportNotice, setWebImportNotice] = useState('')
   const documentsRequestId = useRef(0)
   const modalRef = useRef(null)
   const modalInputRef = useRef(null)
@@ -209,10 +251,24 @@ export default function Autonomous() {
     }
   }, [])
 
+  const loadKnowledgeBases = useCallback(async () => {
+    try {
+      const capabilities = await getKnowledgeCapabilities()
+      if (!capabilities?.enabled || !capabilities?.available) return
+      if (mountedRef.current) setKnowledgeWebAvailable(capabilities.web_search_available === true)
+      const result = await getKnowledgeBases()
+      if (!mountedRef.current) return
+      setKnowledgeBases(Array.isArray(result?.knowledge_bases) ? result.knowledge_bases : [])
+    } catch {
+      // Knowledge bases are optional; a missing capability must not affect legacy mode.
+    }
+  }, [])
+
   useEffect(() => {
     const requestControllers = activeRequestControllers.current
     mountedRef.current = true
     void loadDocs()
+    void loadKnowledgeBases()
     return () => {
       mountedRef.current = false
       documentsRequestId.current += 1
@@ -225,7 +281,20 @@ export default function Autonomous() {
         }
       })
     }
-  }, [loadDocs])
+  }, [loadDocs, loadKnowledgeBases])
+
+  useEffect(() => {
+    const knowledgeBaseId = state.request.knowledge_base_id.trim()
+    if (!knowledgeBaseId) {
+      setKnowledgeBaseRevision(null)
+      return undefined
+    }
+    const controller = new AbortController()
+    getKnowledgeBase(knowledgeBaseId, { signal: controller.signal })
+      .then(result => mountedRef.current && setKnowledgeBaseRevision(result?.revision ?? null))
+      .catch(() => mountedRef.current && setKnowledgeBaseRevision(null))
+    return () => controller.abort()
+  }, [state.request.knowledge_base_id])
 
   useEffect(() => {
     if (!dialogOpen) return undefined
@@ -463,7 +532,13 @@ export default function Autonomous() {
       query: state.request.query.trim(),
       user_id: DEFAULT_USER_ID,
       document_id: state.request.document_id.trim() || null,
-      grounding_required: state.request.grounding_required,
+      knowledge_base_id: state.request.knowledge_base_id.trim() || null,
+      grounding_required: state.request.knowledge_base_id.trim()
+        ? true
+        : state.request.grounding_required,
+      web_enabled: state.request.knowledge_base_id.trim()
+        ? state.request.web_enabled
+        : false,
     }
     let pending
     try {
@@ -629,6 +704,46 @@ export default function Autonomous() {
     setAskReply('')
   }
 
+  async function handleWebImport(snapshotId) {
+    const knowledgeBaseId = state.request.knowledge_base_id.trim()
+    if (!knowledgeBaseId || knowledgeBaseRevision == null || webImporting) return
+    setWebImporting(snapshotId)
+    setWebImportNotice('')
+    try {
+      const accepted = await importWebSnapshot(
+        knowledgeBaseId,
+        snapshotId,
+        knowledgeBaseRevision,
+        createIdempotencyKey(),
+      )
+      const acceptedJobId = accepted?.job_id
+      while (mountedRef.current && acceptedJobId) {
+        const current = await getKnowledgeJob(acceptedJobId)
+        if (!mountedRef.current) return
+        if (current.status === 'succeeded') break
+        if (current.status === 'failed') throw new Error(current.error_code || '网页快照收录失败')
+        await new Promise(resolve => setTimeout(resolve, 600))
+      }
+      if (!mountedRef.current) return
+      const latest = await getKnowledgeBase(knowledgeBaseId)
+      if (!mountedRef.current) return
+      setKnowledgeBaseRevision(latest?.revision ?? knowledgeBaseRevision)
+      setWebImportNotice('网页快照已收录到当前知识库。')
+    } catch (err) {
+      if (err?.status === 409) {
+        try {
+          const latest = await getKnowledgeBase(knowledgeBaseId)
+          if (mountedRef.current) setKnowledgeBaseRevision(latest?.revision ?? null)
+        } catch {
+          // The original request error remains the useful user-facing result.
+        }
+      }
+      if (mountedRef.current) setWebImportNotice(`收录失败：${err.message}`)
+    } finally {
+      if (mountedRef.current) setWebImporting(null)
+    }
+  }
+
   const r = state.response
   const citations = Array.isArray(r?.citations)
     ? r.citations.filter(citation => (
@@ -638,6 +753,16 @@ export default function Autonomous() {
       && typeof citation.snippet === 'string'
     ))
     : []
+  const sourceCitations = Array.isArray(r?.source_citations)
+    ? r.source_citations.filter(citation => (
+      citation
+      && ['kb_chunk', 'web_snapshot'].includes(citation.kind)
+      && typeof citation.evidence_id === 'string'
+      && typeof citation.snippet === 'string'
+    ))
+    : []
+  const kbSourceCitations = sourceCitations.filter(citation => citation.kind === 'kb_chunk')
+  const webSourceCitations = sourceCitations.filter(citation => citation.kind === 'web_snapshot')
   const invalidCitationCount = Number.isInteger(r?.invalid_citation_count)
     ? r.invalid_citation_count
     : Array.isArray(r?.invalid_citation_ids) ? r.invalid_citation_ids.length : 0
@@ -712,6 +837,8 @@ export default function Autonomous() {
                     request: {
                       ...s.request,
                       document_id: documentId,
+                      knowledge_base_id: documentId.trim() ? '' : s.request.knowledge_base_id,
+                      web_enabled: documentId.trim() ? false : s.request.web_enabled,
                       // A newly selected document is grounded by default. Keep
                       // later explicit checkbox choices while the user edits it.
                       grounding_required: !hadDocument && documentId.trim()
@@ -722,7 +849,7 @@ export default function Autonomous() {
                 })
               }}
               placeholder="留空让 Agent 主动询问"
-              disabled={formLocked}
+              disabled={formLocked || Boolean(state.request.knowledge_base_id.trim())}
               maxLength={512}
             />
             <datalist id="doc-list">
@@ -735,6 +862,34 @@ export default function Autonomous() {
             )}
           </div>
         </div>
+
+        {knowledgeBases.length > 0 && (
+          <div className="form-row">
+            <label htmlFor="autonomous-knowledge-base">知识库（可选）</label>
+            <select
+              id="autonomous-knowledge-base"
+              value={state.request.knowledge_base_id}
+              disabled={formLocked}
+              onChange={event => {
+                const knowledgeBaseId = event.target.value
+                setState(current => ({
+                  ...current,
+                  request: {
+                    ...current.request,
+                    knowledge_base_id: knowledgeBaseId,
+                    document_id: knowledgeBaseId ? '' : current.request.document_id,
+                    grounding_required: knowledgeBaseId ? true : current.request.grounding_required,
+                    web_enabled: knowledgeBaseId ? current.request.web_enabled : false,
+                  },
+                }))
+              }}
+            >
+              <option value="">不使用知识库</option>
+              {knowledgeBases.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+            </select>
+            <small>知识库和单文档不能同时选择；知识库问答始终要求可核验来源。</small>
+          </div>
+        )}
 
         <div className="grounding-row">
           <label className="grounding-option" htmlFor="autonomous-grounding">
@@ -751,7 +906,7 @@ export default function Autonomous() {
                   },
                 }))
               }}
-              disabled={formLocked || !state.request.document_id.trim()}
+              disabled={formLocked || Boolean(state.request.knowledge_base_id.trim()) || !state.request.document_id.trim()}
             />
             <span>
               <strong>要求可核验文档引用</strong>
@@ -762,6 +917,24 @@ export default function Autonomous() {
             </span>
           </label>
         </div>
+
+        {state.request.knowledge_base_id.trim() && (
+          <div className="grounding-row">
+            <label className="grounding-option" htmlFor="autonomous-web-enabled">
+              <input
+                id="autonomous-web-enabled"
+                type="checkbox"
+                checked={state.request.web_enabled}
+                onChange={event => setState(current => ({
+                  ...current,
+                  request: { ...current.request, web_enabled: event.target.checked },
+                }))}
+                disabled={formLocked || !knowledgeWebAvailable}
+              />
+              <span><strong>联网补充</strong><small>{knowledgeWebAvailable ? '默认关闭。开启后网页快照会作为独立来源展示，不会自动收录。' : '当前知识库服务未提供联网搜索。'}</small></span>
+            </label>
+          </div>
+        )}
 
         <div className="form-actions">
           {!state.retryBlocked && (
@@ -859,6 +1032,47 @@ export default function Autonomous() {
             </section>
           )}
 
+          {!isAbstained && kbSourceCitations.length > 0 && (
+            <section className="result-section source-section" aria-labelledby="kb-source-title">
+              <h3 id="kb-source-title">知识库来源</h3>
+              <ol className="source-card-list">
+                {kbSourceCitations.map(sourceCitation => (
+                  <li className="source-card" key={sourceCitation.evidence_id}>
+                    <div className="source-card-head"><strong>{sourceCitation.title || '知识库片段'}</strong><span>{SOURCE_STATUS_LABELS[sourceCitation.source_status] || '知识库资料'}</span></div>
+                    <blockquote className="source-snippet">{sourceCitation.snippet}</blockquote>
+                    <div className="citation-meta"><span>资料 <code>{sourceCitation.document_id}</code></span><span>版本 <code>{sourceCitation.source_version_id}</code></span><span>片段 <code>{sourceCitation.chunk_id}</code></span></div>
+                  </li>
+                ))}
+              </ol>
+            </section>
+          )}
+
+          {!isAbstained && webSourceCitations.length > 0 && (
+            <section className="result-section source-section" aria-labelledby="web-source-title">
+              <h3 id="web-source-title">网页来源</h3>
+              {r?.web_only === true && <p className="grounding-note">本回答仅使用网页来源，没有使用知识库片段。</p>}
+              {webImportNotice && <p className="grounding-note" role="status">{webImportNotice}</p>}
+              <ol className="source-card-list">
+                {webSourceCitations.map(sourceCitation => {
+                  const safeUrl = safeExternalUrl(sourceCitation.url)
+                  return (
+                    <li className="source-card" key={sourceCitation.evidence_id}>
+                      <div className="source-card-head"><strong>{sourceCitation.title || '网页快照'}</strong><span>{sourceCitation.fetched_at || '抓取时间未知'}</span></div>
+                      {safeUrl && <a href={safeUrl} target="_blank" rel="noopener noreferrer">{sourceCitation.url}</a>}
+                      <blockquote className="source-snippet">{sourceCitation.snippet}</blockquote>
+                      <div className="citation-meta"><span>内容哈希 <code>{sourceCitation.content_hash}</code></span></div>
+                      {state.request.knowledge_base_id && sourceCitation.snapshot_id && (
+                        <button type="button" className="btn-secondary" disabled={Boolean(webImporting) || knowledgeBaseRevision == null} onClick={() => handleWebImport(sourceCitation.snapshot_id)}>
+                          {webImporting === sourceCitation.snapshot_id ? '收录中…' : '收录到当前知识库'}
+                        </button>
+                      )}
+                    </li>
+                  )
+                })}
+              </ol>
+            </section>
+          )}
+
           <details className="result-details" open={state.phase !== 'done'}>
             <summary>
               <span>执行详情</span>
@@ -915,6 +1129,12 @@ export default function Autonomous() {
                       <span className="meta-key">检索范围</span>
                       <span>{r.grounding_document_id}</span>
                     </div>
+                  )}
+                  {r.knowledge_base_id && (
+                    <div><span className="meta-key">知识库范围</span><span>{r.knowledge_base_id}</span></div>
+                  )}
+                  {typeof r.web_enabled === 'boolean' && (
+                    <div><span className="meta-key">联网补充</span><span>{r.web_enabled ? '已开启' : '已关闭'}</span></div>
                   )}
                 </div>
               </section>

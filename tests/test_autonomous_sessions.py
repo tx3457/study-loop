@@ -103,6 +103,200 @@ class TestAutonomousSessionStore(unittest.IsolatedAsyncioTestCase):
 
         return await asyncio.to_thread(read)
 
+    async def _raw_row(self, conversation_id: str):
+        def read():
+            with closing(sqlite3.connect(self.db_path)) as connection:
+                return connection.execute(
+                    "SELECT * FROM studyloop_autonomous_sessions WHERE conversation_id = ?",
+                    (conversation_id,),
+                ).fetchone()
+
+        return await asyncio.to_thread(read)
+
+    @staticmethod
+    def _owned_payload(owner_id: str, label: str) -> dict:
+        return {**_payload(label), "user_id": owner_id}
+
+    async def test_owner_bound_inspect_claim_and_discard_are_opaque_and_non_mutating(self):
+        store = self._store(lease_seconds=10)
+
+        await store.save("conv-owner-inspect", self._owned_payload("alice", "inspect"))
+        inspect_before = await self._raw_row("conv-owner-inspect")
+        self.assertIsNone(await store.inspect("conv-owner-inspect", owner_id="bob"))
+        self.assertEqual(await self._raw_row("conv-owner-inspect"), inspect_before)
+        self.assertEqual(
+            (await store.inspect("conv-owner-inspect", owner_id="alice")).payload["user_id"],
+            "alice",
+        )
+
+        await store.save("conv-owner-claim", self._owned_payload("alice", "claim"))
+        claim_before = await self._raw_row("conv-owner-claim")
+        rejected = await store.claim(
+            "conv-owner-claim", _fingerprint("reply"), owner_id="bob"
+        )
+        self.assertFalse(rejected.claimed)
+        self.assertEqual(rejected.reason, "missing")
+        self.assertEqual(await self._raw_row("conv-owner-claim"), claim_before)
+        accepted = await store.claim(
+            "conv-owner-claim", _fingerprint("reply"), owner_id="alice"
+        )
+        self.assertTrue(accepted.claimed)
+        self.assertEqual(accepted.payload["user_id"], "alice")
+
+        await store.save("conv-owner-discard", self._owned_payload("alice", "discard"))
+        discard_before = await self._raw_row("conv-owner-discard")
+        rejected_discard = await store.discard_paused(
+            "conv-owner-discard", owner_id="bob"
+        )
+        self.assertFalse(rejected_discard.discarded)
+        self.assertEqual(rejected_discard.reason, "missing")
+        self.assertEqual(await self._raw_row("conv-owner-discard"), discard_before)
+        accepted_discard = await store.discard_paused(
+            "conv-owner-discard", owner_id="alice"
+        )
+        self.assertTrue(accepted_discard.discarded)
+
+    async def test_owner_bound_completed_replay_is_opaque_to_other_owner(self):
+        store = self._store()
+        fingerprint = _fingerprint("completed-owner")
+        await store.save("conv-owner-completed", self._owned_payload("alice", "done"))
+        claimed = await store.claim(
+            "conv-owner-completed", fingerprint, owner_id="alice"
+        )
+        self.assertTrue(
+            await store.finish(
+                "conv-owner-completed",
+                claimed.claim_token,
+                _response("secret completed response"),
+            )
+        )
+        before = await self._raw_row("conv-owner-completed")
+
+        rejected = await store.claim(
+            "conv-owner-completed", fingerprint, owner_id="bob"
+        )
+        self.assertFalse(rejected.claimed)
+        self.assertEqual(rejected.reason, "missing")
+        self.assertIsNone(rejected.outcome)
+        self.assertEqual(await self._raw_row("conv-owner-completed"), before)
+
+        replay = await store.claim(
+            "conv-owner-completed", fingerprint, owner_id="alice"
+        )
+        self.assertEqual(replay.reason, "completed")
+        self.assertEqual(replay.outcome, _response("secret completed response"))
+
+    async def test_owner_mismatch_precedes_expiry_and_stale_reaping(self):
+        expired_store = self._store(ttl_seconds=10)
+        await expired_store.save(
+            "conv-owner-expired", self._owned_payload("alice", "expired")
+        )
+        self.now[0] += 11
+        expired_before = await self._raw_row("conv-owner-expired")
+
+        self.assertIsNone(
+            await expired_store.inspect("conv-owner-expired", owner_id="bob")
+        )
+        rejected_claim = await expired_store.claim(
+            "conv-owner-expired", _fingerprint("expired"), owner_id="bob"
+        )
+        self.assertEqual(rejected_claim.reason, "missing")
+        rejected_discard = await expired_store.discard_paused(
+            "conv-owner-expired", owner_id="bob"
+        )
+        self.assertEqual(rejected_discard.reason, "missing")
+        self.assertEqual(await self._raw_row("conv-owner-expired"), expired_before)
+
+        authorized = await expired_store.claim(
+            "conv-owner-expired", _fingerprint("expired"), owner_id="alice"
+        )
+        self.assertEqual(authorized.reason, "expired")
+        self.assertIsNone(await self._raw_row("conv-owner-expired"))
+
+        stale_store = self._store(lease_seconds=10)
+        await stale_store.save(
+            "conv-owner-stale", self._owned_payload("alice", "stale")
+        )
+        stale_claim = await stale_store.claim(
+            "conv-owner-stale", _fingerprint("stale"), owner_id="alice"
+        )
+        self.assertTrue(
+            await stale_store.mark_progress(
+                "conv-owner-stale", stale_claim.claim_token
+            )
+        )
+        stale_before = await self._raw_row("conv-owner-stale")
+        self.now[0] += 11
+        self.assertIsNone(
+            await stale_store.inspect("conv-owner-stale", owner_id="bob")
+        )
+        self.assertEqual(await self._raw_row("conv-owner-stale"), stale_before)
+        self.assertEqual(
+            (await stale_store.inspect("conv-owner-stale", owner_id="alice")).state,
+            "ambiguous",
+        )
+
+    async def test_exists_without_reaping_preserves_corrupt_expired_row_exactly(self):
+        store = self._store(ttl_seconds=10)
+        await store.save("conv-private-exists", self._owned_payload("alice", "exists"))
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute(
+                "UPDATE studyloop_autonomous_sessions SET payload_json = '{' "
+                "WHERE conversation_id = 'conv-private-exists'"
+            )
+            connection.commit()
+        self.now[0] += 11
+        before = await self._raw_row("conv-private-exists")
+
+        self.assertTrue(await store.exists_without_reaping("conv-private-exists"))
+        self.assertFalse(await store.exists_without_reaping("conv-private-missing"))
+        self.assertEqual(await self._raw_row("conv-private-exists"), before)
+
+    async def test_durable_owner_survives_payload_corruption(self):
+        store = self._store()
+        await store.save("conv-durable-owner", self._owned_payload("alice", "owned"))
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            connection.execute(
+                "UPDATE studyloop_autonomous_sessions SET payload_json = '{' "
+                "WHERE conversation_id = 'conv-durable-owner'"
+            )
+            connection.commit()
+        before = await self._raw_row("conv-durable-owner")
+
+        self.assertTrue(await store.owned("conv-durable-owner", "alice"))
+        self.assertFalse(await store.owned("conv-durable-owner", "bob"))
+        self.assertIsNone(await store.inspect("conv-durable-owner", owner_id="bob"))
+        rejected = await store.claim(
+            "conv-durable-owner", _fingerprint("owned"), owner_id="bob"
+        )
+        self.assertEqual(rejected.reason, "missing")
+        self.assertEqual(await self._raw_row("conv-durable-owner"), before)
+
+        accepted = await store.claim(
+            "conv-durable-owner", _fingerprint("owned"), owner_id="alice"
+        )
+        self.assertTrue(accepted.claimed)
+        self.assertEqual(accepted.reason, "invalid_payload")
+
+    async def test_handoff_rejects_nonempty_owner_change(self):
+        store = self._store()
+        await store.save("conv-owner-source", self._owned_payload("alice", "source"))
+        claim = await store.claim(
+            "conv-owner-source", _fingerprint("handoff-owner"), owner_id="alice"
+        )
+        before = await self._raw_row("conv-owner-source")
+
+        with self.assertRaises(ValueError):
+            await store.handoff(
+                "conv-owner-source",
+                claim.claim_token,
+                "conv-owner-target",
+                self._owned_payload("bob", "target"),
+                _response("next", conversation_id="conv-owner-target"),
+            )
+        self.assertEqual(await self._raw_row("conv-owner-source"), before)
+        self.assertIsNone(await self._raw_row("conv-owner-target"))
+
     async def test_round_trips_json_payload_after_store_reopen(self):
         await self._store().save("conv-reopen", _payload("resume me"))
 
@@ -658,10 +852,28 @@ class TestAutonomousSessionStore(unittest.IsolatedAsyncioTestCase):
                 """,
                 ("conv-legacy", '{"legacy":true}', 990.0, 999.0, 1100.0, 999.0),
             )
+            connection.execute(
+                """
+                INSERT INTO studyloop_autonomous_sessions
+                    (conversation_id, payload_json, state, claim_token,
+                     progress_started, created_at, updated_at, expires_at, claimed_at)
+                VALUES (?, ?, 'paused', NULL, 0, ?, ?, ?, NULL)
+                """,
+                (
+                    "conv-legacy-owned",
+                    '{"legacy":true,"user_id":"alice"}',
+                    990.0,
+                    999.0,
+                    1100.0,
+                ),
+            )
             connection.commit()
 
         store = self._store(lease_seconds=10)
         self.assertEqual(await store.status("conv-legacy"), "in_flight")
+        self.assertFalse(await store.owned("conv-legacy", "alice"))
+        self.assertTrue(await store.owned("conv-legacy-owned", "alice"))
+        self.assertFalse(await store.owned("conv-legacy-owned", "bob"))
         self.now[0] += 11
         decision = await store.claim("conv-legacy", _fingerprint("reply"))
 
@@ -673,7 +885,17 @@ class TestAutonomousSessionStore(unittest.IsolatedAsyncioTestCase):
                 row[1]
                 for row in connection.execute("PRAGMA table_info(studyloop_autonomous_sessions)")
             }
-        self.assertTrue({"claim_expires_at", "continue_fingerprint", "outcome_json"} <= columns)
+            subjects = dict(
+                connection.execute(
+                    "SELECT conversation_id, subject_id FROM studyloop_autonomous_sessions"
+                ).fetchall()
+            )
+        self.assertTrue(
+            {"claim_expires_at", "continue_fingerprint", "outcome_json", "subject_id"}
+            <= columns
+        )
+        self.assertIsNone(subjects["conv-legacy"])
+        self.assertEqual(subjects["conv-legacy-owned"], "alice")
 
     def test_postgres_connection_has_connect_lock_and_statement_timeouts(self):
         connect = MagicMock(return_value=SimpleNamespace())

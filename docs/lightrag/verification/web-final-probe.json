@@ -1,0 +1,20 @@
+{
+  "server_version": "0.7.0",
+  "query": "Python official documentation",
+  "live_model_calls": false,
+  "registered_tools": [
+    "mcp_ddg_search",
+    "mcp_ddg_fetch_content",
+    "mcp_ddg_expand_link"
+  ],
+  "search": {
+    "status": "empty",
+    "count": 0,
+    "results": []
+  },
+  "fetch": {
+    "status": "unavailable",
+    "code": "blocked_address",
+    "http_status": 403
+  }
+}

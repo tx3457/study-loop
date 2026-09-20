@@ -256,6 +256,45 @@
   overflow-wrap: anywhere;
 }
 
+.autonomous-page .source-card-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 12px;
+}
+
+.autonomous-page .source-card {
+  padding: 16px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-md);
+  background: var(--bg-page);
+}
+
+.autonomous-page .source-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.autonomous-page .source-card-head span,
+.autonomous-page .source-card a {
+  color: var(--text-tertiary);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.autonomous-page .source-snippet {
+  margin: 10px 0;
+  padding-left: 12px;
+  border-left: 3px solid var(--accent-gold);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.autonomous-page .source-card .btn-secondary { margin-top: 12px; }
+
 .autonomous-page .result-details {
   overflow: hidden;
   border: 1px solid #e5e7eb;

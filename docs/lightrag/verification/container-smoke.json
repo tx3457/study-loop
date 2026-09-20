@@ -1,0 +1,11 @@
+{
+  "status": "pass",
+  "ready_status": 200,
+  "unauthorized_status": 401,
+  "authorized_status": 200,
+  "model_calls": 0,
+  "built_image_ids": {
+    "study-loop-knowledge:validation": "sha256:874e670d44c0aae0495805a92d61744a7b6d68505928ddfdfe9b63fa374758e5",
+    "study-loop-knowledge-backend:validation": "sha256:bce1a9ee97ff1019aec3a4ed4aab90302354ded0d97f2684b1980ba7c8133938"
+  }
+}

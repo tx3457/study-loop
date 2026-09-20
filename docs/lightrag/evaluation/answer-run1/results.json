@@ -1,0 +1,1385 @@
+{
+  "answer_manifest_files_payload_sha256": "f9608c3bdafb9441c025a6a2508d6cff669d7796ab5b7f5724246550963444b2",
+  "calls": [
+    {
+      "abstained": false,
+      "actual_provider_cost": null,
+      "actual_response_usage": {
+        "completion_tokens": 96,
+        "prompt_tokens": 439,
+        "total_tokens": 535
+      },
+      "actual_response_usage_unavailable_reason": null,
+      "answer": "动量保留了早期梯度的持续贡献，因此可以平滑噪声更新，并沿保持一致的方向加速移动，从而使随机梯度下降的更新更加稳定。",
+      "citation_ids": [
+        "ml_optimization"
+      ],
+      "finish_reason": "stop",
+      "latency_ms": 1184.280729969032,
+      "method": "existing_hybrid_rrf",
+      "provider_cost_unavailable_reason": "provider response did not report monetary cost",
+      "question_id": "ml_q01",
+      "raw_response_content": "{\"answer\":\"动量保留了早期梯度的持续贡献，因此可以平滑噪声更新，并沿保持一致的方向加速移动，从而使随机梯度下降的更新更加稳定。\",\"citation_ids\":[\"ml_optimization\"],\"abstained\":false}",
+      "required_source_ids": [
+        "ml_optimization"
+      ],
+      "retrieved_source_ids": [
+        "ml_optimization",
+        "ml_regularization",
+        "ml_evaluation"
+      ],
+      "scoring": {
+        "abstention_correct": true,
+        "abstention_expected": false,
+        "citations_within_retrieval": true,
+        "cited_required_source_ids": [
+          "ml_optimization"
+        ],
+        "fabricated_citation_ids": [],
+        "lexical_concepts": [
+          {
+            "concept_id": "past_gradient_signal",
+            "matched": false,
+            "matched_pattern": null
+          },
+          {
+            "concept_id": "noise_smoothing",
+            "matched": false,
+            "matched_pattern": null
+          },
+          {
+            "concept_id": "consistent_direction_acceleration",
+            "matched": false,
+            "matched_pattern": null
+          }
+        ],
+        "lexical_rubric_coverage": 0.0,
+        "required_citation_coverage": 1.0,
+        "semantic_truth_evaluated": false,
+        "uncited_required_source_ids": []
+      },
+      "status": "complete"
+    },
+    {
+      "abstained": false,
+      "actual_provider_cost": null,
+      "actual_response_usage": {
+        "completion_tokens": 100,
+        "prompt_tokens": 439,
+        "total_tokens": 539
+      },
+      "actual_response_usage_unavailable_reason": null,
+      "answer": "Momentum keeps a running contribution from earlier gradients, which can smooth noisy updates and accelerate movement along directions that remain consistent.",
+      "citation_ids": [
+        "ml_optimization"
+      ],
+      "finish_reason": "stop",
+      "latency_ms": 742.7102089859545,
+      "method": "lightrag_mix",
+      "provider_cost_unavailable_reason": "provider response did not report monetary cost",
+      "question_id": "ml_q01",
+      "raw_response_content": "{\"answer\":\"Momentum keeps a running contribution from earlier gradients, which can smooth noisy updates and accelerate movement along directions that remain consistent.\",\"citation_ids\":[\"ml_optimization\"],\"abstained\":false}",
+      "required_source_ids": [
+        "ml_optimization"
+      ],
+      "retrieved_source_ids": [
+        "ml_optimization",
+        "ml_regularization",
+        "ml_evaluation"
+      ],
+      "scoring": {
+        "abstention_correct": true,
+        "abstention_expected": false,
+        "citations_within_retrieval": true,
+        "cited_required_source_ids": [
+          "ml_optimization"
+        ],
+        "fabricated_citation_ids": [],
+        "lexical_concepts": [
+          {
+            "concept_id": "past_gradient_signal",
+            "matched": true,
+            "matched_pattern": "earlier gradients?"
+          },
+          {
+            "concept_id": "noise_smoothing",
+            "matched": true,
+            "matched_pattern": "smooth(?:s|ing|ed)?[^.]{0,40}nois"
+          },
+          {
+            "concept_id": "consistent_direction_acceleration",
+            "matched": true,
+            "matched_pattern": "accelerat(?:e|es|ing|ed)[^.]{0,70}consistent"
+          }
+        ],
+        "lexical_rubric_coverage": 1.0,
+        "required_citation_coverage": 1.0,
+        "semantic_truth_evaluated": false,
+        "uncited_required_source_ids": []
+      },
+      "status": "complete"
+    },
+    {
+      "abstained": false,
+      "actual_provider_cost": null,
+      "actual_response_usage": {
+        "completion_tokens": 105,
+        "prompt_tokens": 439,
+        "total_tokens": 544
+      },
+      "actual_response_usage_unavailable_reason": null,
+      "answer": "L2 regularization adds a penalty based on squared parameter magnitudes, which discourages unnecessarily large weights; dropout randomly masks a fraction of hidden activations during training, so the network cannot rely on one fixed set of features. Both thus reduce the model's tendency to memorize training examples.",
+      "citation_ids": [
+        "ml_regularization"
+      ],
+      "finish_reason": "stop",
+      "latency_ms": 1682.2122299927287,
+      "method": "existing_hybrid_rrf",
+      "provider_cost_unavailable_reason": "provider response did not report monetary cost",
+      "question_id": "ml_q02",
+      "raw_response_content": "{\"answer\":\"L2 regularization adds a penalty based on squared parameter magnitudes, which discourages unnecessarily large weights; dropout randomly masks a fraction of hidden activations during training, so the network cannot rely on one fixed set of features. Both thus reduce the model's tendency to memorize training examples.\",\"citation_ids\":[\"ml_regularization\"],\"abstained\":false}",
+      "required_source_ids": [
+        "ml_regularization"
+      ],
+      "retrieved_source_ids": [
+        "ml_regularization",
+        "ml_optimization",
+        "ml_evaluation"
+      ],
+      "scoring": {
+        "abstention_correct": true,
+        "abstention_expected": false,
+        "citations_within_retrieval": true,
+        "cited_required_source_ids": [
+          "ml_regularization"
+        ],
+        "fabricated_citation_ids": [],
+        "lexical_concepts": [
+          {
+            "concept_id": "l2_weight_penalty",
+            "matched": true,
+            "matched_pattern": "L2[^.]{0,70}(?:penal|large weights?)"
+          },
+          {
+            "concept_id": "dropout_masks_activations",
+            "matched": true,
+            "matched_pattern": "dropout[^.]{0,70}(?:mask|randomly (?:drops?|removes?))[^.]{0,40}activations?"
+          },
+          {
+            "concept_id": "reduced_fixed_feature_reliance",
+            "matched": true,
+            "matched_pattern": "(?:cannot|can't|less)[^.]{0,60}rely[^.]{0,50}(?:fixed|single) set"
+          }
+        ],
+        "lexical_rubric_coverage": 1.0,
+        "required_citation_coverage": 1.0,
+        "semantic_truth_evaluated": false,
+        "uncited_required_source_ids": []
+      },
+      "status": "complete"
+    },
+    {
+      "abstained": false,
+      "actual_provider_cost": null,
+      "actual_response_usage": {
+        "completion_tokens": 106,
+        "prompt_tokens": 439,
+        "total_tokens": 545
+      },
+      "actual_response_usage_unavailable_reason": null,
+      "answer": "L2 regularization adds a penalty based on squared parameter magnitudes, discouraging unnecessarily large weights, while dropout randomly masks a fraction of hidden activations during training so the network cannot rely on one fixed set of features. Both thereby reduce the model's tendency to memorize training examples.",
+      "citation_ids": [
+        "ml_regularization"
+      ],
+      "finish_reason": "stop",
+      "latency_ms": 1077.6157740037888,
+      "method": "lightrag_mix",
+      "provider_cost_unavailable_reason": "provider response did not report monetary cost",
+      "question_id": "ml_q02",
+      "raw_response_content": "{\"answer\":\"L2 regularization adds a penalty based on squared parameter magnitudes, discouraging unnecessarily large weights, while dropout randomly masks a fraction of hidden activations during training so the network cannot rely on one fixed set of features. Both thereby reduce the model's tendency to memorize training examples.\",\"citation_ids\":[\"ml_regularization\"],\"abstained\":false}",
+      "required_source_ids": [
+        "ml_regularization"
+      ],
+      "retrieved_source_ids": [
+        "ml_regularization",
+        "ml_optimization",
+        "ml_evaluation"
+      ],
+      "scoring": {
+        "abstention_correct": true,
+        "abstention_expected": false,
+        "citations_within_retrieval": true,
+        "cited_required_source_ids": [
+          "ml_regularization"
+        ],
+        "fabricated_citation_ids": [],
+        "lexical_concepts": [
+          {
+            "concept_id": "l2_weight_penalty",
+            "matched": true,
+            "matched_pattern": "L2[^.]{0,70}(?:penal|large weights?)"
+          },
+          {
+            "concept_id": "dropout_masks_activations",
+            "matched": true,
+            "matched_pattern": "dropout[^.]{0,70}(?:mask|randomly (?:drops?|removes?))[^.]{0,40}activations?"
+          },
+          {
+            "concept_id": "reduced_fixed_feature_reliance",
+            "matched": true,
+            "matched_pattern": "(?:cannot|can't|less)[^.]{0,60}rely[^.]{0,50}(?:fixed|single) set"
+          }
+        ],
+        "lexical_rubric_coverage": 1.0,
+        "required_citation_coverage": 1.0,
+        "semantic_truth_evaluated": false,
+        "uncited_required_source_ids": []
+      },
+      "status": "complete"
+    },
+    {
+      "abstained": false,
+      "actual_provider_cost": null,
+      "actual_response_usage": {
+        "completion_tokens": 94,
+        "prompt_tokens": 440,
+        "total_tokens": 534
+      },
+      "actual_response_usage_unavailable_reason": null,
+      "answer": "Precision, recall, F1, and a confusion matrix are more informative than accuracy for imbalanced classification, since accuracy can conceal poor performance; the metric should match the practical cost of false positives and false negatives.",
+      "citation_ids": [
+        "ml_evaluation"
+      ],
+      "finish_reason": "stop",
+      "latency_ms": 878.6769830039702,
+      "method": "existing_hybrid_rrf",
+      "provider_cost_unavailable_reason": "provider response did not report monetary cost",
+      "question_id": "ml_q03",
+      "raw_response_content": "{\"answer\":\"Precision, recall, F1, and a confusion matrix are more informative than accuracy for imbalanced classification, since accuracy can conceal poor performance; the metric should match the practical cost of false positives and false negatives.\",\"citation_ids\":[\"ml_evaluation\"],\"abstained\":false}",
+      "required_source_ids": [
+        "ml_evaluation"
+      ],
+      "retrieved_source_ids": [
+        "ml_evaluation",
+        "ml_regularization",
+        "ml_optimization"
+      ],
+      "scoring": {
+        "abstention_correct": true,
+        "abstention_expected": false,
+        "citations_within_retrieval": true,
+        "cited_required_source_ids": [
+          "ml_evaluation"
+        ],
+        "fabricated_citation_ids": [],
+        "lexical_concepts": [
+          {
+            "concept_id": "precision_and_recall",
+            "matched": true,
+            "matched_pattern": "precision[^.]{0,50}recall"
+          },
+          {
+            "concept_id": "f1",
+            "matched": true,
+            "matched_pattern": "\\bF1\\b"
+          },
+          {
+            "concept_id": "confusion_matrix",
+            "matched": true,
+            "matched_pattern": "confusion matrix"
+          }
+        ],
+        "lexical_rubric_coverage": 1.0,
+        "required_citation_coverage": 1.0,
+        "semantic_truth_evaluated": false,
+        "uncited_required_source_ids": []
+      },
+      "status": "complete"
+    },
+    {
+      "abstained": false,
+      "actual_provider_cost": null,
+      "actual_response_usage": {
+        "completion_tokens": 101,
+        "prompt_tokens": 440,
+        "total_tokens": 541
+      },
+      "actual_response_usage_unavailable_reason": null,
+      "answer": "Precision, recall, F1, and a confusion matrix are more informative than accuracy for imbalanced classification; they reveal different error patterns, and the metric should match the practical cost of false positives and false negatives.",
+      "citation_ids": [
+        "ml_evaluation"
+      ],
+      "finish_reason": "stop",
+      "latency_ms": 802.978963998612,
+      "method": "lightrag_mix",
+      "provider_cost_unavailable_reason": "provider response did not report monetary cost",
+      "question_id": "ml_q03",
+      "raw_response_content": "{\"answer\":\"Precision, recall, F1, and a confusion matrix are more informative than accuracy for imbalanced classification; they reveal different error patterns, and the metric should match the practical cost of false positives and false negatives.\",\"citation_ids\":[\"ml_evaluation\"],\"abstained\":false}",
+      "required_source_ids": [
+        "ml_evaluation"
+      ],
+      "retrieved_source_ids": [
+        "ml_evaluation",
+        "ml_regularization",
+        "ml_optimization"
+      ],
+      "scoring": {
+        "abstention_correct": true,
+        "abstention_expected": false,
+        "citations_within_retrieval": true,
+        "cited_required_source_ids": [
+          "ml_evaluation"
+        ],
+        "fabricated_citation_ids": [],
+        "lexical_concepts": [
+          {
+            "concept_id": "precision_and_recall",
+            "matched": true,
+            "matched_pattern": "precision[^.]{0,50}recall"
+          },
+          {
+            "concept_id": "f1",
+            "matched": true,
+            "matched_pattern": "\\bF1\\b"
+          },
+          {
+            "concept_id": "confusion_matrix",
+            "matched": true,
+            "matched_pattern": "confusion matrix"
+          }
+        ],
+        "lexical_rubric_coverage": 1.0,
+        "required_citation_coverage": 1.0,
+        "semantic_truth_evaluated": false,
+        "uncited_required_source_ids": []
+      },
+      "status": "complete"
+    },
+    {
+      "abstained": false,
+      "actual_provider_cost": null,
+      "actual_response_usage": {
+        "completion_tokens": 169,
+        "prompt_tokens": 443,
+        "total_tokens": 612
+      },
+      "actual_response_usage_unavailable_reason": null,
+      "answer": "Dropout strength is a hyperparameter and should be selected using validation data (or cross-validation), while keeping the final test set untouched until the final evaluation.",
+      "citation_ids": [
+        "ml_regularization",
+        "ml_evaluation"
+      ],
+      "finish_reason": "stop",
+      "latency_ms": 909.6092830295675,
+      "method": "existing_hybrid_rrf",
+      "provider_cost_unavailable_reason": "provider response did not report monetary cost",
+      "question_id": "ml_q04",
+      "raw_response_content": "{\"answer\":\"Dropout strength is a hyperparameter and should be selected using validation data (or cross-validation), while keeping the final test set untouched until the final evaluation.\",\"citation_ids\":[\"ml_regularization\",\"ml_evaluation\"],\"abstained\":false}",
+      "required_source_ids": [
+        "ml_regularization",
+        "ml_evaluation"
+      ],
+      "retrieved_source_ids": [
+        "ml_regularization",
+        "ml_evaluation",
+        "ml_optimization"
+      ],
+      "scoring": {
+        "abstention_correct": true,
+        "abstention_expected": false,
+        "citations_within_retrieval": true,
+        "cited_required_source_ids": [
+          "ml_evaluation",
+          "ml_regularization"
+        ],
+        "fabricated_citation_ids": [],
+        "lexical_concepts": [
+          {
+            "concept_id": "dropout_is_hyperparameter",
+            "matched": true,
+            "matched_pattern": "dropout[^.]{0,60}hyperparameter"
+          },
+          {
+            "concept_id": "select_with_validation",
+            "matched": true,
+            "matched_pattern": "(?:select|choose|tune)[^.]{0,70}validation"
+          },
+          {
+            "concept_id": "reserve_test_for_final",
+            "matched": true,
+            "matched_pattern": "test set[^.]{0,80}(?:final|untouched|held out)"
+          }
+        ],
+        "lexical_rubric_coverage": 1.0,
+        "required_citation_coverage": 1.0,
+        "semantic_truth_evaluated": false,
+        "uncited_required_source_ids": []
+      },
+      "status": "complete"
+    },
+    {
+      "abstained": false,
+      "actual_provider_cost": null,
+      "actual_response_usage": {
+        "completion_tokens": 197,
+        "prompt_tokens": 443,
+        "total_tokens": 640
+      },
+      "actual_response_usage_unavailable_reason": null,
+      "answer": "Dropout strength should be selected as a hyperparameter using validation data, not the final test set; the test set should remain untouched until the final evaluation. When data is limited, cross-validation can be used to support hyperparameter selection.",
+      "citation_ids": [
+        "ml_regularization",
+        "ml_evaluation"
+      ],
+      "finish_reason": "stop",
+      "latency_ms": 1304.950900026597,
+      "method": "lightrag_mix",
+      "provider_cost_unavailable_reason": "provider response did not report monetary cost",
+      "question_id": "ml_q04",
+      "raw_response_content": "{\"answer\":\"Dropout strength should be selected as a hyperparameter using validation data, not the final test set; the test set should remain untouched until the final evaluation. When data is limited, cross-validation can be used to support hyperparameter selection.\",\"citation_ids\":[\"ml_regularization\",\"ml_evaluation\"],\"abstained\":false}",
+      "required_source_ids": [
+        "ml_regularization",
+        "ml_evaluation"
+      ],
+      "retrieved_source_ids": [
+        "ml_regularization",
+        "ml_evaluation",
+        "ml_optimization"
+      ],
+      "scoring": {
+        "abstention_correct": true,
+        "abstention_expected": false,
+        "citations_within_retrieval": true,
+        "cited_required_source_ids": [
+          "ml_evaluation",
+          "ml_regularization"
+        ],
+        "fabricated_citation_ids": [],
+        "lexical_concepts": [
+          {
+            "concept_id": "dropout_is_hyperparameter",
+            "matched": true,
+            "matched_pattern": "dropout[^.]{0,60}hyperparameter"
+          },
+          {
+            "concept_id": "select_with_validation",
+            "matched": true,
+            "matched_pattern": "(?:select|choose|tune)[^.]{0,70}validation"
+          },
+          {
+            "concept_id": "reserve_test_for_final",
+            "matched": true,
+            "matched_pattern": "test set[^.]{0,80}(?:final|untouched|held out)"
+          }
+        ],
+        "lexical_rubric_coverage": 1.0,
+        "required_citation_coverage": 1.0,
+        "semantic_truth_evaluated": false,
+        "uncited_required_source_ids": []
+      },
+      "status": "complete"
+    },
+    {
+      "abstained": false,
+      "actual_provider_cost": null,
+      "actual_response_usage": {
+        "completion_tokens": 745,
+        "prompt_tokens": 451,
+        "total_tokens": 1196
+      },
+      "actual_response_usage_unavailable_reason": null,
+      "answer": "Use momentum (or reduce the learning rate with a scheduler) to smooth/stop an oscillating training loss, and use cross-validation to assess the model reliably when data are limited.",
+      "citation_ids": [
+        "ml_optimization",
+        "ml_evaluation"
+      ],
+      "finish_reason": "stop",
+      "latency_ms": 3779.6049879980274,
+      "method": "existing_hybrid_rrf",
+      "provider_cost_unavailable_reason": "provider response did not report monetary cost",
+      "question_id": "ml_q05",
+      "raw_response_content": "{\"answer\":\"Use momentum (or reduce the learning rate with a scheduler) to smooth/stop an oscillating training loss, and use cross-validation to assess the model reliably when data are limited.\",\"citation_ids\":[\"ml_optimization\",\"ml_evaluation\"],\"abstained\":false}",
+      "required_source_ids": [
+        "ml_optimization",
+        "ml_evaluation"
+      ],
+      "retrieved_source_ids": [
+        "ml_regularization",
+        "ml_evaluation",
+        "ml_optimization"
+      ],
+      "scoring": {
+        "abstention_correct": true,
+        "abstention_expected": false,
+        "citations_within_retrieval": true,
+        "cited_required_source_ids": [
+          "ml_evaluation",
+          "ml_optimization"
+        ],
+        "fabricated_citation_ids": [],
+        "lexical_concepts": [
+          {
+            "concept_id": "lower_or_schedule_learning_rate",
+            "matched": true,
+            "matched_pattern": "(?:reduce|lower|decrease|schedule)[^.]{0,50}learning rate"
+          },
+          {
+            "concept_id": "cross_validation",
+            "matched": true,
+            "matched_pattern": "cross-validation"
+          }
+        ],
+        "lexical_rubric_coverage": 1.0,
+        "required_citation_coverage": 1.0,
+        "semantic_truth_evaluated": false,
+        "uncited_required_source_ids": []
+      },
+      "status": "complete"
+    },
+    {
+      "abstained": false,
+      "actual_provider_cost": null,
+      "actual_response_usage": {
+        "completion_tokens": 418,
+        "prompt_tokens": 451,
+        "total_tokens": 869
+      },
+      "actual_response_usage_unavailable_reason": null,
+      "answer": "Use momentum (or reduce an excessively large learning rate) to smooth/avoid oscillating training loss, and use cross-validation to assess the model reliably when data is limited.",
+      "citation_ids": [
+        "ml_optimization",
+        "ml_evaluation"
+      ],
+      "finish_reason": "stop",
+      "latency_ms": 2469.15870194789,
+      "method": "lightrag_mix",
+      "provider_cost_unavailable_reason": "provider response did not report monetary cost",
+      "question_id": "ml_q05",
+      "raw_response_content": "{\"answer\":\"Use momentum (or reduce an excessively large learning rate) to smooth/avoid oscillating training loss, and use cross-validation to assess the model reliably when data is limited.\",\"citation_ids\":[\"ml_optimization\",\"ml_evaluation\"],\"abstained\":false}",
+      "required_source_ids": [
+        "ml_optimization",
+        "ml_evaluation"
+      ],
+      "retrieved_source_ids": [
+        "ml_regularization",
+        "ml_evaluation",
+        "ml_optimization"
+      ],
+      "scoring": {
+        "abstention_correct": true,
+        "abstention_expected": false,
+        "citations_within_retrieval": true,
+        "cited_required_source_ids": [
+          "ml_evaluation",
+          "ml_optimization"
+        ],
+        "fabricated_citation_ids": [],
+        "lexical_concepts": [
+          {
+            "concept_id": "lower_or_schedule_learning_rate",
+            "matched": true,
+            "matched_pattern": "(?:reduce|lower|decrease|schedule)[^.]{0,50}learning rate"
+          },
+          {
+            "concept_id": "cross_validation",
+            "matched": true,
+            "matched_pattern": "cross-validation"
+          }
+        ],
+        "lexical_rubric_coverage": 1.0,
+        "required_citation_coverage": 1.0,
+        "semantic_truth_evaluated": false,
+        "uncited_required_source_ids": []
+      },
+      "status": "complete"
+    },
+    {
+      "abstained": true,
+      "actual_provider_cost": null,
+      "actual_response_usage": {
+        "completion_tokens": 33,
+        "prompt_tokens": 442,
+        "total_tokens": 475
+      },
+      "actual_response_usage_unavailable_reason": null,
+      "answer": "",
+      "citation_ids": [],
+      "finish_reason": "stop",
+      "latency_ms": 610.4074309696443,
+      "method": "existing_hybrid_rrf",
+      "provider_cost_unavailable_reason": "provider response did not report monetary cost",
+      "question_id": "ml_q06",
+      "raw_response_content": "{\"answer\": \"\", \"citation_ids\": [], \"abstained\": true}",
+      "required_source_ids": [],
+      "retrieved_source_ids": [
+        "ml_evaluation",
+        "ml_optimization",
+        "ml_regularization"
+      ],
+      "scoring": {
+        "abstention_correct": true,
+        "abstention_expected": true,
+        "citations_within_retrieval": true,
+        "cited_required_source_ids": [],
+        "fabricated_citation_ids": [],
+        "lexical_concepts": null,
+        "lexical_rubric_coverage": null,
+        "required_citation_coverage": null,
+        "semantic_truth_evaluated": false,
+        "unanswerable_has_answer_text": false,
+        "unanswerable_has_citations": false,
+        "uncited_required_source_ids": []
+      },
+      "status": "complete"
+    },
+    {
+      "abstained": true,
+      "actual_provider_cost": null,
+      "actual_response_usage": {
+        "completion_tokens": 53,
+        "prompt_tokens": 442,
+        "total_tokens": 495
+      },
+      "actual_response_usage_unavailable_reason": null,
+      "answer": "",
+      "citation_ids": [],
+      "finish_reason": "stop",
+      "latency_ms": 605.7790459599346,
+      "method": "lightrag_mix",
+      "provider_cost_unavailable_reason": "provider response did not report monetary cost",
+      "question_id": "ml_q06",
+      "raw_response_content": "{\"answer\": \"\", \"citation_ids\": [], \"abstained\": true}",
+      "required_source_ids": [],
+      "retrieved_source_ids": [
+        "ml_evaluation",
+        "ml_optimization",
+        "ml_regularization"
+      ],
+      "scoring": {
+        "abstention_correct": true,
+        "abstention_expected": true,
+        "citations_within_retrieval": true,
+        "cited_required_source_ids": [],
+        "fabricated_citation_ids": [],
+        "lexical_concepts": null,
+        "lexical_rubric_coverage": null,
+        "required_citation_coverage": null,
+        "semantic_truth_evaluated": false,
+        "unanswerable_has_answer_text": false,
+        "unanswerable_has_citations": false,
+        "uncited_required_source_ids": []
+      },
+      "status": "complete"
+    },
+    {
+      "abstained": false,
+      "actual_provider_cost": null,
+      "actual_response_usage": {
+        "completion_tokens": 68,
+        "prompt_tokens": 440,
+        "total_tokens": 508
+      },
+      "actual_response_usage_unavailable_reason": null,
+      "answer": "线粒体通过细胞呼吸利用富含能量的分子产生细胞大部分ATP，而ATP可为跨膜的主动运输等过程提供能量。",
+      "citation_ids": [
+        "bio_cells"
+      ],
+      "finish_reason": "stop",
+      "latency_ms": 841.3773360080086,
+      "method": "existing_hybrid_rrf",
+      "provider_cost_unavailable_reason": "provider response did not report monetary cost",
+      "question_id": "bio_q01",
+      "raw_response_content": "{\"answer\":\"线粒体通过细胞呼吸利用富含能量的分子产生细胞大部分ATP，而ATP可为跨膜的主动运输等过程提供能量。\",\"citation_ids\":[\"bio_cells\"],\"abstained\":false}",
+      "required_source_ids": [
+        "bio_cells"
+      ],
+      "retrieved_source_ids": [
+        "bio_cells",
+        "bio_immunity",
+        "bio_homeostasis"
+      ],
+      "scoring": {
+        "abstention_correct": true,
+        "abstention_expected": false,
+        "citations_within_retrieval": true,
+        "cited_required_source_ids": [
+          "bio_cells"
+        ],
+        "fabricated_citation_ids": [],
+        "lexical_concepts": [
+          {
+            "concept_id": "mitochondria_produce_atp",
+            "matched": false,
+            "matched_pattern": null
+          },
+          {
+            "concept_id": "atp_powers_active_transport",
+            "matched": false,
+            "matched_pattern": null
+          },
+          {
+            "concept_id": "across_membrane",
+            "matched": false,
+            "matched_pattern": null
+          }
+        ],
+        "lexical_rubric_coverage": 0.0,
+        "required_citation_coverage": 1.0,
+        "semantic_truth_evaluated": false,
+        "uncited_required_source_ids": []
+      },
+      "status": "complete"
+    },
+    {
+      "abstained": false,
+      "actual_provider_cost": null,
+      "actual_response_usage": {
+        "completion_tokens": 74,
+        "prompt_tokens": 440,
+        "total_tokens": 514
+      },
+      "actual_response_usage_unavailable_reason": null,
+      "answer": "Mitochondria carry out cellular respiration using energy-rich molecules to produce much of the cell's ATP, and this ATP can then power processes such as active transport across the cell membrane.",
+      "citation_ids": [
+        "bio_cells"
+      ],
+      "finish_reason": "stop",
+      "latency_ms": 812.3149070306681,
+      "method": "lightrag_mix",
+      "provider_cost_unavailable_reason": "provider response did not report monetary cost",
+      "question_id": "bio_q01",
+      "raw_response_content": "{\"answer\":\"Mitochondria carry out cellular respiration using energy-rich molecules to produce much of the cell's ATP, and this ATP can then power processes such as active transport across the cell membrane.\",\"citation_ids\":[\"bio_cells\"],\"abstained\":false}",
+      "required_source_ids": [
+        "bio_cells"
+      ],
+      "retrieved_source_ids": [
+        "bio_cells",
+        "bio_immunity",
+        "bio_homeostasis"
+      ],
+      "scoring": {
+        "abstention_correct": true,
+        "abstention_expected": false,
+        "citations_within_retrieval": true,
+        "cited_required_source_ids": [
+          "bio_cells"
+        ],
+        "fabricated_citation_ids": [],
+        "lexical_concepts": [
+          {
+            "concept_id": "mitochondria_produce_atp",
+            "matched": true,
+            "matched_pattern": "mitochondria[^.]{0,70}(?:produce|generate|make)[^.]{0,30}ATP"
+          },
+          {
+            "concept_id": "atp_powers_active_transport",
+            "matched": true,
+            "matched_pattern": "ATP[^.]{0,60}(?:power|energy)[^.]{0,40}active transport"
+          },
+          {
+            "concept_id": "across_membrane",
+            "matched": true,
+            "matched_pattern": "across (?:the )?(?:cell )?membrane"
+          }
+        ],
+        "lexical_rubric_coverage": 1.0,
+        "required_citation_coverage": 1.0,
+        "semantic_truth_evaluated": false,
+        "uncited_required_source_ids": []
+      },
+      "status": "complete"
+    },
+    {
+      "abstained": false,
+      "actual_provider_cost": null,
+      "actual_response_usage": {
+        "completion_tokens": 76,
+        "prompt_tokens": 438,
+        "total_tokens": 514
+      },
+      "actual_response_usage_unavailable_reason": null,
+      "answer": "Vaccination presents a safe form or component of a target so adaptive memory can form without the full disease, allowing a faster and stronger response during a later exposure.",
+      "citation_ids": [
+        "bio_immunity"
+      ],
+      "finish_reason": "stop",
+      "latency_ms": 730.9554359526373,
+      "method": "existing_hybrid_rrf",
+      "provider_cost_unavailable_reason": "provider response did not report monetary cost",
+      "question_id": "bio_q02",
+      "raw_response_content": "{\"answer\":\"Vaccination presents a safe form or component of a target so adaptive memory can form without the full disease, allowing a faster and stronger response during a later exposure.\",\"citation_ids\":[\"bio_immunity\"],\"abstained\":false}",
+      "required_source_ids": [
+        "bio_immunity"
+      ],
+      "retrieved_source_ids": [
+        "bio_immunity",
+        "bio_homeostasis",
+        "bio_cells"
+      ],
+      "scoring": {
+        "abstention_correct": true,
+        "abstention_expected": false,
+        "citations_within_retrieval": true,
+        "cited_required_source_ids": [
+          "bio_immunity"
+        ],
+        "fabricated_citation_ids": [],
+        "lexical_concepts": [
+          {
+            "concept_id": "vaccination_exposure",
+            "matched": true,
+            "matched_pattern": "vaccin(?:e|ation)[^.]{0,80}(?:safe|form|component|target)"
+          },
+          {
+            "concept_id": "memory_cells",
+            "matched": true,
+            "matched_pattern": "adaptive memory"
+          },
+          {
+            "concept_id": "faster_later_response",
+            "matched": true,
+            "matched_pattern": "(?:faster|more rapid|quicker)[^.]{0,60}(?:later|subsequent|future|response)"
+          }
+        ],
+        "lexical_rubric_coverage": 1.0,
+        "required_citation_coverage": 1.0,
+        "semantic_truth_evaluated": false,
+        "uncited_required_source_ids": []
+      },
+      "status": "complete"
+    },
+    {
+      "abstained": false,
+      "actual_provider_cost": null,
+      "actual_response_usage": {
+        "completion_tokens": 104,
+        "prompt_tokens": 438,
+        "total_tokens": 542
+      },
+      "actual_response_usage_unavailable_reason": null,
+      "answer": "Vaccination presents a safe form or component of a target, so adaptive memory can form without the full disease; the memory cells produced allow a faster and stronger response during a later exposure.",
+      "citation_ids": [
+        "bio_immunity"
+      ],
+      "finish_reason": "stop",
+      "latency_ms": 876.7022169777192,
+      "method": "lightrag_mix",
+      "provider_cost_unavailable_reason": "provider response did not report monetary cost",
+      "question_id": "bio_q02",
+      "raw_response_content": "{\"answer\":\"Vaccination presents a safe form or component of a target, so adaptive memory can form without the full disease; the memory cells produced allow a faster and stronger response during a later exposure.\",\"citation_ids\":[\"bio_immunity\"],\"abstained\":false}",
+      "required_source_ids": [
+        "bio_immunity"
+      ],
+      "retrieved_source_ids": [
+        "bio_immunity",
+        "bio_homeostasis",
+        "bio_cells"
+      ],
+      "scoring": {
+        "abstention_correct": true,
+        "abstention_expected": false,
+        "citations_within_retrieval": true,
+        "cited_required_source_ids": [
+          "bio_immunity"
+        ],
+        "fabricated_citation_ids": [],
+        "lexical_concepts": [
+          {
+            "concept_id": "vaccination_exposure",
+            "matched": true,
+            "matched_pattern": "vaccin(?:e|ation)[^.]{0,80}(?:safe|form|component|target)"
+          },
+          {
+            "concept_id": "memory_cells",
+            "matched": true,
+            "matched_pattern": "memory cells?"
+          },
+          {
+            "concept_id": "faster_later_response",
+            "matched": true,
+            "matched_pattern": "(?:faster|more rapid|quicker)[^.]{0,60}(?:later|subsequent|future|response)"
+          }
+        ],
+        "lexical_rubric_coverage": 1.0,
+        "required_citation_coverage": 1.0,
+        "semantic_truth_evaluated": false,
+        "uncited_required_source_ids": []
+      },
+      "status": "complete"
+    },
+    {
+      "abstained": false,
+      "actual_provider_cost": null,
+      "actual_response_usage": {
+        "completion_tokens": 152,
+        "prompt_tokens": 442,
+        "total_tokens": 594
+      },
+      "actual_response_usage_unavailable_reason": null,
+      "answer": "When blood glucose rises after a meal, pancreatic beta cells release insulin; when blood glucose later falls, pancreatic alpha cells release glucagon.",
+      "citation_ids": [
+        "bio_homeostasis"
+      ],
+      "finish_reason": "stop",
+      "latency_ms": 1200.527212000452,
+      "method": "existing_hybrid_rrf",
+      "provider_cost_unavailable_reason": "provider response did not report monetary cost",
+      "question_id": "bio_q03",
+      "raw_response_content": "{\"answer\":\"When blood glucose rises after a meal, pancreatic beta cells release insulin; when blood glucose later falls, pancreatic alpha cells release glucagon.\",\"citation_ids\":[\"bio_homeostasis\"],\"abstained\":false}",
+      "required_source_ids": [
+        "bio_homeostasis"
+      ],
+      "retrieved_source_ids": [
+        "bio_homeostasis",
+        "bio_cells",
+        "bio_immunity"
+      ],
+      "scoring": {
+        "abstention_correct": true,
+        "abstention_expected": false,
+        "citations_within_retrieval": true,
+        "cited_required_source_ids": [
+          "bio_homeostasis"
+        ],
+        "fabricated_citation_ids": [],
+        "lexical_concepts": [
+          {
+            "concept_id": "insulin_when_glucose_rises",
+            "matched": true,
+            "matched_pattern": "(?:rises?|after a meal)[^.]{0,80}insulin"
+          },
+          {
+            "concept_id": "glucagon_when_glucose_falls",
+            "matched": true,
+            "matched_pattern": "(?:falls?|low)[^.]{0,80}glucagon"
+          }
+        ],
+        "lexical_rubric_coverage": 1.0,
+        "required_citation_coverage": 1.0,
+        "semantic_truth_evaluated": false,
+        "uncited_required_source_ids": []
+      },
+      "status": "complete"
+    },
+    {
+      "abstained": false,
+      "actual_provider_cost": null,
+      "actual_response_usage": {
+        "completion_tokens": 147,
+        "prompt_tokens": 442,
+        "total_tokens": 589
+      },
+      "actual_response_usage_unavailable_reason": null,
+      "answer": "Insulin is released by pancreatic beta cells when blood glucose rises after a meal, and glucagon is released by pancreatic alpha cells when blood glucose falls.",
+      "citation_ids": [
+        "bio_homeostasis"
+      ],
+      "finish_reason": "stop",
+      "latency_ms": 1076.7235459643416,
+      "method": "lightrag_mix",
+      "provider_cost_unavailable_reason": "provider response did not report monetary cost",
+      "question_id": "bio_q03",
+      "raw_response_content": "{\"answer\":\"Insulin is released by pancreatic beta cells when blood glucose rises after a meal, and glucagon is released by pancreatic alpha cells when blood glucose falls.\",\"citation_ids\":[\"bio_homeostasis\"],\"abstained\":false}",
+      "required_source_ids": [
+        "bio_homeostasis"
+      ],
+      "retrieved_source_ids": [
+        "bio_homeostasis",
+        "bio_cells",
+        "bio_immunity"
+      ],
+      "scoring": {
+        "abstention_correct": true,
+        "abstention_expected": false,
+        "citations_within_retrieval": true,
+        "cited_required_source_ids": [
+          "bio_homeostasis"
+        ],
+        "fabricated_citation_ids": [],
+        "lexical_concepts": [
+          {
+            "concept_id": "insulin_when_glucose_rises",
+            "matched": true,
+            "matched_pattern": "insulin[^.]{0,80}(?:rises?|high|after a meal)"
+          },
+          {
+            "concept_id": "glucagon_when_glucose_falls",
+            "matched": true,
+            "matched_pattern": "glucagon[^.]{0,80}(?:falls?|low)"
+          }
+        ],
+        "lexical_rubric_coverage": 1.0,
+        "required_citation_coverage": 1.0,
+        "semantic_truth_evaluated": false,
+        "uncited_required_source_ids": []
+      },
+      "status": "complete"
+    },
+    {
+      "abstained": false,
+      "actual_provider_cost": null,
+      "actual_response_usage": {
+        "completion_tokens": 194,
+        "prompt_tokens": 448,
+        "total_tokens": 642
+      },
+      "actual_response_usage_unavailable_reason": null,
+      "answer": "An immune response can cause fever by temporarily shifting the regulated temperature target. To lose heat, the body uses sweating and wider skin blood vessels; to generate heat, it shivers.",
+      "citation_ids": [
+        "bio_homeostasis"
+      ],
+      "finish_reason": "stop",
+      "latency_ms": 983.0027820426039,
+      "method": "existing_hybrid_rrf",
+      "provider_cost_unavailable_reason": "provider response did not report monetary cost",
+      "question_id": "bio_q04",
+      "raw_response_content": "{\"answer\":\"An immune response can cause fever by temporarily shifting the regulated temperature target. To lose heat, the body uses sweating and wider skin blood vessels; to generate heat, it shivers.\",\"citation_ids\":[\"bio_homeostasis\"],\"abstained\":false}",
+      "required_source_ids": [
+        "bio_immunity",
+        "bio_homeostasis"
+      ],
+      "retrieved_source_ids": [
+        "bio_homeostasis",
+        "bio_immunity",
+        "bio_cells"
+      ],
+      "scoring": {
+        "abstention_correct": true,
+        "abstention_expected": false,
+        "citations_within_retrieval": true,
+        "cited_required_source_ids": [
+          "bio_homeostasis"
+        ],
+        "fabricated_citation_ids": [],
+        "lexical_concepts": [
+          {
+            "concept_id": "fever_shifts_target",
+            "matched": true,
+            "matched_pattern": "fever[^.]{0,80}(?:shift|raise|change)[^.]{0,40}(?:target|set point)"
+          },
+          {
+            "concept_id": "sweating_vasodilation_heat_loss",
+            "matched": false,
+            "matched_pattern": null
+          },
+          {
+            "concept_id": "shivering_generates_heat",
+            "matched": false,
+            "matched_pattern": null
+          }
+        ],
+        "lexical_rubric_coverage": 0.3333333333333333,
+        "required_citation_coverage": 0.5,
+        "semantic_truth_evaluated": false,
+        "uncited_required_source_ids": [
+          "bio_immunity"
+        ]
+      },
+      "status": "complete"
+    },
+    {
+      "abstained": false,
+      "actual_provider_cost": null,
+      "actual_response_usage": {
+        "completion_tokens": 198,
+        "prompt_tokens": 448,
+        "total_tokens": 646
+      },
+      "actual_response_usage_unavailable_reason": null,
+      "answer": "An immune response can change temperature regulation by causing fever, which temporarily shifts the regulated temperature target. To lose heat, the body uses sweating and wider skin blood vessels; to generate heat, it uses shivering.",
+      "citation_ids": [
+        "bio_homeostasis"
+      ],
+      "finish_reason": "stop",
+      "latency_ms": 1184.9908189615235,
+      "method": "lightrag_mix",
+      "provider_cost_unavailable_reason": "provider response did not report monetary cost",
+      "question_id": "bio_q04",
+      "raw_response_content": "{\"answer\":\"An immune response can change temperature regulation by causing fever, which temporarily shifts the regulated temperature target. To lose heat, the body uses sweating and wider skin blood vessels; to generate heat, it uses shivering.\",\"citation_ids\":[\"bio_homeostasis\"],\"abstained\":false}",
+      "required_source_ids": [
+        "bio_immunity",
+        "bio_homeostasis"
+      ],
+      "retrieved_source_ids": [
+        "bio_homeostasis",
+        "bio_immunity",
+        "bio_cells"
+      ],
+      "scoring": {
+        "abstention_correct": true,
+        "abstention_expected": false,
+        "citations_within_retrieval": true,
+        "cited_required_source_ids": [
+          "bio_homeostasis"
+        ],
+        "fabricated_citation_ids": [],
+        "lexical_concepts": [
+          {
+            "concept_id": "fever_shifts_target",
+            "matched": true,
+            "matched_pattern": "fever[^.]{0,80}(?:shift|raise|change)[^.]{0,40}(?:target|set point)"
+          },
+          {
+            "concept_id": "sweating_vasodilation_heat_loss",
+            "matched": false,
+            "matched_pattern": null
+          },
+          {
+            "concept_id": "shivering_generates_heat",
+            "matched": false,
+            "matched_pattern": null
+          }
+        ],
+        "lexical_rubric_coverage": 0.3333333333333333,
+        "required_citation_coverage": 0.5,
+        "semantic_truth_evaluated": false,
+        "uncited_required_source_ids": [
+          "bio_immunity"
+        ]
+      },
+      "status": "complete"
+    },
+    {
+      "abstained": false,
+      "actual_provider_cost": null,
+      "actual_response_usage": {
+        "completion_tokens": 1396,
+        "prompt_tokens": 442,
+        "total_tokens": 1838
+      },
+      "actual_response_usage_unavailable_reason": null,
+      "answer": "After a meal, rising blood glucose triggers insulin release, which promotes glucose uptake and storage. The glucose taken up can then serve as an energy-rich molecule that mitochondria use in cellular respiration to produce much of the cell's ATP.",
+      "citation_ids": [
+        "bio_homeostasis",
+        "bio_cells"
+      ],
+      "finish_reason": "stop",
+      "latency_ms": 6163.12708897749,
+      "method": "existing_hybrid_rrf",
+      "provider_cost_unavailable_reason": "provider response did not report monetary cost",
+      "question_id": "bio_q05",
+      "raw_response_content": "{\"answer\":\"After a meal, rising blood glucose triggers insulin release, which promotes glucose uptake and storage. The glucose taken up can then serve as an energy-rich molecule that mitochondria use in cellular respiration to produce much of the cell's ATP.\",\"citation_ids\":[\"bio_homeostasis\",\"bio_cells\"],\"abstained\":false}",
+      "required_source_ids": [
+        "bio_homeostasis",
+        "bio_cells"
+      ],
+      "retrieved_source_ids": [
+        "bio_cells",
+        "bio_homeostasis",
+        "bio_immunity"
+      ],
+      "scoring": {
+        "abstention_correct": true,
+        "abstention_expected": false,
+        "citations_within_retrieval": true,
+        "cited_required_source_ids": [
+          "bio_cells",
+          "bio_homeostasis"
+        ],
+        "fabricated_citation_ids": [],
+        "lexical_concepts": [
+          {
+            "concept_id": "insulin_promotes_glucose_uptake",
+            "matched": true,
+            "matched_pattern": "insulin[^.]{0,80}glucose (?:uptake|storage)"
+          },
+          {
+            "concept_id": "mitochondrial_respiration",
+            "matched": true,
+            "matched_pattern": "mitochondria[^.]{0,80}(?:respiration|energy-rich molecules)"
+          },
+          {
+            "concept_id": "produces_atp",
+            "matched": true,
+            "matched_pattern": "produce[sd]?[^.]{0,30}ATP"
+          }
+        ],
+        "lexical_rubric_coverage": 1.0,
+        "required_citation_coverage": 1.0,
+        "semantic_truth_evaluated": false,
+        "uncited_required_source_ids": []
+      },
+      "status": "complete"
+    },
+    {
+      "abstained": false,
+      "actual_provider_cost": null,
+      "actual_response_usage": {
+        "completion_tokens": 485,
+        "prompt_tokens": 442,
+        "total_tokens": 927
+      },
+      "actual_response_usage_unavailable_reason": null,
+      "answer": "After a meal, rising blood glucose triggers insulin release, which promotes glucose uptake; cells can then use energy-rich molecules in cellular respiration, and mitochondria produce much of the cell's ATP.",
+      "citation_ids": [
+        "bio_homeostasis",
+        "bio_cells"
+      ],
+      "finish_reason": "stop",
+      "latency_ms": 2555.8775960234925,
+      "method": "lightrag_mix",
+      "provider_cost_unavailable_reason": "provider response did not report monetary cost",
+      "question_id": "bio_q05",
+      "raw_response_content": "{\"answer\":\"After a meal, rising blood glucose triggers insulin release, which promotes glucose uptake; cells can then use energy-rich molecules in cellular respiration, and mitochondria produce much of the cell's ATP.\",\"citation_ids\":[\"bio_homeostasis\",\"bio_cells\"],\"abstained\":false}",
+      "required_source_ids": [
+        "bio_homeostasis",
+        "bio_cells"
+      ],
+      "retrieved_source_ids": [
+        "bio_cells",
+        "bio_homeostasis",
+        "bio_immunity"
+      ],
+      "scoring": {
+        "abstention_correct": true,
+        "abstention_expected": false,
+        "citations_within_retrieval": true,
+        "cited_required_source_ids": [
+          "bio_cells",
+          "bio_homeostasis"
+        ],
+        "fabricated_citation_ids": [],
+        "lexical_concepts": [
+          {
+            "concept_id": "insulin_promotes_glucose_uptake",
+            "matched": true,
+            "matched_pattern": "insulin[^.]{0,80}glucose (?:uptake|storage)"
+          },
+          {
+            "concept_id": "mitochondrial_respiration",
+            "matched": true,
+            "matched_pattern": "cellular respiration[^.]{0,60}mitochondria"
+          },
+          {
+            "concept_id": "produces_atp",
+            "matched": true,
+            "matched_pattern": "produce[sd]?[^.]{0,30}ATP"
+          }
+        ],
+        "lexical_rubric_coverage": 1.0,
+        "required_citation_coverage": 1.0,
+        "semantic_truth_evaluated": false,
+        "uncited_required_source_ids": []
+      },
+      "status": "complete"
+    },
+    {
+      "abstained": true,
+      "actual_provider_cost": null,
+      "actual_response_usage": {
+        "completion_tokens": 29,
+        "prompt_tokens": 441,
+        "total_tokens": 470
+      },
+      "actual_response_usage_unavailable_reason": null,
+      "answer": "",
+      "citation_ids": [],
+      "finish_reason": "stop",
+      "latency_ms": 570.1336539932527,
+      "method": "existing_hybrid_rrf",
+      "provider_cost_unavailable_reason": "provider response did not report monetary cost",
+      "question_id": "bio_q06",
+      "raw_response_content": "{\"answer\": \"\", \"citation_ids\": [], \"abstained\": true}",
+      "required_source_ids": [],
+      "retrieved_source_ids": [
+        "bio_cells",
+        "bio_homeostasis",
+        "bio_immunity"
+      ],
+      "scoring": {
+        "abstention_correct": true,
+        "abstention_expected": true,
+        "citations_within_retrieval": true,
+        "cited_required_source_ids": [],
+        "fabricated_citation_ids": [],
+        "lexical_concepts": null,
+        "lexical_rubric_coverage": null,
+        "required_citation_coverage": null,
+        "semantic_truth_evaluated": false,
+        "unanswerable_has_answer_text": false,
+        "unanswerable_has_citations": false,
+        "uncited_required_source_ids": []
+      },
+      "status": "complete"
+    },
+    {
+      "abstained": true,
+      "actual_provider_cost": null,
+      "actual_response_usage": {
+        "completion_tokens": 68,
+        "prompt_tokens": 441,
+        "total_tokens": 509
+      },
+      "actual_response_usage_unavailable_reason": null,
+      "answer": "",
+      "citation_ids": [],
+      "finish_reason": "stop",
+      "latency_ms": 523.2885870500468,
+      "method": "lightrag_mix",
+      "provider_cost_unavailable_reason": "provider response did not report monetary cost",
+      "question_id": "bio_q06",
+      "raw_response_content": "{\"answer\":\"\",\"citation_ids\":[],\"abstained\":true}",
+      "required_source_ids": [],
+      "retrieved_source_ids": [
+        "bio_cells",
+        "bio_homeostasis",
+        "bio_immunity"
+      ],
+      "scoring": {
+        "abstention_correct": true,
+        "abstention_expected": true,
+        "citations_within_retrieval": true,
+        "cited_required_source_ids": [],
+        "fabricated_citation_ids": [],
+        "lexical_concepts": null,
+        "lexical_rubric_coverage": null,
+        "required_citation_coverage": null,
+        "semantic_truth_evaluated": false,
+        "unanswerable_has_answer_text": false,
+        "unanswerable_has_citations": false,
+        "uncited_required_source_ids": []
+      },
+      "status": "complete"
+    }
+  ],
+  "configuration": {
+    "base_url_sha256": "a34e2a4708ed1c61008a151688838dcf1c44d4e7f08054633e72ba7c0b16cfc1",
+    "max_retries": 0,
+    "max_tokens": 2048,
+    "model": "deepseek-v4-flash",
+    "response_format": {
+      "type": "json_object"
+    },
+    "secrets_recorded": false,
+    "temperature": 0
+  },
+  "evaluation_id": "knowledge_answer_small_v1",
+  "retrieval_results_sha256": "9ed0f1fbb008022708a819357aeaf9489056dbd6cd1642357379ef6619464992",
+  "retrieval_run_id": "83d033c73ea640b9ad9a116fb3f84d12",
+  "schema_version": 1,
+  "semantic_truth_evaluated": false,
+  "summary": {
+    "existing_hybrid_rrf": {
+      "actual_provider_cost_total": null,
+      "actual_usage_reported_call_count": 12,
+      "call_count": 12,
+      "fabricated_citation_count": 0,
+      "mean_handchecked_concept_regex_coverage": 0.7333333333333333,
+      "mean_latency_ms": 1627.826262828118,
+      "mean_required_citation_coverage": 0.95,
+      "semantic_truth_evaluated": false,
+      "unanswerable_correct_abstention_count": 2
+    },
+    "lightrag_mix": {
+      "actual_provider_cost_total": null,
+      "actual_usage_reported_call_count": 12,
+      "call_count": 12,
+      "fabricated_citation_count": 0,
+      "mean_handchecked_concept_regex_coverage": 0.9333333333333333,
+      "mean_latency_ms": 1169.424272244214,
+      "mean_required_citation_coverage": 0.95,
+      "semantic_truth_evaluated": false,
+      "unanswerable_correct_abstention_count": 2
+    }
+  }
+}

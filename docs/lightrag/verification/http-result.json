@@ -1,0 +1,21 @@
+{
+  "status": "pass",
+  "model_boundary": "deterministic_fakes",
+  "live_model_calls": false,
+  "web_snapshot": "synthetic_captured_fixture_not_live_fetch",
+  "knowledge_base_id": "c4ef36b0-19f2-4219-8953-91b264ca20bc",
+  "isolated_knowledge_base_id": "bc97f43e-d06c-4b8a-bbbc-4328f4f697cb",
+  "citation_count": 2,
+  "checks": [
+    "authenticated_gateway",
+    "two_kb_isolation",
+    "multipart_ingestion",
+    "real_graph",
+    "rename",
+    "cross_document_agent_citations",
+    "explicit_web_snapshot_import",
+    "shared_source_delete"
+  ],
+  "backend_url": "http://127.0.0.1:41871",
+  "graph_url": "http://127.0.0.1:58627"
+}

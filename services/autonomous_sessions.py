@@ -192,7 +192,12 @@ class AutonomousSessionStore:
     async def save(self, conversation_id: str, payload: dict[str, Any]) -> None:
         self._validate_conversation_id(conversation_id)
         payload_json = self._serialize_json_object(payload, "session payload")
-        await self._run_thread(self._save_sync, conversation_id, payload_json)
+        await self._run_thread(
+            self._save_sync,
+            conversation_id,
+            payload_json,
+            self._subject_from_payload(payload),
+        )
 
     async def handoff(
         self,
@@ -209,6 +214,7 @@ class AutonomousSessionStore:
         if conversation_id == new_conversation_id:
             raise ValueError("handoff requires a new conversation ID")
         payload_json = self._serialize_json_object(payload, "session payload")
+        subject_id = self._subject_from_payload(payload)
         outcome_json = self._serialize_completed_outcome(response)
         return await self._run_thread(
             self._handoff_sync,
@@ -216,6 +222,7 @@ class AutonomousSessionStore:
             claim_token,
             new_conversation_id,
             payload_json,
+            subject_id,
             outcome_json,
         )
 
@@ -235,29 +242,49 @@ class AutonomousSessionStore:
             self._serialize_completed_outcome(response),
         )
 
-    async def inspect(self, conversation_id: str) -> SessionInspection | None:
+    async def inspect(
+        self, conversation_id: str, *, owner_id: str | None = None
+    ) -> SessionInspection | None:
         if not conversation_id:
             return None
-        return await self._run_thread(self._inspect_sync, conversation_id)
+        if owner_id is None:
+            return await self._run_thread(self._inspect_sync, conversation_id)
+        return await self._run_thread(self._inspect_sync, conversation_id, owner_id)
+
+    async def exists_without_reaping(self, conversation_id: str) -> bool:
+        """Check durable presence without reading payload or changing row state."""
+        if not conversation_id:
+            return False
+        return await self._run_thread(
+            self._exists_without_reaping_sync, conversation_id
+        )
+
+    async def owned(self, conversation_id: str, owner_id: str) -> bool:
+        """Check owner authority without exposing payload or changing row state."""
+        if not conversation_id or not owner_id:
+            return False
+        return await self._run_thread(self._owned_sync, conversation_id, owner_id)
 
     async def status(self, conversation_id: str) -> str | None:
         if not conversation_id:
             return None
         return await self._run_thread(self._status_sync, conversation_id)
 
-    async def claim(self, conversation_id: str, continue_fingerprint: str) -> SessionClaim:
+    async def claim(
+        self,
+        conversation_id: str,
+        continue_fingerprint: str,
+        *,
+        owner_id: str | None = None,
+    ) -> SessionClaim:
         """Claim a pause, reclaim a clean stale lease, or replay its outcome."""
         self._validate_conversation_id(conversation_id)
         self._validate_fingerprint(continue_fingerprint)
         claim_token = secrets.token_urlsafe(32)
-        worker = asyncio.create_task(
-            asyncio.to_thread(
-                self._claim_sync,
-                conversation_id,
-                continue_fingerprint,
-                claim_token,
-            )
-        )
+        claim_args = (conversation_id, continue_fingerprint, claim_token)
+        if owner_id is not None:
+            claim_args = (*claim_args, owner_id)
+        worker = asyncio.create_task(asyncio.to_thread(self._claim_sync, *claim_args))
         try:
             return await asyncio.shield(worker)
         except asyncio.CancelledError as cancelled:
@@ -303,10 +330,16 @@ class AutonomousSessionStore:
         """Backward-compatible alias for :meth:`cancel`."""
         return await self.cancel(conversation_id, claim_token)
 
-    async def discard_paused(self, conversation_id: str) -> SessionDiscardResult:
+    async def discard_paused(
+        self, conversation_id: str, *, owner_id: str | None = None
+    ) -> SessionDiscardResult:
         """Delete only an unclaimed pause; never cancel a running owner."""
         self._validate_conversation_id(conversation_id)
-        return await self._run_thread(self._discard_paused_sync, conversation_id)
+        if owner_id is None:
+            return await self._run_thread(self._discard_paused_sync, conversation_id)
+        return await self._run_thread(
+            self._discard_paused_sync, conversation_id, owner_id
+        )
 
     async def consume(self, conversation_id: str, claim_token: str) -> bool:
         """Delete an invalid claimed snapshot while its lease is still live."""
@@ -583,6 +616,7 @@ class AutonomousSessionStore:
                     CREATE TABLE IF NOT EXISTS {_TABLE} (
                         conversation_id TEXT PRIMARY KEY,
                         payload_json TEXT NOT NULL,
+                        subject_id TEXT,
                         state TEXT NOT NULL CHECK (state IN ('paused', 'in_flight')),
                         claim_token TEXT,
                         progress_started INTEGER NOT NULL DEFAULT 0
@@ -626,6 +660,7 @@ class AutonomousSessionStore:
             "claim_expires_at": "DOUBLE PRECISION",
             "continue_fingerprint": "TEXT",
             "outcome_json": "TEXT",
+            "subject_id": "TEXT",
         }
         if self._postgres:
             for name, column_type in columns.items():
@@ -640,9 +675,21 @@ class AutonomousSessionStore:
                 if name not in existing:
                     connection.execute(f"ALTER TABLE {_TABLE} ADD COLUMN {name} {column_type}")
 
+        p = self._placeholder
+        legacy_rows = connection.execute(
+            f"SELECT conversation_id, payload_json FROM {_TABLE} WHERE subject_id IS NULL"
+        ).fetchall()
+        for conversation_id, payload_json in legacy_rows:
+            subject_id = self._subject_from_payload_json(payload_json)
+            if subject_id is not None:
+                connection.execute(
+                    f"UPDATE {_TABLE} SET subject_id = {p} "
+                    f"WHERE conversation_id = {p} AND subject_id IS NULL",
+                    (subject_id, conversation_id),
+                )
+
         # Give legacy in-flight rows one full rollout grace lease. Their absent
         # fingerprint later forces ambiguity instead of automatic replay.
-        p = self._placeholder
         connection.execute(
             f"UPDATE {_TABLE} SET claim_expires_at = {p} "
             "WHERE state = 'in_flight' AND claim_expires_at IS NULL "
@@ -650,14 +697,18 @@ class AutonomousSessionStore:
             (self._now() + self._operation_lease_seconds,),
         )
 
-    def _save_sync(self, conversation_id: str, payload_json: str) -> None:
+    def _save_sync(
+        self, conversation_id: str, payload_json: str, subject_id: str | None
+    ) -> None:
         self._ensure_schema()
         with self._transaction(write=True) as connection:
             self._lock_capacity(connection)
             created_at = self._now()
             self._reap_stale_claims(connection, created_at)
             self._purge_expired(connection, created_at)
-            if not self._insert_paused_row(connection, conversation_id, payload_json, created_at):
+            if not self._insert_paused_row(
+                connection, conversation_id, payload_json, subject_id, created_at
+            ):
                 raise SessionAlreadyExistsError(conversation_id)
             self._enforce_capacity(connection, conversation_id)
 
@@ -667,12 +718,24 @@ class AutonomousSessionStore:
         claim_token: str,
         new_conversation_id: str,
         payload_json: str,
+        subject_id: str | None,
         outcome_json: str,
     ) -> bool:
         self._ensure_schema()
         p = self._placeholder
         with self._transaction(write=True) as connection:
             self._lock_capacity(connection)
+            source_row = self._select_row(
+                connection, conversation_id, for_update=True
+            )
+            source_subject = self._row_subject(source_row)
+            if (
+                source_subject is not None
+                and subject_id is not None
+                and source_subject != subject_id
+            ):
+                raise ValueError("handoff cannot change autonomous session owner")
+            target_subject = source_subject or subject_id
             now = self._now()
             self._reap_stale_claims(connection, now)
             self._purge_expired(connection, now)
@@ -701,7 +764,13 @@ class AutonomousSessionStore:
             )
             if completed.rowcount != 1:
                 return False
-            if not self._insert_paused_row(connection, new_conversation_id, payload_json, now):
+            if not self._insert_paused_row(
+                connection,
+                new_conversation_id,
+                payload_json,
+                target_subject,
+                now,
+            ):
                 raise SessionAlreadyExistsError(new_conversation_id)
             self._enforce_capacity(connection, new_conversation_id)
             return True
@@ -847,6 +916,7 @@ class AutonomousSessionStore:
         connection,
         conversation_id: str,
         payload_json: str,
+        subject_id: str | None,
         created_at: float,
     ) -> bool:
         p = self._placeholder
@@ -857,13 +927,14 @@ class AutonomousSessionStore:
         cursor = connection.execute(
             f"""
             {statement} INTO {_TABLE}
-                (conversation_id, payload_json, state, progress_started,
+                (conversation_id, payload_json, subject_id, state, progress_started,
                  created_at, updated_at, expires_at)
-            VALUES ({p}, {p}, 'paused', 0, {p}, {p}, {p}){conflict}
+            VALUES ({p}, {p}, {p}, 'paused', 0, {p}, {p}, {p}){conflict}
             """,
             (
                 conversation_id,
                 payload_json,
+                subject_id,
                 created_at,
                 created_at,
                 created_at + self._ttl_seconds,
@@ -904,21 +975,69 @@ class AutonomousSessionStore:
             f"""
             SELECT state, payload_json, created_at, expires_at, claimed_at,
                    progress_started, claim_token, claim_expires_at,
-                   continue_fingerprint, outcome_json
+                   continue_fingerprint, outcome_json, subject_id
             FROM {_TABLE} WHERE conversation_id = {p}{suffix}
             """,
             (conversation_id,),
         ).fetchone()
 
-    def _inspect_sync(self, conversation_id: str) -> SessionInspection | None:
+    @staticmethod
+    def _subject_from_payload(payload: object) -> str | None:
+        if not isinstance(payload, dict):
+            return None
+        subject_id = payload.get("user_id")
+        return subject_id if isinstance(subject_id, str) and subject_id else None
+
+    @classmethod
+    def _subject_from_payload_json(cls, payload_json: str) -> str | None:
+        try:
+            payload = json.loads(payload_json)
+        except (TypeError, json.JSONDecodeError):
+            return None
+        return cls._subject_from_payload(payload)
+
+    @classmethod
+    def _row_subject(cls, row) -> str | None:
+        if row is None:
+            return None
+        subject_id = row[10]
+        if subject_id is not None:
+            return subject_id if isinstance(subject_id, str) and subject_id else None
+        return cls._subject_from_payload_json(row[1])
+
+    @classmethod
+    def _row_owned(cls, row, owner_id: str | None) -> bool:
+        return owner_id is None or cls._row_subject(row) == owner_id
+
+    def _inspect_sync(
+        self, conversation_id: str, owner_id: str | None = None
+    ) -> SessionInspection | None:
         self._ensure_schema()
         with self._transaction(write=True) as connection:
-            self._select_row(connection, conversation_id, for_update=True)
+            row = self._select_row(connection, conversation_id, for_update=True)
+            if row is None or not self._row_owned(row, owner_id):
+                return None
             now = self._now()
             self._reap_stale_target(connection, conversation_id, now)
             self._purge_expired_target(connection, conversation_id, now)
             row = self._select_row(connection, conversation_id)
-        return None if row is None else self._row_to_inspection(row)
+        return None if row is None else self._row_to_inspection(row[:10])
+
+    def _exists_without_reaping_sync(self, conversation_id: str) -> bool:
+        self._ensure_schema()
+        p = self._placeholder
+        with self._transaction() as connection:
+            row = connection.execute(
+                f"SELECT 1 FROM {_TABLE} WHERE conversation_id = {p}",
+                (conversation_id,),
+            ).fetchone()
+        return row is not None
+
+    def _owned_sync(self, conversation_id: str, owner_id: str) -> bool:
+        self._ensure_schema()
+        with self._transaction() as connection:
+            row = self._select_row(connection, conversation_id)
+        return row is not None and self._row_owned(row, owner_id)
 
     def _status_sync(self, conversation_id: str) -> str | None:
         self._ensure_schema()
@@ -942,7 +1061,7 @@ class AutonomousSessionStore:
             claim_expires_at,
             continue_fingerprint,
             outcome_json,
-        ) = row
+        ) = row[:10]
         if physical_state not in _PHYSICAL_STATES:
             raise RuntimeError(f"invalid autonomous session state: {physical_state}")
         try:
@@ -983,12 +1102,12 @@ class AutonomousSessionStore:
         conversation_id: str,
         continue_fingerprint: str,
         claim_token: str,
+        owner_id: str | None = None,
     ) -> SessionClaim:
         self._ensure_schema()
         p = self._placeholder
         with self._transaction(write=True) as connection:
             row = self._select_row(connection, conversation_id, for_update=True)
-            now = self._now()
             if row is None:
                 return SessionClaim(claimed=False, reason="missing")
             (
@@ -1002,7 +1121,10 @@ class AutonomousSessionStore:
                 claim_expires_at,
                 stored_fingerprint,
                 outcome_json,
-            ) = row
+            ) = row[:10]
+            if not self._row_owned(row, owner_id):
+                return SessionClaim(claimed=False, reason="missing")
+            now = self._now()
 
             if outcome_json is not None:
                 if float(expires_at) <= now:
@@ -1209,11 +1331,15 @@ class AutonomousSessionStore:
             )
             return cursor.rowcount == 1
 
-    def _discard_paused_sync(self, conversation_id: str) -> SessionDiscardResult:
+    def _discard_paused_sync(
+        self, conversation_id: str, owner_id: str | None = None
+    ) -> SessionDiscardResult:
         self._ensure_schema()
         p = self._placeholder
         with self._transaction(write=True) as connection:
-            self._select_row(connection, conversation_id, for_update=True)
+            row = self._select_row(connection, conversation_id, for_update=True)
+            if row is None or not self._row_owned(row, owner_id):
+                return SessionDiscardResult(discarded=False, reason="missing")
             now = self._now()
             self._reap_stale_target(connection, conversation_id, now)
             self._purge_expired_target(connection, conversation_id, now)

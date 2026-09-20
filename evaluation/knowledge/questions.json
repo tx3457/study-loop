@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "questions": [
+    {
+      "question_id": "ml_q01",
+      "domain_id": "machine_learning",
+      "case_type": "single_document",
+      "query": "Why can momentum make stochastic gradient descent updates more stable?",
+      "required_source_ids": ["ml_optimization"],
+      "gold_answer_summary": "Momentum carries information from earlier gradients, smoothing noisy updates and accelerating consistent directions."
+    },
+    {
+      "question_id": "ml_q02",
+      "domain_id": "machine_learning",
+      "case_type": "single_document",
+      "query": "How do L2 regularization and dropout reduce memorization?",
+      "required_source_ids": ["ml_regularization"],
+      "gold_answer_summary": "L2 discourages large weights, while dropout prevents reliance on a fixed set of hidden activations."
+    },
+    {
+      "question_id": "ml_q03",
+      "domain_id": "machine_learning",
+      "case_type": "single_document",
+      "query": "Which measurements are more informative than accuracy for imbalanced classification?",
+      "required_source_ids": ["ml_evaluation"],
+      "gold_answer_summary": "Precision, recall, F1, and the confusion matrix expose error patterns hidden by accuracy."
+    },
+    {
+      "question_id": "ml_q04",
+      "domain_id": "machine_learning",
+      "case_type": "cross_document",
+      "query": "How should dropout strength be selected without leaking information from the final test set?",
+      "required_source_ids": ["ml_regularization", "ml_evaluation"],
+      "gold_answer_summary": "Treat dropout as a hyperparameter, choose it with validation data, and reserve the test set for final evaluation."
+    },
+    {
+      "question_id": "ml_q05",
+      "domain_id": "machine_learning",
+      "case_type": "cross_document",
+      "query": "Training loss oscillates and the chosen model must be assessed reliably on limited data. What two practices address these issues?",
+      "required_source_ids": ["ml_optimization", "ml_evaluation"],
+      "gold_answer_summary": "Reduce or schedule the learning rate to address oscillation, and use cross-validation to assess selection on limited data."
+    },
+    {
+      "question_id": "ml_q06",
+      "domain_id": "machine_learning",
+      "case_type": "unanswerable",
+      "query": "Which quantum error-correction code is best for a superconducting quantum computer?",
+      "required_source_ids": [],
+      "gold_answer_summary": null
+    },
+    {
+      "question_id": "bio_q01",
+      "domain_id": "educational_biology",
+      "case_type": "single_document",
+      "query": "How are mitochondria connected to active transport across a cell membrane?",
+      "required_source_ids": ["bio_cells"],
+      "gold_answer_summary": "Mitochondria produce ATP, and ATP supplies energy for active transport across the selectively permeable membrane."
+    },
+    {
+      "question_id": "bio_q02",
+      "domain_id": "educational_biology",
+      "case_type": "single_document",
+      "query": "Why can vaccination make a later immune response faster?",
+      "required_source_ids": ["bio_immunity"],
+      "gold_answer_summary": "Vaccination creates adaptive memory cells that respond more rapidly during later exposure."
+    },
+    {
+      "question_id": "bio_q03",
+      "domain_id": "educational_biology",
+      "case_type": "single_document",
+      "query": "Which hormones respond when blood glucose rises after a meal or later falls?",
+      "required_source_ids": ["bio_homeostasis"],
+      "gold_answer_summary": "Insulin responds to raised glucose after a meal, while glucagon responds when glucose falls."
+    },
+    {
+      "question_id": "bio_q04",
+      "domain_id": "educational_biology",
+      "case_type": "cross_document",
+      "query": "How can an immune response change temperature regulation, and what responses help the body lose or generate heat?",
+      "required_source_ids": ["bio_immunity", "bio_homeostasis"],
+      "gold_answer_summary": "Immune activity can produce fever by shifting the temperature target; sweating and wider skin vessels lose heat, while shivering generates heat."
+    },
+    {
+      "question_id": "bio_q05",
+      "domain_id": "educational_biology",
+      "case_type": "cross_document",
+      "query": "After a meal, how are glucose regulation and cellular ATP production connected?",
+      "required_source_ids": ["bio_homeostasis", "bio_cells"],
+      "gold_answer_summary": "Insulin promotes glucose uptake and storage after a meal, and cells can use energy-rich molecules in mitochondria to produce ATP."
+    },
+    {
+      "question_id": "bio_q06",
+      "domain_id": "educational_biology",
+      "case_type": "unanswerable",
+      "query": "Which chlorophyll molecule drives the light reactions of photosynthesis in oak leaves?",
+      "required_source_ids": [],
+      "gold_answer_summary": null
+    }
+  ]
+}

@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { NavLink, Outlet } from 'react-router-dom'
+import { getKnowledgeCapabilities } from '../api/client'
 import './Layout.css'
 
 const NAV_ITEMS = [
   { to: '/documents', icon: 'document', label: '文档管理' },
+  { to: '/knowledge-bases', icon: 'knowledge', label: '知识库', optional: true },
   { to: '/learning-path', icon: 'path', label: '学习路径' },
   { to: '/quiz', icon: 'quiz', label: '答题练习' },
   { to: '/autonomous', icon: 'agent', label: '自主 Agent' },
@@ -13,6 +15,7 @@ const NAV_ITEMS = [
 
 const ICONS = {
   document: <><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8M8 17h8"/></>,
+  knowledge: <><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H11v17H6.5A2.5 2.5 0 0 0 4 22z"/><path d="M20 5.5A2.5 2.5 0 0 0 17.5 3H13v17h4.5A2.5 2.5 0 0 1 20 22z"/></>,
   path: <><circle cx="6" cy="18" r="2"/><circle cx="18" cy="6" r="2"/><path d="M8 18h3a3 3 0 0 0 3-3V9a3 3 0 0 1 3-3"/></>,
   quiz: <><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4z"/></>,
   agent: <><rect x="4" y="7" width="16" height="13" rx="3"/><path d="M9 11h.01M15 11h.01M8 16h8M12 7V3M9 3h6"/></>,
@@ -52,6 +55,7 @@ export default function Layout() {
   const [isMobile, setIsMobile] = useState(() =>
     typeof window !== 'undefined' && window.matchMedia('(max-width: 768px)').matches
   )
+  const [knowledgeAvailable, setKnowledgeAvailable] = useState(false)
   const menuButtonRef = useRef(null)
   const sidebarRef = useRef(null)
   const closeButtonRef = useRef(null)
@@ -59,6 +63,16 @@ export default function Layout() {
   const closeMobileNavigation = useCallback(() => {
     setMobileOpen(false)
     window.requestAnimationFrame(() => menuButtonRef.current?.focus())
+  }, [])
+
+  useEffect(() => {
+    const controller = new AbortController()
+    getKnowledgeCapabilities({ signal: controller.signal })
+      .then(result => setKnowledgeAvailable(
+        result?.enabled === true && result?.available === true,
+      ))
+      .catch(() => {})
+    return () => controller.abort()
   }, [])
 
   useEffect(() => {
@@ -182,7 +196,7 @@ export default function Layout() {
         </div>
 
         <nav className="sidebar-nav" aria-label="学习功能">
-          {NAV_ITEMS.map(item => (
+          {NAV_ITEMS.filter(item => !item.optional || knowledgeAvailable).map(item => (
             <NavLink
               key={item.to}
               to={item.to}

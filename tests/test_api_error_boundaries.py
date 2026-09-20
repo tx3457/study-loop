@@ -2,6 +2,7 @@
 
 import asyncio
 import copy
+import json
 import sqlite3
 import sys
 import tempfile
@@ -236,13 +237,11 @@ class TestApiErrorBoundaries(unittest.TestCase):
     def test_invalid_persisted_session_version_is_consumed_fail_closed(self):
         conversation_id = "invalid-session-version"
         secret = "sk-123456789012345678901234"
-        asyncio.run(self.session_store.save(
-            conversation_id,
-            {
+        self._seed_session(conversation_id)
+        self._corrupt_session_payload(conversation_id, {
                 "schema_version": 2,
                 "messages": [{"role": "system", "content": secret}],
-            },
-        ))
+            })
         run_loop = AsyncMock()
 
         with self.assertLogs(
@@ -279,7 +278,8 @@ class TestApiErrorBoundaries(unittest.TestCase):
                 conversation_id = f"invalid-{label}"
                 payload = copy.deepcopy(valid)
                 payload.update(changes)
-                asyncio.run(self.session_store.save(conversation_id, payload))
+                self._seed_session(conversation_id)
+                self._corrupt_session_payload(conversation_id, payload)
                 run_loop = AsyncMock()
 
                 with patch.object(
@@ -298,6 +298,29 @@ class TestApiErrorBoundaries(unittest.TestCase):
                 self.assertEqual(response.status_code, 410)
                 self.assertIsNone(self._inspect_session(conversation_id))
                 run_loop.assert_not_awaited()
+
+    def _corrupt_session_payload(self, conversation_id, payload):
+        # Corrupt an already-owned snapshot without erasing its durable owner.
+        with closing(sqlite3.connect(self.session_db_path)) as connection:
+            connection.execute(
+                "UPDATE studyloop_autonomous_sessions SET payload_json = ? "
+                "WHERE conversation_id = ?",
+                (json.dumps(payload), conversation_id),
+            )
+            connection.commit()
+
+    def test_legacy_snapshot_without_owner_is_not_claimed_or_consumed(self):
+        conversation_id = "unowned-legacy-snapshot"
+        asyncio.run(self.session_store.save(conversation_id, {"schema_version": 2}))
+        run_loop = AsyncMock()
+        with patch.object(autonomous_router, "_run_react_loop", run_loop):
+            response = self.client.post(
+                "/agent/autonomous/continue",
+                json={"conversation_id": conversation_id, "user_reply": "继续"},
+            )
+        self.assertEqual(response.status_code, 404)
+        self.assertTrue(asyncio.run(self.session_store.exists_without_reaping(conversation_id)))
+        run_loop.assert_not_awaited()
 
     def test_corrupt_pause_json_is_consumed_before_provider_execution(self):
         conversation_id = "corrupt-session-json"

@@ -1,0 +1,11 @@
+{
+  "status": "pass",
+  "tools": [
+    "search",
+    "fetch_content",
+    "expand_link"
+  ],
+  "main_mcp": "2.2.0",
+  "main_starlette": "0.50.0",
+  "search_calls": 0
+}

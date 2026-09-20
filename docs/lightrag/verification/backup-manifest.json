@@ -1,0 +1,18 @@
+{
+  "format": 1,
+  "lightrag_version": "1.5.7",
+  "database_image": "pgvector/pgvector:0.8.6-pg16",
+  "database_image_digest": "sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b",
+  "index_config_hashes": [
+    "c039e8a9f3da5f695925f1734dd7ace89cbfccc450a6d4f11d4ed70e4214958a"
+  ],
+  "files": {
+    "knowledge.dump": "25ce22bceccbcf99ccb4f5b8af0361080dfe0a38d615c8fffc2f1c2e0e684108",
+    "materials.tar.gz": "96ac1bbd530d9b76ad563f34f8ce42ab13667c326f74208c8a1c731503ed253c"
+  },
+  "configuration": {
+    "embedding_dimension": 64,
+    "embedding_model": "deterministic",
+    "llm_model": "deterministic"
+  }
+}

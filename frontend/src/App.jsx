@@ -6,6 +6,7 @@ import Quiz from './pages/Quiz'
 import Dashboard from './pages/Dashboard'
 import Autonomous from './pages/Autonomous'
 import Adaptive from './pages/Adaptive'
+import KnowledgeBases from './pages/KnowledgeBases'
 
 export default function App() {
   return (
@@ -15,6 +16,7 @@ export default function App() {
         <Route path="/learning-path" element={<LearningPath />} />
         <Route path="/quiz" element={<Quiz />} />
         <Route path="/autonomous" element={<Autonomous />} />
+        <Route path="/knowledge-bases/:knowledgeBaseId?" element={<KnowledgeBases />} />
         <Route path="/adaptive" element={<Adaptive />} />
         <Route path="/dashboard" element={<Dashboard />} />
         <Route path="*" element={<Navigate to="/documents" replace />} />

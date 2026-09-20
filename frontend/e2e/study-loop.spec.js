@@ -2,7 +2,8 @@ import { expect, test } from '@playwright/test'
 
 const API_PREFIX = '/api'
 const UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
-const AUTONOMOUS_SESSION_KEY = 'study-loop.autonomous.recovery.v2'
+const AUTONOMOUS_SESSION_KEY = 'study-loop.autonomous.recovery.v3'
+const PREVIOUS_AUTONOMOUS_SESSION_KEY = 'study-loop.autonomous.recovery.v2'
 const LEGACY_AUTONOMOUS_SESSION_KEY = 'study-loop.autonomous.awaiting.v1'
 const QUIZ_RECOVERY_KEY = 'study-loop.quiz.recovery.v1'
 const ADAPTIVE_RECOVERY_KEY = 'study-loop.adaptive.recovery.v1'
@@ -52,6 +53,13 @@ async function mockApi(page, handler) {
       // baseline; document-loading tests override it in their own handler.
       if (!response && request.method() === 'GET' && path === '/documents') {
         response = { body: { documents: [] } }
+      }
+      if (
+        !response
+        && request.method() === 'GET'
+        && path === '/knowledge-bases/capabilities'
+      ) {
+        response = { body: { enabled: false, available: false, web_search_available: false } }
       }
       if (
         !response
@@ -5544,7 +5552,9 @@ test('Autonomous grounds a selected document and renders server evidence as plai
     query: '解释这份材料里的 RAG',
     user_id: 'default_user',
     document_id: 'notes.md',
+    knowledge_base_id: null,
     grounding_required: true,
+    web_enabled: false,
   })
   await expect(page.getByText('引用 ID 已核验')).toBeVisible()
   await expect(page.getByText('文档证据')).toBeVisible()
@@ -5997,7 +6007,7 @@ test('Autonomous restores a pending HITL question and draft after reload', async
   await dialog.getByRole('textbox', { name: '你的回答' }).fill('保留这个回答草稿')
   const stored = await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), AUTONOMOUS_SESSION_KEY)
   expect(stored).toMatchObject({
-    schema_version: 2,
+    schema_version: 3,
     kind: 'awaiting',
     conversation_id: 'playwright-hitl-reload',
     user_question: '刷新后仍需回答的问题？',
@@ -6137,6 +6147,32 @@ test('Autonomous reset clears recovery, corrupt storage fails closed, and valid 
   expect(await page.evaluate(key => sessionStorage.getItem(key), AUTONOMOUS_SESSION_KEY)).toBeNull()
 
   await page.evaluate(key => sessionStorage.setItem(key, JSON.stringify({
+    schema_version: 2,
+    kind: 'awaiting',
+    request: {
+      query: '迁移 v2 Autonomous 会话',
+      user_id: 'default_user',
+      document_id: null,
+      knowledge_base_id: null,
+      grounding_required: false,
+      web_enabled: false,
+    },
+    conversation_id: 'previous-v2-awaiting',
+    user_question: 'v2 暂停问题仍需回答？',
+    draft: 'v2 草稿',
+  })), PREVIOUS_AUTONOMOUS_SESSION_KEY)
+  await page.reload()
+  await expect(page.getByRole('dialog', { name: 'Agent 想问你' })).toContainText('v2 暂停问题仍需回答？')
+  const migratedV2 = await page.evaluate(key => JSON.parse(sessionStorage.getItem(key)), AUTONOMOUS_SESSION_KEY)
+  expect(migratedV2).toMatchObject({
+    schema_version: 3,
+    request: { knowledge_base_id: null, web_enabled: false },
+  })
+  expect(await page.evaluate(key => sessionStorage.getItem(key), PREVIOUS_AUTONOMOUS_SESSION_KEY)).toBeNull()
+  await page.evaluate(key => sessionStorage.removeItem(key), AUTONOMOUS_SESSION_KEY)
+  await page.reload()
+
+  await page.evaluate(key => sessionStorage.setItem(key, JSON.stringify({
     version: 1,
     conversation_id: 'legacy-custom-user',
     user_question: '不应恢复的旧用户会话？',
@@ -6177,7 +6213,7 @@ test('Autonomous reset clears recovery, corrupt storage fails closed, and valid 
     AUTONOMOUS_SESSION_KEY,
   )
   expect(migrated).toMatchObject({
-    schema_version: 2,
+    schema_version: 3,
     kind: 'awaiting',
     conversation_id: 'legacy-valid-awaiting',
     draft: '迁移后的草稿',
@@ -6242,13 +6278,17 @@ test('Autonomous preserves the initial goal and focus when starting fails', asyn
       query: '帮我复习向量检索',
       user_id: 'default_user',
       document_id: null,
+      knowledge_base_id: null,
       grounding_required: false,
+      web_enabled: false,
     },
     {
       query: '帮我复习向量检索',
       user_id: 'default_user',
       document_id: null,
+      knowledge_base_id: null,
       grounding_required: false,
+      web_enabled: false,
     },
   ])
   expect(startKeys[0]).toMatch(UUID_V4_PATTERN)
@@ -6613,7 +6653,7 @@ test('Autonomous replays a lost start response after reload with the exact body 
     AUTONOMOUS_SESSION_KEY,
   )
   expect(pending).toMatchObject({
-    schema_version: 2,
+    schema_version: 3,
     kind: 'pending_start',
     request: {
       query: '刷新也只能执行一次',

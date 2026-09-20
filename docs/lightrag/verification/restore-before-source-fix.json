@@ -1,0 +1,14 @@
+{
+  "status": "pass",
+  "database_restored_into": "knowledge_restore_run3",
+  "material_hashes_match": true,
+  "material_file_count": 4,
+  "restored_revision": 5,
+  "restored_epoch": 5,
+  "renamed_entity_present": true,
+  "deleted_relation_absent": true,
+  "knowledge_base_isolation": true,
+  "source_citations_queryable": true,
+  "model_boundary": "deterministic_fakes",
+  "live_model_calls": false
+}

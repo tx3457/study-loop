@@ -1,0 +1,1004 @@
+{
+  "answer_generation": "not_run_retrieval_only",
+  "configuration": {
+    "chat_base_url_sha256": "a34e2a4708ed1c61008a151688838dcf1c44d4e7f08054633e72ba7c0b16cfc1",
+    "chat_model": "deepseek-v4-flash",
+    "embedding_base_url_sha256": "dcfb966d818ddf8f4d10f7397ce546e86d3fcb8afe26371506405f6978c6f661",
+    "embedding_dim": 1024,
+    "embedding_model": "BAAI/bge-large-zh-v1.5",
+    "lightrag_version": "1.5.7",
+    "reranker_enabled": false,
+    "reranker_model": null,
+    "secrets_recorded": false
+  },
+  "domain_ingestion": {
+    "educational_biology": {
+      "baseline_ingest_latency_ms": 251.091129030101,
+      "graph_ingest_latency_ms": 128116.26083595911
+    },
+    "machine_learning": {
+      "baseline_ingest_latency_ms": 438.27008100925013,
+      "graph_ingest_latency_ms": 125734.80351804756
+    }
+  },
+  "evaluation_id": "knowledge_retrieval_small_v1",
+  "manifest_files_payload_sha256": "cbd05c42372084ba4fe00eb888ce9b42bc73df7251ca27e2f6b98ce74f316911",
+  "questions": [
+    {
+      "answer": null,
+      "answer_quality_status": "not_evaluated_retrieval_only",
+      "case_type": "single_document",
+      "citations": [],
+      "domain_id": "machine_learning",
+      "methods": {
+        "existing_hybrid_rrf": {
+          "actual_token_usage": null,
+          "chunks": [
+            {
+              "chunk_id": "u-fef4cbe1ef5498c2a9b6be98d80a2eb1404b0d54fede72e98e5dfb23_chunk_0",
+              "rank": 1,
+              "source_id": "ml_optimization",
+              "text": "Stochastic gradient descent updates model parameters from small batches rather than the entire training set. A learning rate that is too large can make loss oscillate or diverge, while a very small rate can make progress slow. Momentum keeps a running contribution from earlier gradients, which can smooth noisy updates and accelerate movement along directions that remain consistent. A scheduler may reduce the learning rate later in training when improvement stalls."
+            },
+            {
+              "chunk_id": "u-fef4cbe1ef5498c2a9b6be98d80a2eb1404b0d54fede72e98e5dfb23_chunk_1",
+              "rank": 2,
+              "source_id": "ml_regularization",
+              "text": "Regularization reduces a model's tendency to memorize training examples. L2 regularization adds a penalty based on squared parameter magnitudes and therefore discourages unnecessarily large weights. Dropout randomly masks a fraction of hidden activations during training, so the network cannot rely on one fixed set of features. Both strengths are hyperparameters: excessive L2 or dropout can cause underfitting, so their values should be selected with validation data."
+            },
+            {
+              "chunk_id": "u-fef4cbe1ef5498c2a9b6be98d80a2eb1404b0d54fede72e98e5dfb23_chunk_2",
+              "rank": 3,
+              "source_id": "ml_evaluation",
+              "text": "A validation set supports hyperparameter selection, whereas the test set should remain untouched until the final evaluation. Cross-validation repeats training across several folds when data is limited and summarizes variation across the folds. Accuracy can conceal poor performance on an imbalanced classification task. Precision, recall, F1, and a confusion matrix reveal different error patterns; the metric should match the practical cost of false positives and false negatives."
+            }
+          ],
+          "latency_ms": 232.7421800000593,
+          "recall_at_3": 1.0,
+          "retrieved_source_count": 3,
+          "retrieved_source_ids": [
+            "ml_optimization",
+            "ml_regularization",
+            "ml_evaluation"
+          ],
+          "returned_any_source": true,
+          "token_usage_unavailable_reason": "retrieval interface does not expose provider usage"
+        },
+        "lightrag_mix": {
+          "actual_token_usage": null,
+          "chunks": [
+            {
+              "chunk_id": "ml_optimization-chunk-000",
+              "rank": 1,
+              "source_id": "ml_optimization",
+              "text": "Stochastic gradient descent updates model parameters from small batches rather than the entire training set. A learning rate that is too large can make loss oscillate or diverge, while a very small rate can make progress slow. Momentum keeps a running contribution from earlier gradients, which can smooth noisy updates and accelerate movement along directions that remain consistent. A scheduler may reduce the learning rate later in training when improvement stalls."
+            },
+            {
+              "chunk_id": "ml_regularization-chunk-000",
+              "rank": 2,
+              "source_id": "ml_regularization",
+              "text": "Regularization reduces a model's tendency to memorize training examples. L2 regularization adds a penalty based on squared parameter magnitudes and therefore discourages unnecessarily large weights. Dropout randomly masks a fraction of hidden activations during training, so the network cannot rely on one fixed set of features. Both strengths are hyperparameters: excessive L2 or dropout can cause underfitting, so their values should be selected with validation data."
+            },
+            {
+              "chunk_id": "ml_evaluation-chunk-000",
+              "rank": 3,
+              "source_id": "ml_evaluation",
+              "text": "A validation set supports hyperparameter selection, whereas the test set should remain untouched until the final evaluation. Cross-validation repeats training across several folds when data is limited and summarizes variation across the folds. Accuracy can conceal poor performance on an imbalanced classification task. Precision, recall, F1, and a confusion matrix reveal different error patterns; the metric should match the practical cost of false positives and false negatives."
+            }
+          ],
+          "latency_ms": 6776.871683017816,
+          "recall_at_3": 1.0,
+          "retrieved_source_count": 3,
+          "retrieved_source_ids": [
+            "ml_optimization",
+            "ml_regularization",
+            "ml_evaluation"
+          ],
+          "returned_any_source": true,
+          "token_usage_unavailable_reason": "aquery_data interface does not expose provider usage"
+        }
+      },
+      "query": "Why can momentum make stochastic gradient descent updates more stable?",
+      "question_id": "ml_q01",
+      "required_source_ids": [
+        "ml_optimization"
+      ]
+    },
+    {
+      "answer": null,
+      "answer_quality_status": "not_evaluated_retrieval_only",
+      "case_type": "single_document",
+      "citations": [],
+      "domain_id": "machine_learning",
+      "methods": {
+        "existing_hybrid_rrf": {
+          "actual_token_usage": null,
+          "chunks": [
+            {
+              "chunk_id": "u-fef4cbe1ef5498c2a9b6be98d80a2eb1404b0d54fede72e98e5dfb23_chunk_1",
+              "rank": 1,
+              "source_id": "ml_regularization",
+              "text": "Regularization reduces a model's tendency to memorize training examples. L2 regularization adds a penalty based on squared parameter magnitudes and therefore discourages unnecessarily large weights. Dropout randomly masks a fraction of hidden activations during training, so the network cannot rely on one fixed set of features. Both strengths are hyperparameters: excessive L2 or dropout can cause underfitting, so their values should be selected with validation data."
+            },
+            {
+              "chunk_id": "u-fef4cbe1ef5498c2a9b6be98d80a2eb1404b0d54fede72e98e5dfb23_chunk_0",
+              "rank": 2,
+              "source_id": "ml_optimization",
+              "text": "Stochastic gradient descent updates model parameters from small batches rather than the entire training set. A learning rate that is too large can make loss oscillate or diverge, while a very small rate can make progress slow. Momentum keeps a running contribution from earlier gradients, which can smooth noisy updates and accelerate movement along directions that remain consistent. A scheduler may reduce the learning rate later in training when improvement stalls."
+            },
+            {
+              "chunk_id": "u-fef4cbe1ef5498c2a9b6be98d80a2eb1404b0d54fede72e98e5dfb23_chunk_2",
+              "rank": 3,
+              "source_id": "ml_evaluation",
+              "text": "A validation set supports hyperparameter selection, whereas the test set should remain untouched until the final evaluation. Cross-validation repeats training across several folds when data is limited and summarizes variation across the folds. Accuracy can conceal poor performance on an imbalanced classification task. Precision, recall, F1, and a confusion matrix reveal different error patterns; the metric should match the practical cost of false positives and false negatives."
+            }
+          ],
+          "latency_ms": 263.97749001625925,
+          "recall_at_3": 1.0,
+          "retrieved_source_count": 3,
+          "retrieved_source_ids": [
+            "ml_regularization",
+            "ml_optimization",
+            "ml_evaluation"
+          ],
+          "returned_any_source": true,
+          "token_usage_unavailable_reason": "retrieval interface does not expose provider usage"
+        },
+        "lightrag_mix": {
+          "actual_token_usage": null,
+          "chunks": [
+            {
+              "chunk_id": "ml_regularization-chunk-000",
+              "rank": 1,
+              "source_id": "ml_regularization",
+              "text": "Regularization reduces a model's tendency to memorize training examples. L2 regularization adds a penalty based on squared parameter magnitudes and therefore discourages unnecessarily large weights. Dropout randomly masks a fraction of hidden activations during training, so the network cannot rely on one fixed set of features. Both strengths are hyperparameters: excessive L2 or dropout can cause underfitting, so their values should be selected with validation data."
+            },
+            {
+              "chunk_id": "ml_optimization-chunk-000",
+              "rank": 2,
+              "source_id": "ml_optimization",
+              "text": "Stochastic gradient descent updates model parameters from small batches rather than the entire training set. A learning rate that is too large can make loss oscillate or diverge, while a very small rate can make progress slow. Momentum keeps a running contribution from earlier gradients, which can smooth noisy updates and accelerate movement along directions that remain consistent. A scheduler may reduce the learning rate later in training when improvement stalls."
+            },
+            {
+              "chunk_id": "ml_evaluation-chunk-000",
+              "rank": 3,
+              "source_id": "ml_evaluation",
+              "text": "A validation set supports hyperparameter selection, whereas the test set should remain untouched until the final evaluation. Cross-validation repeats training across several folds when data is limited and summarizes variation across the folds. Accuracy can conceal poor performance on an imbalanced classification task. Precision, recall, F1, and a confusion matrix reveal different error patterns; the metric should match the practical cost of false positives and false negatives."
+            }
+          ],
+          "latency_ms": 5887.6900500035845,
+          "recall_at_3": 1.0,
+          "retrieved_source_count": 3,
+          "retrieved_source_ids": [
+            "ml_regularization",
+            "ml_optimization",
+            "ml_evaluation"
+          ],
+          "returned_any_source": true,
+          "token_usage_unavailable_reason": "aquery_data interface does not expose provider usage"
+        }
+      },
+      "query": "How do L2 regularization and dropout reduce memorization?",
+      "question_id": "ml_q02",
+      "required_source_ids": [
+        "ml_regularization"
+      ]
+    },
+    {
+      "answer": null,
+      "answer_quality_status": "not_evaluated_retrieval_only",
+      "case_type": "single_document",
+      "citations": [],
+      "domain_id": "machine_learning",
+      "methods": {
+        "existing_hybrid_rrf": {
+          "actual_token_usage": null,
+          "chunks": [
+            {
+              "chunk_id": "u-fef4cbe1ef5498c2a9b6be98d80a2eb1404b0d54fede72e98e5dfb23_chunk_2",
+              "rank": 1,
+              "source_id": "ml_evaluation",
+              "text": "A validation set supports hyperparameter selection, whereas the test set should remain untouched until the final evaluation. Cross-validation repeats training across several folds when data is limited and summarizes variation across the folds. Accuracy can conceal poor performance on an imbalanced classification task. Precision, recall, F1, and a confusion matrix reveal different error patterns; the metric should match the practical cost of false positives and false negatives."
+            },
+            {
+              "chunk_id": "u-fef4cbe1ef5498c2a9b6be98d80a2eb1404b0d54fede72e98e5dfb23_chunk_1",
+              "rank": 2,
+              "source_id": "ml_regularization",
+              "text": "Regularization reduces a model's tendency to memorize training examples. L2 regularization adds a penalty based on squared parameter magnitudes and therefore discourages unnecessarily large weights. Dropout randomly masks a fraction of hidden activations during training, so the network cannot rely on one fixed set of features. Both strengths are hyperparameters: excessive L2 or dropout can cause underfitting, so their values should be selected with validation data."
+            },
+            {
+              "chunk_id": "u-fef4cbe1ef5498c2a9b6be98d80a2eb1404b0d54fede72e98e5dfb23_chunk_0",
+              "rank": 3,
+              "source_id": "ml_optimization",
+              "text": "Stochastic gradient descent updates model parameters from small batches rather than the entire training set. A learning rate that is too large can make loss oscillate or diverge, while a very small rate can make progress slow. Momentum keeps a running contribution from earlier gradients, which can smooth noisy updates and accelerate movement along directions that remain consistent. A scheduler may reduce the learning rate later in training when improvement stalls."
+            }
+          ],
+          "latency_ms": 204.48854396818206,
+          "recall_at_3": 1.0,
+          "retrieved_source_count": 3,
+          "retrieved_source_ids": [
+            "ml_evaluation",
+            "ml_regularization",
+            "ml_optimization"
+          ],
+          "returned_any_source": true,
+          "token_usage_unavailable_reason": "retrieval interface does not expose provider usage"
+        },
+        "lightrag_mix": {
+          "actual_token_usage": null,
+          "chunks": [
+            {
+              "chunk_id": "ml_evaluation-chunk-000",
+              "rank": 1,
+              "source_id": "ml_evaluation",
+              "text": "A validation set supports hyperparameter selection, whereas the test set should remain untouched until the final evaluation. Cross-validation repeats training across several folds when data is limited and summarizes variation across the folds. Accuracy can conceal poor performance on an imbalanced classification task. Precision, recall, F1, and a confusion matrix reveal different error patterns; the metric should match the practical cost of false positives and false negatives."
+            },
+            {
+              "chunk_id": "ml_regularization-chunk-000",
+              "rank": 2,
+              "source_id": "ml_regularization",
+              "text": "Regularization reduces a model's tendency to memorize training examples. L2 regularization adds a penalty based on squared parameter magnitudes and therefore discourages unnecessarily large weights. Dropout randomly masks a fraction of hidden activations during training, so the network cannot rely on one fixed set of features. Both strengths are hyperparameters: excessive L2 or dropout can cause underfitting, so their values should be selected with validation data."
+            },
+            {
+              "chunk_id": "ml_optimization-chunk-000",
+              "rank": 3,
+              "source_id": "ml_optimization",
+              "text": "Stochastic gradient descent updates model parameters from small batches rather than the entire training set. A learning rate that is too large can make loss oscillate or diverge, while a very small rate can make progress slow. Momentum keeps a running contribution from earlier gradients, which can smooth noisy updates and accelerate movement along directions that remain consistent. A scheduler may reduce the learning rate later in training when improvement stalls."
+            }
+          ],
+          "latency_ms": 1505.2837880211882,
+          "recall_at_3": 1.0,
+          "retrieved_source_count": 3,
+          "retrieved_source_ids": [
+            "ml_evaluation",
+            "ml_regularization",
+            "ml_optimization"
+          ],
+          "returned_any_source": true,
+          "token_usage_unavailable_reason": "aquery_data interface does not expose provider usage"
+        }
+      },
+      "query": "Which measurements are more informative than accuracy for imbalanced classification?",
+      "question_id": "ml_q03",
+      "required_source_ids": [
+        "ml_evaluation"
+      ]
+    },
+    {
+      "answer": null,
+      "answer_quality_status": "not_evaluated_retrieval_only",
+      "case_type": "cross_document",
+      "citations": [],
+      "domain_id": "machine_learning",
+      "methods": {
+        "existing_hybrid_rrf": {
+          "actual_token_usage": null,
+          "chunks": [
+            {
+              "chunk_id": "u-fef4cbe1ef5498c2a9b6be98d80a2eb1404b0d54fede72e98e5dfb23_chunk_1",
+              "rank": 1,
+              "source_id": "ml_regularization",
+              "text": "Regularization reduces a model's tendency to memorize training examples. L2 regularization adds a penalty based on squared parameter magnitudes and therefore discourages unnecessarily large weights. Dropout randomly masks a fraction of hidden activations during training, so the network cannot rely on one fixed set of features. Both strengths are hyperparameters: excessive L2 or dropout can cause underfitting, so their values should be selected with validation data."
+            },
+            {
+              "chunk_id": "u-fef4cbe1ef5498c2a9b6be98d80a2eb1404b0d54fede72e98e5dfb23_chunk_2",
+              "rank": 2,
+              "source_id": "ml_evaluation",
+              "text": "A validation set supports hyperparameter selection, whereas the test set should remain untouched until the final evaluation. Cross-validation repeats training across several folds when data is limited and summarizes variation across the folds. Accuracy can conceal poor performance on an imbalanced classification task. Precision, recall, F1, and a confusion matrix reveal different error patterns; the metric should match the practical cost of false positives and false negatives."
+            },
+            {
+              "chunk_id": "u-fef4cbe1ef5498c2a9b6be98d80a2eb1404b0d54fede72e98e5dfb23_chunk_0",
+              "rank": 3,
+              "source_id": "ml_optimization",
+              "text": "Stochastic gradient descent updates model parameters from small batches rather than the entire training set. A learning rate that is too large can make loss oscillate or diverge, while a very small rate can make progress slow. Momentum keeps a running contribution from earlier gradients, which can smooth noisy updates and accelerate movement along directions that remain consistent. A scheduler may reduce the learning rate later in training when improvement stalls."
+            }
+          ],
+          "latency_ms": 124.83465200057253,
+          "recall_at_3": 1.0,
+          "retrieved_source_count": 3,
+          "retrieved_source_ids": [
+            "ml_regularization",
+            "ml_evaluation",
+            "ml_optimization"
+          ],
+          "returned_any_source": true,
+          "token_usage_unavailable_reason": "retrieval interface does not expose provider usage"
+        },
+        "lightrag_mix": {
+          "actual_token_usage": null,
+          "chunks": [
+            {
+              "chunk_id": "ml_regularization-chunk-000",
+              "rank": 1,
+              "source_id": "ml_regularization",
+              "text": "Regularization reduces a model's tendency to memorize training examples. L2 regularization adds a penalty based on squared parameter magnitudes and therefore discourages unnecessarily large weights. Dropout randomly masks a fraction of hidden activations during training, so the network cannot rely on one fixed set of features. Both strengths are hyperparameters: excessive L2 or dropout can cause underfitting, so their values should be selected with validation data."
+            },
+            {
+              "chunk_id": "ml_evaluation-chunk-000",
+              "rank": 2,
+              "source_id": "ml_evaluation",
+              "text": "A validation set supports hyperparameter selection, whereas the test set should remain untouched until the final evaluation. Cross-validation repeats training across several folds when data is limited and summarizes variation across the folds. Accuracy can conceal poor performance on an imbalanced classification task. Precision, recall, F1, and a confusion matrix reveal different error patterns; the metric should match the practical cost of false positives and false negatives."
+            },
+            {
+              "chunk_id": "ml_optimization-chunk-000",
+              "rank": 3,
+              "source_id": "ml_optimization",
+              "text": "Stochastic gradient descent updates model parameters from small batches rather than the entire training set. A learning rate that is too large can make loss oscillate or diverge, while a very small rate can make progress slow. Momentum keeps a running contribution from earlier gradients, which can smooth noisy updates and accelerate movement along directions that remain consistent. A scheduler may reduce the learning rate later in training when improvement stalls."
+            }
+          ],
+          "latency_ms": 3185.1693830103613,
+          "recall_at_3": 1.0,
+          "retrieved_source_count": 3,
+          "retrieved_source_ids": [
+            "ml_regularization",
+            "ml_evaluation",
+            "ml_optimization"
+          ],
+          "returned_any_source": true,
+          "token_usage_unavailable_reason": "aquery_data interface does not expose provider usage"
+        }
+      },
+      "query": "How should dropout strength be selected without leaking information from the final test set?",
+      "question_id": "ml_q04",
+      "required_source_ids": [
+        "ml_regularization",
+        "ml_evaluation"
+      ]
+    },
+    {
+      "answer": null,
+      "answer_quality_status": "not_evaluated_retrieval_only",
+      "case_type": "cross_document",
+      "citations": [],
+      "domain_id": "machine_learning",
+      "methods": {
+        "existing_hybrid_rrf": {
+          "actual_token_usage": null,
+          "chunks": [
+            {
+              "chunk_id": "u-fef4cbe1ef5498c2a9b6be98d80a2eb1404b0d54fede72e98e5dfb23_chunk_1",
+              "rank": 1,
+              "source_id": "ml_regularization",
+              "text": "Regularization reduces a model's tendency to memorize training examples. L2 regularization adds a penalty based on squared parameter magnitudes and therefore discourages unnecessarily large weights. Dropout randomly masks a fraction of hidden activations during training, so the network cannot rely on one fixed set of features. Both strengths are hyperparameters: excessive L2 or dropout can cause underfitting, so their values should be selected with validation data."
+            },
+            {
+              "chunk_id": "u-fef4cbe1ef5498c2a9b6be98d80a2eb1404b0d54fede72e98e5dfb23_chunk_2",
+              "rank": 2,
+              "source_id": "ml_evaluation",
+              "text": "A validation set supports hyperparameter selection, whereas the test set should remain untouched until the final evaluation. Cross-validation repeats training across several folds when data is limited and summarizes variation across the folds. Accuracy can conceal poor performance on an imbalanced classification task. Precision, recall, F1, and a confusion matrix reveal different error patterns; the metric should match the practical cost of false positives and false negatives."
+            },
+            {
+              "chunk_id": "u-fef4cbe1ef5498c2a9b6be98d80a2eb1404b0d54fede72e98e5dfb23_chunk_0",
+              "rank": 3,
+              "source_id": "ml_optimization",
+              "text": "Stochastic gradient descent updates model parameters from small batches rather than the entire training set. A learning rate that is too large can make loss oscillate or diverge, while a very small rate can make progress slow. Momentum keeps a running contribution from earlier gradients, which can smooth noisy updates and accelerate movement along directions that remain consistent. A scheduler may reduce the learning rate later in training when improvement stalls."
+            }
+          ],
+          "latency_ms": 130.07459096843377,
+          "recall_at_3": 1.0,
+          "retrieved_source_count": 3,
+          "retrieved_source_ids": [
+            "ml_regularization",
+            "ml_evaluation",
+            "ml_optimization"
+          ],
+          "returned_any_source": true,
+          "token_usage_unavailable_reason": "retrieval interface does not expose provider usage"
+        },
+        "lightrag_mix": {
+          "actual_token_usage": null,
+          "chunks": [
+            {
+              "chunk_id": "ml_regularization-chunk-000",
+              "rank": 1,
+              "source_id": "ml_regularization",
+              "text": "Regularization reduces a model's tendency to memorize training examples. L2 regularization adds a penalty based on squared parameter magnitudes and therefore discourages unnecessarily large weights. Dropout randomly masks a fraction of hidden activations during training, so the network cannot rely on one fixed set of features. Both strengths are hyperparameters: excessive L2 or dropout can cause underfitting, so their values should be selected with validation data."
+            },
+            {
+              "chunk_id": "ml_evaluation-chunk-000",
+              "rank": 2,
+              "source_id": "ml_evaluation",
+              "text": "A validation set supports hyperparameter selection, whereas the test set should remain untouched until the final evaluation. Cross-validation repeats training across several folds when data is limited and summarizes variation across the folds. Accuracy can conceal poor performance on an imbalanced classification task. Precision, recall, F1, and a confusion matrix reveal different error patterns; the metric should match the practical cost of false positives and false negatives."
+            },
+            {
+              "chunk_id": "ml_optimization-chunk-000",
+              "rank": 3,
+              "source_id": "ml_optimization",
+              "text": "Stochastic gradient descent updates model parameters from small batches rather than the entire training set. A learning rate that is too large can make loss oscillate or diverge, while a very small rate can make progress slow. Momentum keeps a running contribution from earlier gradients, which can smooth noisy updates and accelerate movement along directions that remain consistent. A scheduler may reduce the learning rate later in training when improvement stalls."
+            }
+          ],
+          "latency_ms": 2609.159928979352,
+          "recall_at_3": 1.0,
+          "retrieved_source_count": 3,
+          "retrieved_source_ids": [
+            "ml_regularization",
+            "ml_evaluation",
+            "ml_optimization"
+          ],
+          "returned_any_source": true,
+          "token_usage_unavailable_reason": "aquery_data interface does not expose provider usage"
+        }
+      },
+      "query": "Training loss oscillates and the chosen model must be assessed reliably on limited data. What two practices address these issues?",
+      "question_id": "ml_q05",
+      "required_source_ids": [
+        "ml_optimization",
+        "ml_evaluation"
+      ]
+    },
+    {
+      "answer": null,
+      "answer_quality_status": "not_evaluated_retrieval_only",
+      "case_type": "unanswerable",
+      "citations": [],
+      "domain_id": "machine_learning",
+      "methods": {
+        "existing_hybrid_rrf": {
+          "actual_token_usage": null,
+          "chunks": [
+            {
+              "chunk_id": "u-fef4cbe1ef5498c2a9b6be98d80a2eb1404b0d54fede72e98e5dfb23_chunk_2",
+              "rank": 1,
+              "source_id": "ml_evaluation",
+              "text": "A validation set supports hyperparameter selection, whereas the test set should remain untouched until the final evaluation. Cross-validation repeats training across several folds when data is limited and summarizes variation across the folds. Accuracy can conceal poor performance on an imbalanced classification task. Precision, recall, F1, and a confusion matrix reveal different error patterns; the metric should match the practical cost of false positives and false negatives."
+            },
+            {
+              "chunk_id": "u-fef4cbe1ef5498c2a9b6be98d80a2eb1404b0d54fede72e98e5dfb23_chunk_0",
+              "rank": 2,
+              "source_id": "ml_optimization",
+              "text": "Stochastic gradient descent updates model parameters from small batches rather than the entire training set. A learning rate that is too large can make loss oscillate or diverge, while a very small rate can make progress slow. Momentum keeps a running contribution from earlier gradients, which can smooth noisy updates and accelerate movement along directions that remain consistent. A scheduler may reduce the learning rate later in training when improvement stalls."
+            },
+            {
+              "chunk_id": "u-fef4cbe1ef5498c2a9b6be98d80a2eb1404b0d54fede72e98e5dfb23_chunk_1",
+              "rank": 3,
+              "source_id": "ml_regularization",
+              "text": "Regularization reduces a model's tendency to memorize training examples. L2 regularization adds a penalty based on squared parameter magnitudes and therefore discourages unnecessarily large weights. Dropout randomly masks a fraction of hidden activations during training, so the network cannot rely on one fixed set of features. Both strengths are hyperparameters: excessive L2 or dropout can cause underfitting, so their values should be selected with validation data."
+            }
+          ],
+          "latency_ms": 119.71091403393075,
+          "recall_at_3": null,
+          "retrieved_source_count": 3,
+          "retrieved_source_ids": [
+            "ml_evaluation",
+            "ml_optimization",
+            "ml_regularization"
+          ],
+          "returned_any_source": true,
+          "token_usage_unavailable_reason": "retrieval interface does not expose provider usage"
+        },
+        "lightrag_mix": {
+          "actual_token_usage": null,
+          "chunks": [
+            {
+              "chunk_id": "ml_evaluation-chunk-000",
+              "rank": 1,
+              "source_id": "ml_evaluation",
+              "text": "A validation set supports hyperparameter selection, whereas the test set should remain untouched until the final evaluation. Cross-validation repeats training across several folds when data is limited and summarizes variation across the folds. Accuracy can conceal poor performance on an imbalanced classification task. Precision, recall, F1, and a confusion matrix reveal different error patterns; the metric should match the practical cost of false positives and false negatives."
+            },
+            {
+              "chunk_id": "ml_optimization-chunk-000",
+              "rank": 2,
+              "source_id": "ml_optimization",
+              "text": "Stochastic gradient descent updates model parameters from small batches rather than the entire training set. A learning rate that is too large can make loss oscillate or diverge, while a very small rate can make progress slow. Momentum keeps a running contribution from earlier gradients, which can smooth noisy updates and accelerate movement along directions that remain consistent. A scheduler may reduce the learning rate later in training when improvement stalls."
+            },
+            {
+              "chunk_id": "ml_regularization-chunk-000",
+              "rank": 3,
+              "source_id": "ml_regularization",
+              "text": "Regularization reduces a model's tendency to memorize training examples. L2 regularization adds a penalty based on squared parameter magnitudes and therefore discourages unnecessarily large weights. Dropout randomly masks a fraction of hidden activations during training, so the network cannot rely on one fixed set of features. Both strengths are hyperparameters: excessive L2 or dropout can cause underfitting, so their values should be selected with validation data."
+            }
+          ],
+          "latency_ms": 2522.729186050128,
+          "recall_at_3": null,
+          "retrieved_source_count": 3,
+          "retrieved_source_ids": [
+            "ml_evaluation",
+            "ml_optimization",
+            "ml_regularization"
+          ],
+          "returned_any_source": true,
+          "token_usage_unavailable_reason": "aquery_data interface does not expose provider usage"
+        }
+      },
+      "query": "Which quantum error-correction code is best for a superconducting quantum computer?",
+      "question_id": "ml_q06",
+      "required_source_ids": []
+    },
+    {
+      "answer": null,
+      "answer_quality_status": "not_evaluated_retrieval_only",
+      "case_type": "single_document",
+      "citations": [],
+      "domain_id": "educational_biology",
+      "methods": {
+        "existing_hybrid_rrf": {
+          "actual_token_usage": null,
+          "chunks": [
+            {
+              "chunk_id": "u-4eb4cd7d52fec89f20715671063e3a4f18797bb9bf8dedf37b7edafb_chunk_0",
+              "rank": 1,
+              "source_id": "bio_cells",
+              "text": "The cell membrane is a selectively permeable boundary made mainly from a phospholipid bilayer with embedded proteins. It regulates which substances enter or leave the cell. Mitochondria use energy-rich molecules in cellular respiration to produce much of the cell's ATP. ATP can then power processes such as active transport across the membrane. Red blood cells are a useful exception in humans because mature red blood cells do not contain mitochondria."
+            },
+            {
+              "chunk_id": "u-4eb4cd7d52fec89f20715671063e3a4f18797bb9bf8dedf37b7edafb_chunk_1",
+              "rank": 2,
+              "source_id": "bio_immunity",
+              "text": "Innate immunity responds quickly through barriers, inflammation, and cells that recognize broad signs of infection. Adaptive immunity develops more slowly on first exposure and uses lymphocytes that recognize specific targets. Some activated lymphocytes become memory cells. Vaccination presents a safe form or component of a target so adaptive memory can form without the full disease, allowing a faster and stronger response during a later exposure."
+            },
+            {
+              "chunk_id": "u-4eb4cd7d52fec89f20715671063e3a4f18797bb9bf8dedf37b7edafb_chunk_2",
+              "rank": 3,
+              "source_id": "bio_homeostasis",
+              "text": "Homeostasis keeps internal conditions within workable ranges by feedback. After a meal raises blood glucose, pancreatic beta cells release insulin, promoting glucose uptake and storage. When blood glucose falls, pancreatic alpha cells release glucagon, promoting the release of stored glucose. Temperature control also uses feedback: sweating and wider skin blood vessels increase heat loss, while shivering generates heat when the body is cold. Fever temporarily shifts the regulated temperature target during an immune response."
+            }
+          ],
+          "latency_ms": 134.91416699253023,
+          "recall_at_3": 1.0,
+          "retrieved_source_count": 3,
+          "retrieved_source_ids": [
+            "bio_cells",
+            "bio_immunity",
+            "bio_homeostasis"
+          ],
+          "returned_any_source": true,
+          "token_usage_unavailable_reason": "retrieval interface does not expose provider usage"
+        },
+        "lightrag_mix": {
+          "actual_token_usage": null,
+          "chunks": [
+            {
+              "chunk_id": "bio_cells-chunk-000",
+              "rank": 1,
+              "source_id": "bio_cells",
+              "text": "The cell membrane is a selectively permeable boundary made mainly from a phospholipid bilayer with embedded proteins. It regulates which substances enter or leave the cell. Mitochondria use energy-rich molecules in cellular respiration to produce much of the cell's ATP. ATP can then power processes such as active transport across the membrane. Red blood cells are a useful exception in humans because mature red blood cells do not contain mitochondria."
+            },
+            {
+              "chunk_id": "bio_immunity-chunk-000",
+              "rank": 2,
+              "source_id": "bio_immunity",
+              "text": "Innate immunity responds quickly through barriers, inflammation, and cells that recognize broad signs of infection. Adaptive immunity develops more slowly on first exposure and uses lymphocytes that recognize specific targets. Some activated lymphocytes become memory cells. Vaccination presents a safe form or component of a target so adaptive memory can form without the full disease, allowing a faster and stronger response during a later exposure."
+            },
+            {
+              "chunk_id": "bio_homeostasis-chunk-000",
+              "rank": 3,
+              "source_id": "bio_homeostasis",
+              "text": "Homeostasis keeps internal conditions within workable ranges by feedback. After a meal raises blood glucose, pancreatic beta cells release insulin, promoting glucose uptake and storage. When blood glucose falls, pancreatic alpha cells release glucagon, promoting the release of stored glucose. Temperature control also uses feedback: sweating and wider skin blood vessels increase heat loss, while shivering generates heat when the body is cold. Fever temporarily shifts the regulated temperature target during an immune response."
+            }
+          ],
+          "latency_ms": 2964.7408290184103,
+          "recall_at_3": 1.0,
+          "retrieved_source_count": 3,
+          "retrieved_source_ids": [
+            "bio_cells",
+            "bio_immunity",
+            "bio_homeostasis"
+          ],
+          "returned_any_source": true,
+          "token_usage_unavailable_reason": "aquery_data interface does not expose provider usage"
+        }
+      },
+      "query": "How are mitochondria connected to active transport across a cell membrane?",
+      "question_id": "bio_q01",
+      "required_source_ids": [
+        "bio_cells"
+      ]
+    },
+    {
+      "answer": null,
+      "answer_quality_status": "not_evaluated_retrieval_only",
+      "case_type": "single_document",
+      "citations": [],
+      "domain_id": "educational_biology",
+      "methods": {
+        "existing_hybrid_rrf": {
+          "actual_token_usage": null,
+          "chunks": [
+            {
+              "chunk_id": "u-4eb4cd7d52fec89f20715671063e3a4f18797bb9bf8dedf37b7edafb_chunk_1",
+              "rank": 1,
+              "source_id": "bio_immunity",
+              "text": "Innate immunity responds quickly through barriers, inflammation, and cells that recognize broad signs of infection. Adaptive immunity develops more slowly on first exposure and uses lymphocytes that recognize specific targets. Some activated lymphocytes become memory cells. Vaccination presents a safe form or component of a target so adaptive memory can form without the full disease, allowing a faster and stronger response during a later exposure."
+            },
+            {
+              "chunk_id": "u-4eb4cd7d52fec89f20715671063e3a4f18797bb9bf8dedf37b7edafb_chunk_2",
+              "rank": 2,
+              "source_id": "bio_homeostasis",
+              "text": "Homeostasis keeps internal conditions within workable ranges by feedback. After a meal raises blood glucose, pancreatic beta cells release insulin, promoting glucose uptake and storage. When blood glucose falls, pancreatic alpha cells release glucagon, promoting the release of stored glucose. Temperature control also uses feedback: sweating and wider skin blood vessels increase heat loss, while shivering generates heat when the body is cold. Fever temporarily shifts the regulated temperature target during an immune response."
+            },
+            {
+              "chunk_id": "u-4eb4cd7d52fec89f20715671063e3a4f18797bb9bf8dedf37b7edafb_chunk_0",
+              "rank": 3,
+              "source_id": "bio_cells",
+              "text": "The cell membrane is a selectively permeable boundary made mainly from a phospholipid bilayer with embedded proteins. It regulates which substances enter or leave the cell. Mitochondria use energy-rich molecules in cellular respiration to produce much of the cell's ATP. ATP can then power processes such as active transport across the membrane. Red blood cells are a useful exception in humans because mature red blood cells do not contain mitochondria."
+            }
+          ],
+          "latency_ms": 123.844841029495,
+          "recall_at_3": 1.0,
+          "retrieved_source_count": 3,
+          "retrieved_source_ids": [
+            "bio_immunity",
+            "bio_homeostasis",
+            "bio_cells"
+          ],
+          "returned_any_source": true,
+          "token_usage_unavailable_reason": "retrieval interface does not expose provider usage"
+        },
+        "lightrag_mix": {
+          "actual_token_usage": null,
+          "chunks": [
+            {
+              "chunk_id": "bio_immunity-chunk-000",
+              "rank": 1,
+              "source_id": "bio_immunity",
+              "text": "Innate immunity responds quickly through barriers, inflammation, and cells that recognize broad signs of infection. Adaptive immunity develops more slowly on first exposure and uses lymphocytes that recognize specific targets. Some activated lymphocytes become memory cells. Vaccination presents a safe form or component of a target so adaptive memory can form without the full disease, allowing a faster and stronger response during a later exposure."
+            },
+            {
+              "chunk_id": "bio_homeostasis-chunk-000",
+              "rank": 2,
+              "source_id": "bio_homeostasis",
+              "text": "Homeostasis keeps internal conditions within workable ranges by feedback. After a meal raises blood glucose, pancreatic beta cells release insulin, promoting glucose uptake and storage. When blood glucose falls, pancreatic alpha cells release glucagon, promoting the release of stored glucose. Temperature control also uses feedback: sweating and wider skin blood vessels increase heat loss, while shivering generates heat when the body is cold. Fever temporarily shifts the regulated temperature target during an immune response."
+            },
+            {
+              "chunk_id": "bio_cells-chunk-000",
+              "rank": 3,
+              "source_id": "bio_cells",
+              "text": "The cell membrane is a selectively permeable boundary made mainly from a phospholipid bilayer with embedded proteins. It regulates which substances enter or leave the cell. Mitochondria use energy-rich molecules in cellular respiration to produce much of the cell's ATP. ATP can then power processes such as active transport across the membrane. Red blood cells are a useful exception in humans because mature red blood cells do not contain mitochondria."
+            }
+          ],
+          "latency_ms": 3973.9868140313774,
+          "recall_at_3": 1.0,
+          "retrieved_source_count": 3,
+          "retrieved_source_ids": [
+            "bio_immunity",
+            "bio_homeostasis",
+            "bio_cells"
+          ],
+          "returned_any_source": true,
+          "token_usage_unavailable_reason": "aquery_data interface does not expose provider usage"
+        }
+      },
+      "query": "Why can vaccination make a later immune response faster?",
+      "question_id": "bio_q02",
+      "required_source_ids": [
+        "bio_immunity"
+      ]
+    },
+    {
+      "answer": null,
+      "answer_quality_status": "not_evaluated_retrieval_only",
+      "case_type": "single_document",
+      "citations": [],
+      "domain_id": "educational_biology",
+      "methods": {
+        "existing_hybrid_rrf": {
+          "actual_token_usage": null,
+          "chunks": [
+            {
+              "chunk_id": "u-4eb4cd7d52fec89f20715671063e3a4f18797bb9bf8dedf37b7edafb_chunk_2",
+              "rank": 1,
+              "source_id": "bio_homeostasis",
+              "text": "Homeostasis keeps internal conditions within workable ranges by feedback. After a meal raises blood glucose, pancreatic beta cells release insulin, promoting glucose uptake and storage. When blood glucose falls, pancreatic alpha cells release glucagon, promoting the release of stored glucose. Temperature control also uses feedback: sweating and wider skin blood vessels increase heat loss, while shivering generates heat when the body is cold. Fever temporarily shifts the regulated temperature target during an immune response."
+            },
+            {
+              "chunk_id": "u-4eb4cd7d52fec89f20715671063e3a4f18797bb9bf8dedf37b7edafb_chunk_0",
+              "rank": 2,
+              "source_id": "bio_cells",
+              "text": "The cell membrane is a selectively permeable boundary made mainly from a phospholipid bilayer with embedded proteins. It regulates which substances enter or leave the cell. Mitochondria use energy-rich molecules in cellular respiration to produce much of the cell's ATP. ATP can then power processes such as active transport across the membrane. Red blood cells are a useful exception in humans because mature red blood cells do not contain mitochondria."
+            },
+            {
+              "chunk_id": "u-4eb4cd7d52fec89f20715671063e3a4f18797bb9bf8dedf37b7edafb_chunk_1",
+              "rank": 3,
+              "source_id": "bio_immunity",
+              "text": "Innate immunity responds quickly through barriers, inflammation, and cells that recognize broad signs of infection. Adaptive immunity develops more slowly on first exposure and uses lymphocytes that recognize specific targets. Some activated lymphocytes become memory cells. Vaccination presents a safe form or component of a target so adaptive memory can form without the full disease, allowing a faster and stronger response during a later exposure."
+            }
+          ],
+          "latency_ms": 123.07385000167415,
+          "recall_at_3": 1.0,
+          "retrieved_source_count": 3,
+          "retrieved_source_ids": [
+            "bio_homeostasis",
+            "bio_cells",
+            "bio_immunity"
+          ],
+          "returned_any_source": true,
+          "token_usage_unavailable_reason": "retrieval interface does not expose provider usage"
+        },
+        "lightrag_mix": {
+          "actual_token_usage": null,
+          "chunks": [
+            {
+              "chunk_id": "bio_homeostasis-chunk-000",
+              "rank": 1,
+              "source_id": "bio_homeostasis",
+              "text": "Homeostasis keeps internal conditions within workable ranges by feedback. After a meal raises blood glucose, pancreatic beta cells release insulin, promoting glucose uptake and storage. When blood glucose falls, pancreatic alpha cells release glucagon, promoting the release of stored glucose. Temperature control also uses feedback: sweating and wider skin blood vessels increase heat loss, while shivering generates heat when the body is cold. Fever temporarily shifts the regulated temperature target during an immune response."
+            },
+            {
+              "chunk_id": "bio_cells-chunk-000",
+              "rank": 2,
+              "source_id": "bio_cells",
+              "text": "The cell membrane is a selectively permeable boundary made mainly from a phospholipid bilayer with embedded proteins. It regulates which substances enter or leave the cell. Mitochondria use energy-rich molecules in cellular respiration to produce much of the cell's ATP. ATP can then power processes such as active transport across the membrane. Red blood cells are a useful exception in humans because mature red blood cells do not contain mitochondria."
+            },
+            {
+              "chunk_id": "bio_immunity-chunk-000",
+              "rank": 3,
+              "source_id": "bio_immunity",
+              "text": "Innate immunity responds quickly through barriers, inflammation, and cells that recognize broad signs of infection. Adaptive immunity develops more slowly on first exposure and uses lymphocytes that recognize specific targets. Some activated lymphocytes become memory cells. Vaccination presents a safe form or component of a target so adaptive memory can form without the full disease, allowing a faster and stronger response during a later exposure."
+            }
+          ],
+          "latency_ms": 4090.863177960273,
+          "recall_at_3": 1.0,
+          "retrieved_source_count": 3,
+          "retrieved_source_ids": [
+            "bio_homeostasis",
+            "bio_cells",
+            "bio_immunity"
+          ],
+          "returned_any_source": true,
+          "token_usage_unavailable_reason": "aquery_data interface does not expose provider usage"
+        }
+      },
+      "query": "Which hormones respond when blood glucose rises after a meal or later falls?",
+      "question_id": "bio_q03",
+      "required_source_ids": [
+        "bio_homeostasis"
+      ]
+    },
+    {
+      "answer": null,
+      "answer_quality_status": "not_evaluated_retrieval_only",
+      "case_type": "cross_document",
+      "citations": [],
+      "domain_id": "educational_biology",
+      "methods": {
+        "existing_hybrid_rrf": {
+          "actual_token_usage": null,
+          "chunks": [
+            {
+              "chunk_id": "u-4eb4cd7d52fec89f20715671063e3a4f18797bb9bf8dedf37b7edafb_chunk_2",
+              "rank": 1,
+              "source_id": "bio_homeostasis",
+              "text": "Homeostasis keeps internal conditions within workable ranges by feedback. After a meal raises blood glucose, pancreatic beta cells release insulin, promoting glucose uptake and storage. When blood glucose falls, pancreatic alpha cells release glucagon, promoting the release of stored glucose. Temperature control also uses feedback: sweating and wider skin blood vessels increase heat loss, while shivering generates heat when the body is cold. Fever temporarily shifts the regulated temperature target during an immune response."
+            },
+            {
+              "chunk_id": "u-4eb4cd7d52fec89f20715671063e3a4f18797bb9bf8dedf37b7edafb_chunk_1",
+              "rank": 2,
+              "source_id": "bio_immunity",
+              "text": "Innate immunity responds quickly through barriers, inflammation, and cells that recognize broad signs of infection. Adaptive immunity develops more slowly on first exposure and uses lymphocytes that recognize specific targets. Some activated lymphocytes become memory cells. Vaccination presents a safe form or component of a target so adaptive memory can form without the full disease, allowing a faster and stronger response during a later exposure."
+            },
+            {
+              "chunk_id": "u-4eb4cd7d52fec89f20715671063e3a4f18797bb9bf8dedf37b7edafb_chunk_0",
+              "rank": 3,
+              "source_id": "bio_cells",
+              "text": "The cell membrane is a selectively permeable boundary made mainly from a phospholipid bilayer with embedded proteins. It regulates which substances enter or leave the cell. Mitochondria use energy-rich molecules in cellular respiration to produce much of the cell's ATP. ATP can then power processes such as active transport across the membrane. Red blood cells are a useful exception in humans because mature red blood cells do not contain mitochondria."
+            }
+          ],
+          "latency_ms": 124.06705197645351,
+          "recall_at_3": 1.0,
+          "retrieved_source_count": 3,
+          "retrieved_source_ids": [
+            "bio_homeostasis",
+            "bio_immunity",
+            "bio_cells"
+          ],
+          "returned_any_source": true,
+          "token_usage_unavailable_reason": "retrieval interface does not expose provider usage"
+        },
+        "lightrag_mix": {
+          "actual_token_usage": null,
+          "chunks": [
+            {
+              "chunk_id": "bio_homeostasis-chunk-000",
+              "rank": 1,
+              "source_id": "bio_homeostasis",
+              "text": "Homeostasis keeps internal conditions within workable ranges by feedback. After a meal raises blood glucose, pancreatic beta cells release insulin, promoting glucose uptake and storage. When blood glucose falls, pancreatic alpha cells release glucagon, promoting the release of stored glucose. Temperature control also uses feedback: sweating and wider skin blood vessels increase heat loss, while shivering generates heat when the body is cold. Fever temporarily shifts the regulated temperature target during an immune response."
+            },
+            {
+              "chunk_id": "bio_immunity-chunk-000",
+              "rank": 2,
+              "source_id": "bio_immunity",
+              "text": "Innate immunity responds quickly through barriers, inflammation, and cells that recognize broad signs of infection. Adaptive immunity develops more slowly on first exposure and uses lymphocytes that recognize specific targets. Some activated lymphocytes become memory cells. Vaccination presents a safe form or component of a target so adaptive memory can form without the full disease, allowing a faster and stronger response during a later exposure."
+            },
+            {
+              "chunk_id": "bio_cells-chunk-000",
+              "rank": 3,
+              "source_id": "bio_cells",
+              "text": "The cell membrane is a selectively permeable boundary made mainly from a phospholipid bilayer with embedded proteins. It regulates which substances enter or leave the cell. Mitochondria use energy-rich molecules in cellular respiration to produce much of the cell's ATP. ATP can then power processes such as active transport across the membrane. Red blood cells are a useful exception in humans because mature red blood cells do not contain mitochondria."
+            }
+          ],
+          "latency_ms": 4133.781577984337,
+          "recall_at_3": 1.0,
+          "retrieved_source_count": 3,
+          "retrieved_source_ids": [
+            "bio_homeostasis",
+            "bio_immunity",
+            "bio_cells"
+          ],
+          "returned_any_source": true,
+          "token_usage_unavailable_reason": "aquery_data interface does not expose provider usage"
+        }
+      },
+      "query": "How can an immune response change temperature regulation, and what responses help the body lose or generate heat?",
+      "question_id": "bio_q04",
+      "required_source_ids": [
+        "bio_immunity",
+        "bio_homeostasis"
+      ]
+    },
+    {
+      "answer": null,
+      "answer_quality_status": "not_evaluated_retrieval_only",
+      "case_type": "cross_document",
+      "citations": [],
+      "domain_id": "educational_biology",
+      "methods": {
+        "existing_hybrid_rrf": {
+          "actual_token_usage": null,
+          "chunks": [
+            {
+              "chunk_id": "u-4eb4cd7d52fec89f20715671063e3a4f18797bb9bf8dedf37b7edafb_chunk_0",
+              "rank": 1,
+              "source_id": "bio_cells",
+              "text": "The cell membrane is a selectively permeable boundary made mainly from a phospholipid bilayer with embedded proteins. It regulates which substances enter or leave the cell. Mitochondria use energy-rich molecules in cellular respiration to produce much of the cell's ATP. ATP can then power processes such as active transport across the membrane. Red blood cells are a useful exception in humans because mature red blood cells do not contain mitochondria."
+            },
+            {
+              "chunk_id": "u-4eb4cd7d52fec89f20715671063e3a4f18797bb9bf8dedf37b7edafb_chunk_2",
+              "rank": 2,
+              "source_id": "bio_homeostasis",
+              "text": "Homeostasis keeps internal conditions within workable ranges by feedback. After a meal raises blood glucose, pancreatic beta cells release insulin, promoting glucose uptake and storage. When blood glucose falls, pancreatic alpha cells release glucagon, promoting the release of stored glucose. Temperature control also uses feedback: sweating and wider skin blood vessels increase heat loss, while shivering generates heat when the body is cold. Fever temporarily shifts the regulated temperature target during an immune response."
+            },
+            {
+              "chunk_id": "u-4eb4cd7d52fec89f20715671063e3a4f18797bb9bf8dedf37b7edafb_chunk_1",
+              "rank": 3,
+              "source_id": "bio_immunity",
+              "text": "Innate immunity responds quickly through barriers, inflammation, and cells that recognize broad signs of infection. Adaptive immunity develops more slowly on first exposure and uses lymphocytes that recognize specific targets. Some activated lymphocytes become memory cells. Vaccination presents a safe form or component of a target so adaptive memory can form without the full disease, allowing a faster and stronger response during a later exposure."
+            }
+          ],
+          "latency_ms": 127.3440609802492,
+          "recall_at_3": 1.0,
+          "retrieved_source_count": 3,
+          "retrieved_source_ids": [
+            "bio_cells",
+            "bio_homeostasis",
+            "bio_immunity"
+          ],
+          "returned_any_source": true,
+          "token_usage_unavailable_reason": "retrieval interface does not expose provider usage"
+        },
+        "lightrag_mix": {
+          "actual_token_usage": null,
+          "chunks": [
+            {
+              "chunk_id": "bio_cells-chunk-000",
+              "rank": 1,
+              "source_id": "bio_cells",
+              "text": "The cell membrane is a selectively permeable boundary made mainly from a phospholipid bilayer with embedded proteins. It regulates which substances enter or leave the cell. Mitochondria use energy-rich molecules in cellular respiration to produce much of the cell's ATP. ATP can then power processes such as active transport across the membrane. Red blood cells are a useful exception in humans because mature red blood cells do not contain mitochondria."
+            },
+            {
+              "chunk_id": "bio_homeostasis-chunk-000",
+              "rank": 2,
+              "source_id": "bio_homeostasis",
+              "text": "Homeostasis keeps internal conditions within workable ranges by feedback. After a meal raises blood glucose, pancreatic beta cells release insulin, promoting glucose uptake and storage. When blood glucose falls, pancreatic alpha cells release glucagon, promoting the release of stored glucose. Temperature control also uses feedback: sweating and wider skin blood vessels increase heat loss, while shivering generates heat when the body is cold. Fever temporarily shifts the regulated temperature target during an immune response."
+            },
+            {
+              "chunk_id": "bio_immunity-chunk-000",
+              "rank": 3,
+              "source_id": "bio_immunity",
+              "text": "Innate immunity responds quickly through barriers, inflammation, and cells that recognize broad signs of infection. Adaptive immunity develops more slowly on first exposure and uses lymphocytes that recognize specific targets. Some activated lymphocytes become memory cells. Vaccination presents a safe form or component of a target so adaptive memory can form without the full disease, allowing a faster and stronger response during a later exposure."
+            }
+          ],
+          "latency_ms": 6930.97361701075,
+          "recall_at_3": 1.0,
+          "retrieved_source_count": 3,
+          "retrieved_source_ids": [
+            "bio_cells",
+            "bio_homeostasis",
+            "bio_immunity"
+          ],
+          "returned_any_source": true,
+          "token_usage_unavailable_reason": "aquery_data interface does not expose provider usage"
+        }
+      },
+      "query": "After a meal, how are glucose regulation and cellular ATP production connected?",
+      "question_id": "bio_q05",
+      "required_source_ids": [
+        "bio_homeostasis",
+        "bio_cells"
+      ]
+    },
+    {
+      "answer": null,
+      "answer_quality_status": "not_evaluated_retrieval_only",
+      "case_type": "unanswerable",
+      "citations": [],
+      "domain_id": "educational_biology",
+      "methods": {
+        "existing_hybrid_rrf": {
+          "actual_token_usage": null,
+          "chunks": [
+            {
+              "chunk_id": "u-4eb4cd7d52fec89f20715671063e3a4f18797bb9bf8dedf37b7edafb_chunk_0",
+              "rank": 1,
+              "source_id": "bio_cells",
+              "text": "The cell membrane is a selectively permeable boundary made mainly from a phospholipid bilayer with embedded proteins. It regulates which substances enter or leave the cell. Mitochondria use energy-rich molecules in cellular respiration to produce much of the cell's ATP. ATP can then power processes such as active transport across the membrane. Red blood cells are a useful exception in humans because mature red blood cells do not contain mitochondria."
+            },
+            {
+              "chunk_id": "u-4eb4cd7d52fec89f20715671063e3a4f18797bb9bf8dedf37b7edafb_chunk_2",
+              "rank": 2,
+              "source_id": "bio_homeostasis",
+              "text": "Homeostasis keeps internal conditions within workable ranges by feedback. After a meal raises blood glucose, pancreatic beta cells release insulin, promoting glucose uptake and storage. When blood glucose falls, pancreatic alpha cells release glucagon, promoting the release of stored glucose. Temperature control also uses feedback: sweating and wider skin blood vessels increase heat loss, while shivering generates heat when the body is cold. Fever temporarily shifts the regulated temperature target during an immune response."
+            },
+            {
+              "chunk_id": "u-4eb4cd7d52fec89f20715671063e3a4f18797bb9bf8dedf37b7edafb_chunk_1",
+              "rank": 3,
+              "source_id": "bio_immunity",
+              "text": "Innate immunity responds quickly through barriers, inflammation, and cells that recognize broad signs of infection. Adaptive immunity develops more slowly on first exposure and uses lymphocytes that recognize specific targets. Some activated lymphocytes become memory cells. Vaccination presents a safe form or component of a target so adaptive memory can form without the full disease, allowing a faster and stronger response during a later exposure."
+            }
+          ],
+          "latency_ms": 210.63985500950366,
+          "recall_at_3": null,
+          "retrieved_source_count": 3,
+          "retrieved_source_ids": [
+            "bio_cells",
+            "bio_homeostasis",
+            "bio_immunity"
+          ],
+          "returned_any_source": true,
+          "token_usage_unavailable_reason": "retrieval interface does not expose provider usage"
+        },
+        "lightrag_mix": {
+          "actual_token_usage": null,
+          "chunks": [
+            {
+              "chunk_id": "bio_cells-chunk-000",
+              "rank": 1,
+              "source_id": "bio_cells",
+              "text": "The cell membrane is a selectively permeable boundary made mainly from a phospholipid bilayer with embedded proteins. It regulates which substances enter or leave the cell. Mitochondria use energy-rich molecules in cellular respiration to produce much of the cell's ATP. ATP can then power processes such as active transport across the membrane. Red blood cells are a useful exception in humans because mature red blood cells do not contain mitochondria."
+            },
+            {
+              "chunk_id": "bio_homeostasis-chunk-000",
+              "rank": 2,
+              "source_id": "bio_homeostasis",
+              "text": "Homeostasis keeps internal conditions within workable ranges by feedback. After a meal raises blood glucose, pancreatic beta cells release insulin, promoting glucose uptake and storage. When blood glucose falls, pancreatic alpha cells release glucagon, promoting the release of stored glucose. Temperature control also uses feedback: sweating and wider skin blood vessels increase heat loss, while shivering generates heat when the body is cold. Fever temporarily shifts the regulated temperature target during an immune response."
+            },
+            {
+              "chunk_id": "bio_immunity-chunk-000",
+              "rank": 3,
+              "source_id": "bio_immunity",
+              "text": "Innate immunity responds quickly through barriers, inflammation, and cells that recognize broad signs of infection. Adaptive immunity develops more slowly on first exposure and uses lymphocytes that recognize specific targets. Some activated lymphocytes become memory cells. Vaccination presents a safe form or component of a target so adaptive memory can form without the full disease, allowing a faster and stronger response during a later exposure."
+            }
+          ],
+          "latency_ms": 1297.337738040369,
+          "recall_at_3": null,
+          "retrieved_source_count": 3,
+          "retrieved_source_ids": [
+            "bio_cells",
+            "bio_homeostasis",
+            "bio_immunity"
+          ],
+          "returned_any_source": true,
+          "token_usage_unavailable_reason": "aquery_data interface does not expose provider usage"
+        }
+      },
+      "query": "Which chlorophyll molecule drives the light reactions of photosynthesis in oak leaves?",
+      "question_id": "bio_q06",
+      "required_source_ids": []
+    }
+  ],
+  "run_id": "83d033c73ea640b9ad9a116fb3f84d12",
+  "schema_version": 1,
+  "summary": {
+    "existing_hybrid_rrf": {
+      "answerable_question_count": 10,
+      "mean_query_latency_ms": 159.97601641477863,
+      "mean_required_source_recall_at_3": 1.0,
+      "unanswerable_returned_any_source_count": 2
+    },
+    "lightrag_mix": {
+      "answerable_question_count": 10,
+      "mean_query_latency_ms": 3823.2156477606623,
+      "mean_required_source_recall_at_3": 1.0,
+      "unanswerable_returned_any_source_count": 2
+    }
+  }
+}

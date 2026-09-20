@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "evaluation_id": "knowledge_retrieval_small_v1",
+  "frozen_at": "2026-09-20T03:28:44+08:00",
+  "hash_algorithm": "sha256",
+  "files": {
+    "protocol.json": "953ef7a17985de287a753580e6acc9ec6b9661ab2020459861f57f7a6098f403",
+    "questions.json": "97a561f66e083de5e5b7f8b5feb0c99daf9202c821e704e87b58deb9ac678b6d",
+    "sources.json": "0f5548c89fa48c156272b1a5cebb629391e17be80f9acd4515b0a77c624b1c15"
+  },
+  "files_payload_sha256": "cbd05c42372084ba4fe00eb888ce9b42bc73df7251ca27e2f6b98ce74f316911",
+  "live_model_calls_before_freeze": false
+}

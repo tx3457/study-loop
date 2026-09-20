@@ -1,0 +1,45 @@
+{
+  "status": "resolved",
+  "code_review": "APPROVE",
+  "architecture": "CLEAR",
+  "blocking_issues": 0,
+  "issues": [
+    {
+      "id": "target-bound-idempotency",
+      "before": "Same owner/key/body on another KB, document or snapshot replayed the old resource job.",
+      "after": "Target IDs participate in canonical hashes; exact retries replay, cross-target reuse conflicts.",
+      "red": "6 real PostgreSQL regression cases failed",
+      "green": "6 passed; full graph suite: 50 passed"
+    },
+    {
+      "id": "terminal-job-polling",
+      "before": "GET job uses id, causing current.job_id loops to stop after queued/running.",
+      "after": "Both flows poll the immutable accepted job ID until terminal success/failure.",
+      "red": "Observed browser success cases called GET once instead of three times; failure cases missed errors.",
+      "green": "queued -> running -> succeeded/failed covered for both actions"
+    },
+    {
+      "id": "document-pagination",
+      "before": "Only the first 50 documents were shown, with no next page.",
+      "after": "Metadata-aware pagination, replacement/deletion of document 101, last-page clamping and stale KB response fencing.",
+      "red": "Backend pagination metadata absent; browser count missing; stale page overwrote current KB.",
+      "green": "Real PostgreSQL and mobile browser 101-document cases passed."
+    }
+  ],
+  "verification": {
+    "backend_passed": 1261,
+    "backend_isolated_skips": 15,
+    "backend_subtests": 392,
+    "backend_coverage_percent": 82.36,
+    "graph_passed": 50,
+    "sdk_passed": 10,
+    "browser_passed": 123,
+    "http": "pass, deterministic model boundary",
+    "source_consistency": "12 references, 0 invalid"
+  },
+  "limitations": [
+    "No paid model calls or live public-web success validation in this repair.",
+    "Pre-fix receipt hashes fail closed with409; no unsafe legacy replay fallback.",
+    "Prior backup/restore and image evidence is retained from initial V1; these unchanged mechanisms were not re-exercised in this repair."
+  ]
+}

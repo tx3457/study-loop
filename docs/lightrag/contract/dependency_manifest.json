@@ -1,0 +1,16 @@
+{
+  "phase": "passed",
+  "python": "3.11.16",
+  "lightrag_version": "1.5.7",
+  "upstream_tag": "v1.5.7",
+  "upstream_commit": "28ff1b05f2ac3f3e6fa14dd2cd33656579bd0c9c",
+  "published_wheel_sha256": "895b81d94ca447afc6290c0e049d339f6caed46fbf29e4324f6db987046c6fcb",
+  "database_image_requested": "pgvector/pgvector:0.8.6-pg16",
+  "database_image_digest": "sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b",
+  "observed_postgres_version": "16.15",
+  "observed_pgvector_version": "0.8.6",
+  "live_model_calls": false,
+  "contract_passed": 10,
+  "contract_failed": 0,
+  "contract_skipped": 0
+}

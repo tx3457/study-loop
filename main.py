@@ -8,6 +8,7 @@ from openai import APIError, APITimeoutError, RateLimitError
 from agents.supervisor import supervisor_enabled
 from routers.chat import router as chat_router
 from routers.documents import router as document_router
+from routers.knowledge import router as knowledge_router
 from routers.quiz import router as quiz_router
 from routers.learning_path import router as learning_path_router
 from routers.session import router as session_router
@@ -174,6 +175,7 @@ _AUTHENTICATED = [Depends(require_user_id)]
 
 app.include_router(chat_router, dependencies=_AUTHENTICATED)
 app.include_router(document_router, dependencies=_AUTHENTICATED)
+app.include_router(knowledge_router, dependencies=_AUTHENTICATED)
 app.include_router(quiz_router, dependencies=_AUTHENTICATED)
 app.include_router(learning_path_router, dependencies=_AUTHENTICATED)
 app.include_router(session_router, dependencies=_AUTHENTICATED)

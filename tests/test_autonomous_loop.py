@@ -1180,7 +1180,7 @@ class TestAutonomousLoop(unittest.IsolatedAsyncioTestCase):
         inspection = await AutonomousSessionStore(
             sqlite_path=self.session_db_path
         ).inspect(session.conversation_id)
-        self.assertEqual(inspection.payload["schema_version"], 3)
+        self.assertEqual(inspection.payload["schema_version"], 4)
         restored = au._session_from_payload(
             session.conversation_id, inspection.payload
         )

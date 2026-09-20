@@ -16,6 +16,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir --retries 5 --timeout 120 -r requirements.txt
 
+# Optional web-search runtime is isolated: its MCP server version must not
+# upgrade the application's MCP client, Starlette, or FastAPI dependencies.
+ARG INSTALL_KNOWLEDGE_WEB=false
+RUN if [ "$INSTALL_KNOWLEDGE_WEB" = "true" ]; then \
+      python -m venv /opt/studyloop-ddg \
+      && /opt/studyloop-ddg/bin/pip install --no-cache-dir 'duckduckgo-mcp-server==0.7.0'; \
+    fi
+
 RUN groupadd --gid 10001 studyloop \
     && useradd --uid 10001 --gid studyloop --no-create-home \
         --home-dir /app --shell /usr/sbin/nologin studyloop
