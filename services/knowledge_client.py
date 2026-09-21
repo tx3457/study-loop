@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from typing import Any
@@ -57,7 +58,27 @@ class KnowledgeClient:
             else os.getenv("KNOWLEDGE_SERVICE_TOKEN", "")
         ).strip()
         self._transport = transport
-        self._timeout = httpx.Timeout(15.0, connect=2.0, read=15.0, write=15.0, pool=2.0)
+        timeout_seconds = self._bounded_timeout()
+        self._timeout = httpx.Timeout(
+            timeout_seconds,
+            connect=min(5.0, timeout_seconds),
+            read=timeout_seconds,
+            write=min(30.0, timeout_seconds),
+            pool=min(5.0, timeout_seconds),
+        )
+
+    @staticmethod
+    def _bounded_timeout() -> float:
+        raw = os.getenv("KNOWLEDGE_HTTP_TIMEOUT_SECONDS", "").strip()
+        if not raw:
+            return 100.0
+        try:
+            value = float(raw)
+        except ValueError:
+            raise ValueError("KNOWLEDGE_HTTP_TIMEOUT_SECONDS must be between 1 and 300") from None
+        if not math.isfinite(value) or not 1 <= value <= 300:
+            raise ValueError("KNOWLEDGE_HTTP_TIMEOUT_SECONDS must be between 1 and 300")
+        return value
 
     @staticmethod
     def _validate_service_url(value: str) -> str:

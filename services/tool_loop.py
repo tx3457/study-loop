@@ -38,6 +38,10 @@ logger = logging.getLogger(__name__)
 _MISSING = object()
 
 
+class TruncatedModelOutputError(RuntimeError):
+    """The provider stopped before a complete answer or tool batch existed."""
+
+
 def _field(value, name: str, default=None):
     if isinstance(value, dict):
         return value.get(name, default)
@@ -231,10 +235,12 @@ async def run_tool_round(
     tool_choice: Optional[str] = None,
     max_retries: int = 2,
     extra_call_messages: Optional[list] = None,
+    ephemeral_system_suffix: str | None = None,
     on_before_tool_calls: Callable[[], Awaitable[None]] | None = None,
     on_before_tool_dispatch: Callable[[], Awaitable[None]] | None = None,
     business_tool_guard: Callable[[str, dict], Optional[str]] | None = None,
     registry: ToolRegistry | None = None,
+    reject_truncated_output: bool = False,
     **llm_kwargs,
 ) -> ToolRoundResult:
     """跑单轮 tool-calling 并把结果回灌进 messages（原地 append）。
@@ -252,6 +258,8 @@ async def run_tool_round(
         tool_choice: 透传给 LLM（"auto" 等）。None 则不传。
         extra_call_messages: 仅用于本次 LLM 调用、不持久化进 messages 的临时消息
                        （如 autonomous 每轮注入的 [Current state] 摘要）。
+        ephemeral_system_suffix: 仅用于本次 LLM 调用，追加到首条 system message；
+                       与 extra_call_messages 互斥，且不会修改原始 transcript。
         on_before_tool_calls: provider 返回工具调用后、修改消息或执行工具前的
                         ownership 续租/围栏；不会把调用标记为已开始副作用。
         on_before_tool_dispatch: 参数校验成功后、每个实际 handler 调用前的
@@ -259,6 +267,7 @@ async def run_tool_round(
                         fencing token。无效参数不会跨过该边界。
         business_tool_guard: 可选的调用级范围检查。返回 reason 时，本轮工具调用
                         会在 dispatch 前被拒绝并把结构化错误回灌给模型。
+        reject_truncated_output: finish_reason=length 时在 transcript 或工具执行前拒绝。
         其余 llm_kwargs 透传给 llm_chat（temperature/max_tokens...）。
 
     Returns:
@@ -292,8 +301,33 @@ async def run_tool_round(
     if tool_choice is not None:
         kwargs["tool_choice"] = tool_choice
 
-    call_messages = list(messages) + list(extra_call_messages) if extra_call_messages else messages
+    if ephemeral_system_suffix is not None and extra_call_messages is not None:
+        raise ValueError(
+            "ephemeral_system_suffix and extra_call_messages are mutually exclusive"
+        )
+    if ephemeral_system_suffix is not None:
+        if (
+            not isinstance(ephemeral_system_suffix, str)
+            or not messages
+            or not isinstance(messages[0], dict)
+            or messages[0].get("role") != "system"
+            or not isinstance(messages[0].get("content"), str)
+        ):
+            raise ValueError(
+                "ephemeral_system_suffix requires a leading system message with string content"
+            )
+        first_message = dict(messages[0])
+        first_message["content"] = (
+            first_message["content"] + "\n\n" + ephemeral_system_suffix
+        )
+        call_messages = [first_message, *messages[1:]]
+    elif extra_call_messages:
+        call_messages = list(messages) + list(extra_call_messages)
+    else:
+        call_messages = messages
     response = await llm_chat(call_messages, client=client, max_retries=max_retries, **kwargs)
+    if reject_truncated_output and _field(response.choices[0], "finish_reason") == "length":
+        raise TruncatedModelOutputError("model output reached its token limit")
     msg = response.choices[0].message
 
     if not msg.tool_calls:

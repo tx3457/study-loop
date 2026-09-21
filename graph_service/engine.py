@@ -4,16 +4,20 @@ import asyncio
 import hashlib
 import json
 import os
+import unicodedata
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from typing import Any, Protocol
 from urllib.parse import unquote, urlparse
 
 from .config import Settings
+from .errors import TooLarge
 
 
 class GraphEngine(Protocol):
-    async def insert(self, workspace: str, version_id: str, text: str, source_token: str) -> None: ...
+    async def insert(
+        self, workspace: str, version_id: str, text: str, source_token: str
+    ) -> None: ...
     async def delete_document(self, workspace: str, version_id: str) -> None: ...
     async def apply_correction(self, workspace: str, kind: str, payload: dict) -> None: ...
     async def query(self, workspace: str, query: str) -> dict: ...
@@ -44,6 +48,22 @@ def index_config_hash(settings: Settings) -> str:
         "llm_model": settings.llm_model,
         "embedding_model": settings.embedding_model,
         "embedding_dim": settings.embedding_dim,
+        "embedding_max_input_tokens": settings.embedding_max_input_tokens,
+        "embedding_token_budget": settings.embedding_token_budget,
+        "embedding_max_utf8_bytes": settings.embedding_max_utf8_bytes,
+        "chunk_tokens": settings.chunk_tokens,
+        "chunk_overlap_tokens": settings.chunk_overlap_tokens,
+        "llm_max_output_tokens": settings.llm_max_output_tokens,
+        "llm_enable_thinking": settings.llm_enable_thinking,
+        "llm_temperature": settings.llm_temperature,
+        "llm_top_p": settings.llm_top_p,
+        "llm_top_k": settings.llm_top_k,
+        "llm_min_p": settings.llm_min_p,
+        "llm_presence_penalty": settings.llm_presence_penalty,
+        "extraction_max_records": settings.extraction_max_records,
+        "extraction_max_entities": settings.extraction_max_entities,
+        "extraction_max_gleaning": settings.extraction_max_gleaning,
+        "tokenizer_model": settings.tokenizer_model,
         "llm_origin": origin(settings.llm_base_url),
         "embedding_origin": origin(settings.embedding_base_url),
         "storages": ["PGKVStorage", "PGDocStatusStorage", "PGTableGraphStorage", "PGVectorStorage"],
@@ -97,36 +117,102 @@ class LightRAGEngine:
         raise TypeError(f"unsupported LightRAG graph record: {type(value).__name__}")
 
     def _provider_callbacks(self):
-        from functools import partial
-
         from lightrag.llm.openai import openai_complete_if_cache, openai_embed
-        from lightrag.utils import EmbeddingFunc
+        from lightrag.utils import EmbeddingFunc, is_truncated_response
 
         if self.settings.provider != "openai":
             raise RuntimeError(f"unsupported KNOWLEDGE_PROVIDER: {self.settings.provider}")
         if not self.settings.llm_model or not self.settings.embedding_model:
             raise RuntimeError("LLM_MODEL and LLM_EMBEDDING_MODEL are required")
-        llm = partial(
-            openai_complete_if_cache,
-            self.settings.llm_model,
-            api_key=self.settings.llm_api_key,
-            base_url=self.settings.llm_base_url,
-            timeout=self.settings.llm_timeout_seconds,
-        )
-        embedding = EmbeddingFunc(
-            embedding_dim=self.settings.embedding_dim,
-            max_token_size=8192,
-            model_name=self.settings.embedding_model,
-            func=partial(
-                openai_embed.func,
+
+        async def llm(prompt: str, **kwargs):
+            requested_max_tokens = kwargs.pop("max_tokens", None)
+            effective_max_tokens = self.settings.llm_max_output_tokens
+            if requested_max_tokens is not None:
+                try:
+                    requested_limit = int(requested_max_tokens)
+                except (TypeError, ValueError) as error:
+                    raise ValueError("max_tokens must be a positive integer") from error
+                if requested_limit <= 0:
+                    raise ValueError("max_tokens must be a positive integer")
+                effective_max_tokens = min(effective_max_tokens, requested_limit)
+            kwargs.pop("temperature", None)
+            kwargs.pop("top_p", None)
+            kwargs.pop("top_k", None)
+            kwargs.pop("min_p", None)
+            kwargs.pop("presence_penalty", None)
+            supplied_client_config = kwargs.pop("openai_client_configs", None) or {}
+            client_config = {**supplied_client_config, "max_retries": 0}
+            extra_body = dict(kwargs.pop("extra_body", None) or {})
+            if self.settings.llm_enable_thinking is not None:
+                extra_body["enable_thinking"] = self.settings.llm_enable_thinking
+            if self.settings.llm_top_k is not None:
+                extra_body["top_k"] = self.settings.llm_top_k
+            if self.settings.llm_min_p is not None:
+                extra_body["min_p"] = self.settings.llm_min_p
+            if extra_body:
+                kwargs["extra_body"] = extra_body
+            if self.settings.llm_top_p is not None:
+                kwargs["top_p"] = self.settings.llm_top_p
+            if self.settings.llm_presence_penalty is not None:
+                kwargs["presence_penalty"] = self.settings.llm_presence_penalty
+            result = await openai_complete_if_cache(
+                self.settings.llm_model,
+                prompt,
+                api_key=self.settings.llm_api_key,
+                base_url=self.settings.llm_base_url,
+                timeout=self.settings.llm_timeout_seconds,
+                max_tokens=effective_max_tokens,
+                temperature=self.settings.llm_temperature,
+                openai_client_configs=client_config,
+                **kwargs,
+            )
+            if is_truncated_response(result):
+                raise RuntimeError(
+                    "LLM response was truncated at the configured output token limit"
+                )
+            return result
+
+        async def embed(texts: list[str], max_token_size: int | None = None, **kwargs):
+            del max_token_size
+            normalized = self._validated_embedding_texts(texts, context="embedding input")
+            supplied_client_config = kwargs.pop("client_configs", None) or {}
+            client_config = {
+                **supplied_client_config,
+                "timeout": self.settings.embedding_timeout_seconds,
+                "max_retries": 0,
+            }
+            return await openai_embed.func(
+                normalized,
                 model=self.settings.embedding_model,
                 api_key=self.settings.embedding_api_key,
                 base_url=self.settings.embedding_base_url,
-                client_configs={"timeout": self.settings.llm_timeout_seconds},
-            ),
+                max_token_size=0,
+                client_configs=client_config,
+                **kwargs,
+            )
+
+        embedding = EmbeddingFunc(
+            embedding_dim=self.settings.embedding_dim,
+            max_token_size=self.settings.embedding_token_budget,
+            model_name=self.settings.embedding_model,
+            func=embed,
             supports_asymmetric=True,
         )
         return llm, embedding
+
+    def _validated_embedding_texts(self, texts: list[str], *, context: str) -> list[str]:
+        normalized: list[str] = []
+        for index, text in enumerate(texts):
+            value = unicodedata.normalize("NFKC", text)
+            byte_count = len(value.encode("utf-8"))
+            if byte_count > self.settings.embedding_max_utf8_bytes:
+                raise TooLarge(
+                    f"{context} {index + 1} exceeds the configured "
+                    f"{self.settings.embedding_max_utf8_bytes}-byte embedding safety limit"
+                )
+            normalized.append(value)
+        return normalized
 
     async def _acquire_rag(self, workspace: str):
         async with self._guard:
@@ -152,9 +238,17 @@ class LightRAGEngine:
                 llm_model_func=llm,
                 llm_model_name=self.settings.llm_model,
                 embedding_func=embedding,
+                chunk_token_size=self.settings.chunk_tokens,
+                chunk_overlap_token_size=self.settings.chunk_overlap_tokens,
+                embedding_chunk_overlap_token_size=self.settings.chunk_overlap_tokens,
+                tiktoken_model_name=self.settings.tokenizer_model,
                 auto_manage_storages_states=False,
-                default_llm_timeout=self.settings.llm_timeout_seconds,
-                default_embedding_timeout=self.settings.llm_timeout_seconds,
+                llm_model_max_async=self.settings.llm_max_async,
+                entity_extract_max_records=self.settings.extraction_max_records,
+                entity_extract_max_entities=self.settings.extraction_max_entities,
+                entity_extract_max_gleaning=self.settings.extraction_max_gleaning,
+                default_llm_timeout=self.settings.llm_sdk_timeout_seconds,
+                default_embedding_timeout=self.settings.embedding_sdk_timeout_seconds,
             )
             await rag.initialize_storages()
             self._instances[workspace] = rag
@@ -213,9 +307,7 @@ class LightRAGEngine:
                     return
                 if target is not None:
                     if payload.get("target_is_owned_alias"):
-                        await rag.amerge_entities(
-                            [payload["entity_label"]], payload["label"]
-                        )
+                        await rag.amerge_entities([payload["entity_label"]], payload["label"])
                         return
                     raise RuntimeError("rename target exists; explicit merge required")
                 await rag.aedit_entity(
@@ -249,6 +341,7 @@ class LightRAGEngine:
     async def query(self, workspace: str, query: str) -> dict:
         from lightrag import QueryParam
 
+        self._validated_embedding_texts([query], context="query")
         async with self._use(workspace) as rag:
             result = await rag.aquery_data(
                 query,
@@ -270,9 +363,7 @@ class LightRAGEngine:
 
     async def graph(self, workspace: str, search: str | None, max_nodes: int) -> dict:
         async with self._use(workspace) as rag:
-            graph = await rag.get_knowledge_graph(
-                search or "*", max_depth=3, max_nodes=max_nodes
-            )
+            graph = await rag.get_knowledge_graph(search or "*", max_depth=3, max_nodes=max_nodes)
             chunk_sources: dict[str, str | None] = {}
 
             async def with_sources(value: Any) -> dict[str, Any]:

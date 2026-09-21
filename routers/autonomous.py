@@ -63,7 +63,7 @@ from services.idempotency import (
     request_fingerprint,
     request_idempotency,
 )
-from services.llm import _client as _client, llm_chat
+from services.llm import EmptyModelOutputError, _client as _client, llm_chat
 from services.react_controls import (
     CONTROL_TOOL_NAMES,
     build_control_tools,
@@ -72,7 +72,7 @@ from services.react_controls import (
 )
 from services.tools import get_tool_definitions
 from services.tool_registry import SideEffectAmbiguousError, tool_registry
-from services.tool_loop import run_tool_round
+from services.tool_loop import TruncatedModelOutputError, run_tool_round
 from services.tool_scope import build_business_tool_scope_guard
 
 router = APIRouter()
@@ -81,6 +81,77 @@ logger = logging.getLogger(__name__)
 _RESPONSE_SCHEMA_VERSION = 2
 PLAN_SKIP_QUERY_LEN = 80               # 短于此长度的 query 跳过 plan 阶段
 _GROUNDING_ABSTENTION = "现有检索证据不足，无法提供满足完整引用约束的回答。"
+_KNOWLEDGE_CONTROL_TOOL_NAMES = {"ask_user"}
+_KNOWLEDGE_JSON_RESPONSE_FORMAT = {"type": "json_object"}
+
+
+def _empty_model_output_detail(exc: EmptyModelOutputError, *, before_dispatch: bool) -> str:
+    suffix = "未执行或发布结果" if before_dispatch else "未发布回答"
+    if exc.reason == "refusal":
+        return f"模型明确拒绝生成回答，{suffix}；请调整问题后重试"
+    if exc.reason == "content_filter":
+        return f"模型响应被内容过滤，{suffix}；请调整问题后重试"
+    return f"模型返回空响应，{suffix}；请重试"
+
+
+def _knowledge_retrieval_ready(steps: list[StepRecord]) -> bool:
+    return any(
+        step.tool_name in {"search_knowledge_base", "fetch_web"}
+        and step.blocked_reason is None
+        for step in steps
+    )
+
+
+def _knowledge_decision_prompt(state_summary: str, *, retrieval_ready: bool) -> str:
+    if not retrieval_ready:
+        instruction = (
+            "尚未完成证据检索。必须调用 search_knowledge_base 或 fetch_web；"
+            "缺少必要用户信息时可调用 ask_user。此阶段不得直接回答或弃答。"
+        )
+    else:
+        instruction = (
+            "证据检索阶段已完成。可以继续调用只读工具或 ask_user；若要结束，"
+            "直接返回一个完整 JSON 对象，且只能包含 final_answer(string)、"
+            "reason(string)、citation_ids(array)、abstained(boolean)。"
+            "final_answer 是唯一面向用户的完整答案，必须覆盖用户的每个子问题，"
+            "不能只给标题、引言或稍后回答的承诺。citation_ids 必须来自本轮真实 "
+            "evidence_id，且只能引用实际支持回答的证据。材料无关或不足时设置 "
+            "abstained=true；材料本身没有答案不要求调用 ask_user。"
+        )
+    return f"[Current state]\n{state_summary}\n\n{instruction}"
+
+
+def _knowledge_state_summary(
+    context: KnowledgeAgentContext,
+    steps: list[StepRecord],
+    round_idx: int,
+) -> str:
+    trusted_names = context.state.tool_names() | {"ask_user"}
+    recent_tools = [
+        step.tool_name for step in steps
+        if step.tool_name in trusted_names
+    ][-8:]
+    evidence_ids = list(context.state.evidence)[-64:]
+    return (
+        f"轮次：{round_idx + 1}/{MAX_AUTONOMOUS_ROUNDS}\n"
+        f"已记录工具：{recent_tools}\n"
+        f"可引用 evidence_ids：{evidence_ids}"
+    )
+
+
+def _parse_knowledge_answer(content: str, *, retrieval_ready: bool) -> _FinalizeArgs:
+    if not retrieval_ready:
+        raise HTTPException(
+            status_code=503,
+            detail="模型在成功检索证据前尝试结束回答，未发布结果；请重试",
+        )
+    try:
+        return _FinalizeArgs.model_validate_json(content)
+    except ValidationError:
+        raise HTTPException(
+            status_code=503,
+            detail="模型未返回符合严格契约的完整 JSON 回答，未发布结果；请重试",
+        ) from None
 
 # 业务工具白名单由 run_tool_round 从 ToolRegistry 派生，不在路由中硬编码。
 
@@ -741,10 +812,12 @@ async def _run_react_loop(
     active_registry = knowledge_context.registry if knowledge_context else tool_registry
     controls = _CONTROL_TOOLS
     if knowledge_context:
-        controls = build_control_tools(ask_user_resume_hint="暂停后通过 continue 端点恢复。")
-        controls[0]["function"]["parameters"]["properties"]["citation_ids"]["description"] = (
-            "本轮 evidence 中真实 evidence_id；不得自行构造来源 ID。"
-        )
+        controls = [
+            schema for schema in build_control_tools(
+                ask_user_resume_hint="暂停后通过 continue 端点恢复。"
+            )
+            if schema["function"]["name"] == "ask_user"
+        ]
 
     async def guarded_dispatch():
         if knowledge_context is not None:
@@ -764,39 +837,103 @@ async def _run_react_loop(
         if on_before_round is not None:
             await on_before_round()
         # ── 注入 [Current state] 让 LLM 不健忘（仅本次调用，不持久化）──
-        state_summary = _build_state_summary(
-            steps, tools_called, plan, round_idx, evidence_registry
+        retrieval_ready = bool(
+            knowledge_context
+            and _knowledge_retrieval_ready(steps)
         )
         if knowledge_context:
-            state_summary += "\n本轮可引用 evidence_ids：" + ", ".join(
-                list(knowledge_context.state.evidence)[-16:]
+            knowledge_system_suffix = _knowledge_decision_prompt(
+                _knowledge_state_summary(knowledge_context, steps, round_idx),
+                retrieval_ready=retrieval_ready,
             )
-        state_msg = [
-            {"role": "system", "content": build_react_decision_prompt(state_summary)}
-        ]
+            state_msg = None
+        else:
+            knowledge_system_suffix = None
+            state_summary = _build_state_summary(
+                steps, tools_called, plan, round_idx, evidence_registry
+            )
+            state_msg = [{
+                "role": "system",
+                "content": build_react_decision_prompt(state_summary),
+            }]
 
         # ── 单轮：run_tool_round 处理业务工具，控制工具交回本函数处理。──
-        rr = await run_tool_round(
-            messages,
-            tools=(
-                active_registry.get_openai_schemas() if knowledge_context else get_tool_definitions()
-            ) + controls,
-            client=_client,
-            control_tools=CONTROL_TOOL_NAMES,
-            run_id=run_id,
-            user_id=user_id,
-            idempotency_key=(receipt_lease.key if receipt_lease is not None else None),
-            idempotency_lease=receipt_lease,
-            tool_choice="auto",
-            extra_call_messages=state_msg,
-            on_before_tool_calls=on_before_tool_calls,
-            on_before_tool_dispatch=guarded_dispatch if knowledge_context else on_before_tool_dispatch,
-            business_tool_guard=None if knowledge_context else guard_business_tool,
-            **({"registry": active_registry} if knowledge_context else {}),
-        )
+        try:
+            rr = await run_tool_round(
+                messages,
+                tools=(
+                    active_registry.get_openai_schemas()
+                    if knowledge_context else get_tool_definitions()
+                ) + controls,
+                client=(
+                    knowledge_context.llm_profile.client
+                    if knowledge_context else _client
+                ),
+                control_tools=(
+                    _KNOWLEDGE_CONTROL_TOOL_NAMES
+                    if knowledge_context else CONTROL_TOOL_NAMES
+                ),
+                run_id=run_id,
+                user_id=user_id,
+                idempotency_key=(
+                    receipt_lease.key if receipt_lease is not None else None
+                ),
+                idempotency_lease=receipt_lease,
+                tool_choice=(
+                    "required"
+                    if knowledge_context is not None and not retrieval_ready
+                    else "auto"
+                ),
+                extra_call_messages=state_msg,
+                ephemeral_system_suffix=knowledge_system_suffix,
+                on_before_tool_calls=on_before_tool_calls,
+                on_before_tool_dispatch=(
+                    guarded_dispatch
+                    if knowledge_context else on_before_tool_dispatch
+                ),
+                business_tool_guard=(
+                    None if knowledge_context else guard_business_tool
+                ),
+                **({"registry": active_registry} if knowledge_context else {}),
+                **(
+                    {
+                        **knowledge_context.llm_profile.call_kwargs,
+                        "reject_truncated_output": True,
+                        "require_nonempty_response": True,
+                        **(
+                            {"response_format": _KNOWLEDGE_JSON_RESPONSE_FORMAT}
+                            if retrieval_ready else {}
+                        ),
+                    }
+                    if knowledge_context else {}
+                ),
+            )
+        except TruncatedModelOutputError:
+            raise HTTPException(
+                status_code=503,
+                detail="模型输出达到长度上限，未执行不完整结果；请重试",
+            ) from None
+        except EmptyModelOutputError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=_empty_model_output_detail(exc, before_dispatch=True),
+            ) from None
 
         # ── 无 tool_calls：LLM 直接给文字（视为隐式 finalize）──
         if not rr.has_tool_calls:
+            if knowledge_context is not None:
+                answer = _parse_knowledge_answer(
+                    rr.content or "", retrieval_ready=retrieval_ready
+                )
+                return await finish(
+                    plan, steps, tools_called, answer.final_answer,
+                    round_idx + 1, truncated, answer.reason,
+                    evidence_registry=evidence_registry,
+                    grounding_required=grounding_required,
+                    grounding_document_id=document_id,
+                    citation_ids=answer.citation_ids,
+                    abstained=answer.abstained,
+                )
             final_answer = rr.content or ""
             if final_answer:
                 finalize_reason = "implicit_finalize_no_tool_calls"
@@ -1015,12 +1152,64 @@ async def _run_react_loop(
     logger.warning(f"[autonomous] truncated at {MAX_AUTONOMOUS_ROUNDS} rounds")
     messages.append({
         "role": "user",
-        "content": "已达到最大执行轮次。请基于已有 observation 给出最终回答（直接文字，无需调工具）。",
+        "content": (
+            "已达到最大执行轮次。请基于已有 observation 返回完整 JSON 对象，"
+            "且只能包含 final_answer(string)、reason(string)、citation_ids(array)、"
+            "abstained(boolean)。final_answer 是唯一面向用户的完整答案，必须覆盖"
+            "每个子问题，不能只给标题、引言或稍后回答的承诺；只能引用实际支持"
+            "回答的 evidence_id，材料无关或不足时设置 abstained=true。"
+            if knowledge_context else
+            "已达到最大执行轮次。请基于已有 observation 给出最终回答（直接文字，无需调工具）。"
+        ),
     })
     if on_before_round is not None:
         await on_before_round()
+    if knowledge_context is not None:
+        retrieval_ready = _knowledge_retrieval_ready(steps)
+        if not retrieval_ready:
+            raise HTTPException(
+                status_code=503,
+                detail="达到最大轮次前未成功完成证据检索，未发布回答；请重试",
+            )
+        try:
+            finish_resp = await llm_chat(
+                messages,
+                client=knowledge_context.llm_profile.client,
+                **knowledge_context.llm_profile.call_kwargs,
+                require_nonempty_response=True,
+                response_format=_KNOWLEDGE_JSON_RESPONSE_FORMAT,
+            )
+            if getattr(finish_resp.choices[0], "finish_reason", None) == "length":
+                raise TruncatedModelOutputError("model output reached its token limit")
+        except TruncatedModelOutputError:
+            raise HTTPException(
+                status_code=503,
+                detail="模型输出达到长度上限，未发布不完整回答；请重试",
+            ) from None
+        except EmptyModelOutputError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=_empty_model_output_detail(exc, before_dispatch=False),
+            ) from None
+        answer = _parse_knowledge_answer(
+            finish_resp.choices[0].message.content or "",
+            retrieval_ready=True,
+        )
+        return await finish(
+            plan, steps, tools_called, answer.final_answer,
+            MAX_AUTONOMOUS_ROUNDS, truncated, answer.reason,
+            evidence_registry=evidence_registry,
+            grounding_required=grounding_required,
+            grounding_document_id=document_id,
+            citation_ids=answer.citation_ids,
+            abstained=answer.abstained,
+        )
+
     try:
-        finish_resp = await llm_chat(messages, client=_client)
+        finish_resp = await llm_chat(
+            messages,
+            client=_client,
+        )
         final_answer = finish_resp.choices[0].message.content or "执行被截断"
     except Exception as e:
         logger.warning(

@@ -23,6 +23,20 @@ def completion(name, arguments, call_id):
     ))])
 
 
+def json_answer(final_answer, citation_ids):
+    return SimpleNamespace(choices=[SimpleNamespace(
+        finish_reason="stop",
+        message=SimpleNamespace(
+            content=json.dumps({
+                "final_answer": final_answer,
+                "citation_ids": citation_ids,
+                "abstained": False,
+            }),
+            tool_calls=None,
+        ),
+    )])
+
+
 class KnowledgeAutonomousTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         patcher = patch.dict(os.environ, {"KNOWLEDGE_BASES_ENABLED": "true"})
@@ -46,9 +60,7 @@ class KnowledgeAutonomousTests(unittest.IsolatedAsyncioTestCase):
             if mutate:
                 context.client.epoch += 1
             evidence_id = "forged" if forged else next(iter(context.state.evidence))
-            return completion("finalize", {
-                "final_answer": "Graphs connect concepts.", "citation_ids": [evidence_id],
-            }, "final1")
+            return json_answer("Graphs connect concepts.", [evidence_id])
 
         with patch("services.tool_loop.llm_chat", side_effect=provider):
             return await au._run_react_loop(
@@ -81,18 +93,18 @@ class KnowledgeAutonomousTests(unittest.IsolatedAsyncioTestCase):
     async def test_public_knowledge_pause_and_continue_preserve_observed_evidence(self):
         client = EvidenceClient()
         calls = 0
+        call_kwargs = []
         evidence_id = None
 
         async def provider(*args, **kwargs):
             nonlocal calls
             calls += 1
+            call_kwargs.append(kwargs)
             if calls == 1:
                 return completion("search_knowledge_base", {"query": "concepts"}, "search1")
             if calls == 2:
                 return completion("ask_user", {"question": "需要例子吗？"}, "ask1")
-            return completion("finalize", {
-                "final_answer": "Graphs connect concepts.", "citation_ids": [evidence_id],
-            }, "final1")
+            return json_answer("Graphs connect concepts.", [evidence_id])
 
         with tempfile.TemporaryDirectory() as directory:
             store = AutonomousSessionStore(sqlite_path=str(Path(directory) / "sessions.db"))
@@ -117,5 +129,63 @@ class KnowledgeAutonomousTests(unittest.IsolatedAsyncioTestCase):
                 ), idempotency_key=None)
                 self.assertFalse(result.abstained)
                 self.assertEqual(result.source_citations[0].evidence_id, evidence_id)
+                self.assertEqual(call_kwargs[2]["tool_choice"], "auto")
+                self.assertEqual(
+                    call_kwargs[2]["response_format"], {"type": "json_object"}
+                )
                 terminal = await au._validate_replayed_response(result.model_dump(mode="json"))
                 self.assertEqual(terminal.final_answer, result.final_answer)
+
+    async def test_pre_retrieval_pause_and_continue_preserve_required_tool_phase(self):
+        client = EvidenceClient()
+        call_kwargs = []
+        context_evidence_id = None
+
+        async def provider(*args, **kwargs):
+            nonlocal context_evidence_id
+            call_kwargs.append(kwargs)
+            if len(call_kwargs) == 1:
+                return completion("ask_user", {"question": "需要哪个主题？"}, "ask1")
+            if len(call_kwargs) == 2:
+                return completion(
+                    "search_knowledge_base", {"query": "concepts"}, "search1"
+                )
+            tool_messages = [
+                message for message in args[0]
+                if message.get("role") == "tool"
+            ]
+            payload = json.loads(tool_messages[-1]["content"])
+            context_evidence_id = payload["evidence"][0]["evidence_id"]
+            return json_answer("Graphs connect concepts.", [context_evidence_id])
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = AutonomousSessionStore(sqlite_path=str(Path(directory) / "sessions.db"))
+            with (
+                patch.dict(os.environ, {"KNOWLEDGE_BASES_ENABLED": "true"}),
+                patch("services.knowledge_client.knowledge_client", client),
+                patch.object(au, "autonomous_sessions", store),
+                patch("services.tool_loop.llm_chat", side_effect=provider),
+            ):
+                pending = await au.autonomous_agent(
+                    au.AutonomousRequest(query="Explain", knowledge_base_id=KB_ID),
+                    idempotency_key=None,
+                    subject="learner",
+                )
+                result = await au.continue_autonomous(
+                    au.ContinueRequest(
+                        conversation_id=pending.conversation_id,
+                        user_reply="图结构",
+                    ),
+                    idempotency_key=None,
+                )
+
+        self.assertTrue(pending.awaiting_user_input)
+        self.assertFalse(result.abstained)
+        self.assertEqual(result.source_citations[0].evidence_id, context_evidence_id)
+        self.assertEqual(call_kwargs[0]["tool_choice"], "required")
+        self.assertEqual(call_kwargs[1]["tool_choice"], "required")
+        self.assertNotIn("response_format", call_kwargs[1])
+        self.assertEqual(call_kwargs[2]["tool_choice"], "auto")
+        self.assertEqual(
+            call_kwargs[2]["response_format"], {"type": "json_object"}
+        )

@@ -31,6 +31,47 @@ structured_model = _structured_config.model
 structured_client = build_managed_async_openai(_structured_config)
 
 
+class EmptyModelOutputError(RuntimeError):
+    """The provider returned neither text nor a candidate tool call."""
+
+    def __init__(self, reason: str = "empty") -> None:
+        self.reason = reason
+        super().__init__(f"model returned no usable output: {reason}")
+
+
+def _field(value, name: str, default=None):
+    if isinstance(value, dict):
+        return value.get(name, default)
+    return getattr(value, name, default)
+
+
+def _empty_output_reason(response) -> str | None:
+    choices = _field(response, "choices", []) or []
+    if not choices:
+        return "empty"
+    choice = choices[0]
+    # Token truncation has its own caller-side classifier and must not consume
+    # the one empty-output retry or be mislabeled as an empty completion.
+    if _field(choice, "finish_reason") == "length":
+        return None
+    message = _field(choice, "message")
+    if message is None:
+        return "empty"
+    if _field(message, "refusal"):
+        return "refusal"
+    if _field(choice, "finish_reason") == "content_filter":
+        return "content_filter"
+    if _field(message, "tool_calls"):
+        return None
+    content = _field(message, "content")
+    if isinstance(content, str):
+        if content.strip():
+            return None
+    elif content:
+        return None
+    return "empty"
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # 统一 LLM 入口：为经本模块发起的调用应用退避重试和总时间预算。
 #
@@ -50,6 +91,7 @@ async def llm_chat(
     base_delay: float = 1.0,
     timeout: Optional[float] = None,
     total_timeout: Optional[float] = PROVIDER_REQUEST_DEADLINE_SECONDS,
+    require_nonempty_response: bool = False,
     **kwargs,
 ):
     """统一 chat.completions.create 入口，带重试和端到端时间预算。
@@ -59,13 +101,36 @@ async def llm_chat(
     """
     use_client = client or _client
     kwargs.setdefault("model", model)
-    return await run_with_provider_deadline(
-        lambda: with_retry(
+
+    async def provider_attempt(transport_retries: int):
+        return await with_retry(
             lambda: use_client.chat.completions.create(messages=messages, **kwargs),
-            max_retries=max_retries,
+            max_retries=transport_retries,
             base_delay=base_delay,
             timeout=timeout,
-        ),
+        )
+
+    async def validated_call():
+        response = await provider_attempt(max_retries)
+        if not require_nonempty_response:
+            return response
+        reason = _empty_output_reason(response)
+        if reason is None:
+            return response
+        # Explicit refusal/filter outcomes are deliberate provider decisions,
+        # so another identical request must not be issued automatically.
+        if reason in {"refusal", "content_filter"}:
+            raise EmptyModelOutputError(reason)
+        # The one semantic retry does not open a second transport-retry
+        # budget. The shared outer deadline still covers both requests.
+        response = await provider_attempt(0)
+        reason = _empty_output_reason(response)
+        if reason is not None:
+            raise EmptyModelOutputError(reason)
+        return response
+
+    return await run_with_provider_deadline(
+        validated_call,
         total_timeout=total_timeout,
     )
 

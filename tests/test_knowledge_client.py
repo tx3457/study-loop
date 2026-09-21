@@ -70,6 +70,25 @@ def test_network_timeout_becomes_safe_503_without_exception_text():
     assert secret not in str(caught.value)
 
 
+def test_default_read_timeout_covers_graph_query_budget(monkeypatch):
+    monkeypatch.delenv("KNOWLEDGE_HTTP_TIMEOUT_SECONDS", raising=False)
+    client = KnowledgeClient(
+        service_url="http://graph.internal:8080",
+        service_token="shared-secret",
+    )
+    assert client._timeout.read == 100
+
+
+def test_http_timeout_is_positive_and_bounded(monkeypatch):
+    for value in ("0", "301", "not-a-number"):
+        monkeypatch.setenv("KNOWLEDGE_HTTP_TIMEOUT_SECONDS", value)
+        with pytest.raises(ValueError):
+            KnowledgeClient(
+                service_url="http://graph.internal:8080",
+                service_token="shared-secret",
+            )
+
+
 def test_validate_scope_fails_closed_for_dirty_and_changed_indexes():
     responses = iter(
         [

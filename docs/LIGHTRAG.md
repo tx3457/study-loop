@@ -7,9 +7,10 @@ Agent 可以检索整个知识库，按需联网，并由用户主动收录网�
 
 ## 启用
 
-继续使用现有 `.env` 中的聊天与 Embedding 服务。Embedding 的 key/base URL 必须
-成对配置，留空时一同继承聊天服务。必须设置实际向量维度，例如当前项目使用的
-`BAAI/bge-large-zh-v1.5` 为 1024 维。
+知识库可使用独立的 `KNOWLEDGE_LLM_*` 和 `KNOWLEDGE_EMBEDDING_*` 配置。
+硅基流动的 Qwen Instruct、BGE-M3 调用参数和完整示例见
+[模型配置与重建说明](LIGHTRAG_MODEL_CONFIG.md)。独立配置不会改变旧学习功能的模型
+或 Chroma 向量空间。未设置独立配置时继承原服务；必须配置匹配的向量维度和输入限制。
 
 新建被 Git 忽略的 `.env.knowledge`，不要覆盖已有文件：
 
@@ -85,7 +86,7 @@ python scripts/knowledge_backup.py backup \
   --container <knowledge-postgres容器名> --database studyloop_graph \
   --materials <挂载的知识库材料目录> --archive <仓库外的空备份目录> \
   --service-stopped --embedding-dimension 1024 \
-  --embedding-model BAAI/bge-large-zh-v1.5 --llm-model <当前聊天模型>
+  --embedding-model <当前知识库向量模型> --llm-model <当前知识库抽取模型>
 
 python scripts/knowledge_backup.py restore \
   --container <目标知识库数据库容器名> --database <空目标数据库> \
