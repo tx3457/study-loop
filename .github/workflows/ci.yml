@@ -85,7 +85,14 @@ jobs:
       - name: Install pip-audit
         run: pip install pip-audit
       - name: Audit pinned dependencies
-        run: pip-audit -r requirements.txt --progress-spinner off
+        # Reviewed server-only Chroma advisories are unreachable in the bundled
+        # PersistentClient deployment. See SECURITY.md; all other findings fail.
+        run: >-
+          pip-audit -r requirements.txt --progress-spinner off
+          --ignore-vuln GHSA-36p7-vc44-83pf
+          --ignore-vuln GHSA-f4j7-r4q5-qw2c
+          --ignore-vuln GHSA-2wm9-hf6c-p5cr
+          --ignore-vuln GHSA-xph7-9rjv-w5fr
 
   knowledge-contract:
     name: LightRAG and knowledge-service contracts (fake model boundary)

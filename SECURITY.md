@@ -73,10 +73,29 @@ GHSA-xph7-9rjv-w5fr (missing tenant, database and collection checks in
 `SimpleRBACAuthorizationProvider`). All four describe the ChromaDB HTTP
 server. This project embeds Chroma through `PersistentClient` against a
 local directory: it serves no Chroma endpoint, accepts no Chroma HTTP
-request, and configures no tenant or RBAC provider, so none of the four is
-reachable here. Pointing the retrieval layer at a separate Chroma server
-through `HttpClient` would bring all four into scope, and that deployment
-needs its own review.
+request, and configures no tenant or RBAC provider. Uploads cannot supply
+Chroma collection configuration, embedding-function configuration, model
+repository names, or `trust_remote_code`; the application supplies its own
+embedding vectors. These boundaries exclude the reported remote attack paths.
+
+Embedded storage alone is not a defense against poisoned persisted embedding
+configuration: the Python client may load such configuration from a collection.
+`CHROMA_DIR` and its contents must therefore remain operator-controlled; do not
+point the application at an untrusted Chroma database or import an untrusted
+Chroma volume. Remote `HttpClient`/Chroma-server deployments or externally
+supplied databases are outside this assessment and require a new review.
+
+The scheduled/manual CI dependency audit excludes exactly those four advisory
+IDs via `pip-audit --ignore-vuln`, following the deployment assessment above.
+This is a deployment-specific exception for the reviewed `chromadb==1.5.9`
+pin, not an upstream patch or a claim that the package has no vulnerabilities.
+Dependency resolution and auditing of all other findings remain enabled; the
+job does not use `continue-on-error`. Regression tests bind the exception list
+to the reviewed pin, the application's persistent embedded Rust client, the
+absence of Chroma collection HTTP endpoints, and uploads remaining document
+text rather than executable embedding configuration. Any Chroma upgrade, remote
+client/server deployment, or changed advisory must trigger a new review of
+these exceptions. Remove an exception when a patched version is adopted.
 
 ## Known boundaries
 
