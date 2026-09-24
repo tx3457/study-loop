@@ -22,6 +22,7 @@ from services.memory import (
     update_mastery,
 )
 from services.rag import generate_question
+from services.session import adaptive_generation_params
 from services.tool_registry import (
     EffectMode,
     Tool,
@@ -74,12 +75,19 @@ async def _generate_quiz(
     type: str = "choice",
 ) -> str:
     effective_topic = str(topic or "").strip() or "文档综合内容"
+    # Same adaptation as the Quiz page: an Agent that sets a quiz should also
+    # aim it at this learner's weak and due-for-review points.
+    difficulty_score, weak_points = await adaptive_generation_params(
+        user_id, document_id, difficulty
+    )
     quiz = await generate_question(
         document_id=document_id,
         description=effective_topic,
         count=count,
         difficulty=difficulty,
         type=type,
+        difficulty_score=difficulty_score,
+        weak_points=weak_points,
         owner_id=user_id,
     )
     return quiz.model_dump_json(ensure_ascii=False)

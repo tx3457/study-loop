@@ -94,6 +94,49 @@ async def get_due_reviews(user_id: str, document_id: str | None = None,
     return [it["point"] for it in due if it.get("point")][:limit]
 
 
+async def get_due_review_items(user_id: str, document_id: str | None = None,
+                               today: date | None = None,
+                               limit: int = 20) -> list[dict]:
+    """到期复习项的完整视图,供界面使用。
+
+    get_due_reviews 只返回知识点名——够模型用,不够界面用:界面还要说明逾期多久、
+    属于哪份材料、已经复习过几次。这些字段 _apply 本来就写进了 items,这里只是
+    完整读出来,不改存储格式,也不碰调度逻辑。
+    """
+    today = today or date.today()
+    items = (await read_bank_state(user_id, _REVIEW_BANK) or {}).get("items", {})
+    horizon = today.isoformat()
+    due: list[dict] = []
+    for it in items.values():
+        point = it.get("point")
+        if not point:
+            continue
+        if document_id is not None and it.get("document_id") not in (document_id, None):
+            continue
+        due_on = it.get("due") or ""
+        if not due_on or due_on > horizon:
+            continue
+        try:
+            overdue_days = (today - date.fromisoformat(due_on)).days
+        except ValueError:
+            # A corrupt date must not hide the rest of the queue.
+            overdue_days = 0
+        due.append({
+            "point": point,
+            "document_id": it.get("document_id"),
+            "due": due_on,
+            "overdue_days": max(overdue_days, 0),
+            "interval": it.get("interval", 0),
+            # SM-2's n is the consecutive-correct streak, not a lifetime count:
+            # a wrong answer resets it to 0. Naming it "reviews" would read as
+            # "reviewed 0 times" for a point just answered wrong.
+            "streak": it.get("n", 0),
+        })
+    # Most overdue first; the point name only breaks ties so the order is stable.
+    due.sort(key=lambda row: (row["due"], row["point"]))
+    return due[:max(1, min(limit, 100))]
+
+
 async def update_after_session(user_id: str, document_id: str | None,
                                reviewed_points: list[str], wrong_gaps: list[str],
                                today: date | None = None,
