@@ -33,6 +33,7 @@ from services.query_rewriter import (
     rrf_merge_ranked_lists,
 )
 from services.tokenization import BM25_TOKENIZER_ID
+from services.usage import usage_ledger
 
 logger = logging.getLogger(__name__)
 load_dotenv(Path(__file__).parent.parent / ".env")
@@ -575,14 +576,18 @@ async def _embed(texts: list[str]):
 
     所有 embedding 调用通过同一重试与超时策略执行。
     """
-    return await run_with_provider_deadline(
-        lambda: with_retry(
+
+    async def embed_attempt():
+        response = await with_retry(
             lambda: client.embeddings.create(model=embedding_model, input=texts),
             max_retries=3,
             base_delay=1.0,
             timeout=30,
         )
-    )
+        usage_ledger.record("embedding", response)
+        return response
+
+    return await run_with_provider_deadline(embed_attempt)
 
 
 def _staging_is_stale(metadata: dict, now: float | None = None) -> bool:

@@ -17,6 +17,7 @@ import httpx
 from services.provider_config import (
     ProviderConfig,
     build_async_openai,
+    issue_env_var,
     load_provider_configs,
 )
 
@@ -180,6 +181,12 @@ class ProviderHealthChecker:
                 "status": "misconfigured",
                 "code": "configuration_invalid",
                 "issues": list(config.issues),
+                # Which .env line to edit for each issue -- names only, never
+                # values -- so a first-run screen can point at the exact fix.
+                "fix_env": [
+                    {"issue": issue, "env": issue_env_var(config, issue)}
+                    for issue in config.issues
+                ],
                 "catalog_reachable": catalog.reachable if catalog is not None else None,
                 "model_visible": None,
             }

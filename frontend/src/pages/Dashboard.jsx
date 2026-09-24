@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   createIdempotencyKey,
+  getDueReviews,
+  getModelUsage,
   getUserProfile,
   getUserSessions,
   getDocuments,
@@ -27,6 +29,8 @@ import './Dashboard.css'
 export default function Dashboard() {
   const navigate = useNavigate()
   const [profile, setProfile] = useState(null)
+  const [dueReviews, setDueReviews] = useState([])
+  const [modelUsage, setModelUsage] = useState(null)
   const [sessions, setSessions] = useState([])
   const [documents, setDocuments] = useState([])
   const [wrongDoc, setWrongDoc] = useState('')
@@ -43,6 +47,7 @@ export default function Dashboard() {
     documents: 'loading',
     sessions: 'loading',
     profile: 'loading',
+    reviews: 'loading',
   })
   const dashboardRequestId = useRef(0)
   const wrongRequestId = useRef(0)
@@ -98,13 +103,32 @@ export default function Dashboard() {
           setNoProfile(!data)
         },
       },
+      {
+        key: 'reviews',
+        label: '复习安排',
+        // 辅助数据：只有它（还可能是空队列）构不成一份报告，所以它的成败
+        // 不参与"全部数据源失败"的判定，失败时只作为部分失败提示。
+        auxiliary: true,
+        load: getDueReviews,
+        apply: data => {
+          if (!data || !Array.isArray(data.items)) throw new Error('响应格式无效')
+          setDueReviews(data.items)
+        },
+      },
     ]
     try {
       const results = await Promise.allSettled(sources.map(source => source.load()))
       if (requestId !== dashboardRequestId.current) return
 
       const failures = []
-      const nextStatus = { documents: 'failed', sessions: 'failed', profile: 'failed' }
+      let coreFailures = 0
+      const nextStatus = {
+        documents: 'failed', sessions: 'failed', profile: 'failed', reviews: 'failed',
+      }
+      const recordFailure = (index, text) => {
+        failures.push(text)
+        if (!sources[index].auxiliary) coreFailures += 1
+      }
       results.forEach((result, index) => {
         if (result.status === 'fulfilled') {
           try {
@@ -112,18 +136,18 @@ export default function Dashboard() {
             nextStatus[sources[index].key] = 'available'
             return
           } catch (validationError) {
-            failures.push(`${sources[index].label}（${validationError.message}）`)
+            recordFailure(index, `${sources[index].label}（${validationError.message}）`)
             return
           }
         }
         const message = result.reason?.message
-        failures.push(message
+        recordFailure(index, message
           ? `${sources[index].label}（${message}）`
           : sources[index].label)
       })
       setSourceStatus(nextStatus)
 
-      if (failures.length === sources.length) {
+      if (coreFailures === sources.filter(source => !source.auxiliary).length) {
         setError(`全部数据源加载失败：${failures.join('、')}`)
       } else if (failures.length > 0) {
         setPartialError(`部分数据加载失败：${failures.join('、')}`)
@@ -131,6 +155,17 @@ export default function Dashboard() {
     } finally {
       if (requestId === dashboardRequestId.current) setLoading(false)
     }
+  }, [])
+
+  // 用量不是学习数据：独立加载、失败就不显示，不参与学习报告的成败判定。
+  useEffect(() => {
+    let active = true
+    getModelUsage()
+      .then(data => {
+        if (active && data && Array.isArray(data.operations)) setModelUsage(data)
+      })
+      .catch(() => {})
+    return () => { active = false }
   }, [])
 
   useEffect(() => {
@@ -246,6 +281,7 @@ export default function Dashboard() {
   const documentsAvailable = sourceStatus.documents === 'available'
   const sessionsAvailable = sourceStatus.sessions === 'available'
   const profileAvailable = sourceStatus.profile === 'available'
+  const reviewsAvailable = sourceStatus.reviews === 'available'
   const mastery = profileAvailable ? profile?.topic_mastery || {} : {}
   const masteryEntries = Object.entries(mastery)
   const weakPoints = profileAvailable ? profile?.weak_points || [] : []
@@ -343,7 +379,35 @@ export default function Dashboard() {
               <span className="stat-value">{profileAvailable ? weakPoints.length : '—'}</span>
               <span className="stat-label">薄弱知识点</span>
             </div>
+            <div className="stat-card">
+              <span className="stat-value">{reviewsAvailable ? dueReviews.length : '—'}</span>
+              <span className="stat-label">待复习</span>
+            </div>
           </div>
+
+          {/* ── 今日复习 ──────────────────────────────────────────
+              调度一直在跑（批改后由 SM-2 更新），此前只喂给模型，
+              学习者自己看不到。这里把它读出来。 */}
+          {reviewsAvailable && dueReviews.length > 0 && (
+            <div className="dash-card review-card">
+              <h2 className="card-title">今日复习</h2>
+              <p className="card-desc">按遗忘曲线安排，最该复习的排在前面</p>
+              <ul className="review-list">
+                {dueReviews.slice(0, 8).map(item => (
+                  <li className="review-item" key={`${item.document_id || ''}|${item.point}`}>
+                    <span className="review-point">{item.point}</span>
+                    <span className="review-meta">
+                      {item.overdue_days > 0 ? `逾期 ${item.overdue_days} 天` : '今天到期'}
+                      {item.streak > 0 && ` · 连续答对 ${item.streak} 次`}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+              {dueReviews.length > 8 && (
+                <p className="card-desc">还有 {dueReviews.length - 8} 个知识点到期</p>
+              )}
+            </div>
+          )}
 
           {/* ── 雷达图 + 薄弱知识点 ──────────────────────────────── */}
           <div className="dash-row">
@@ -516,8 +580,48 @@ export default function Dashboard() {
           </div>
         </>
       )}
+
+      {/* ── 模型用量 ──────────────────────────────────────────────
+          放在学习报告之外、默认折叠：它回答"哪个功能费 token"，
+          是次要的运维信息，不该压过学习结果。 */}
+      {modelUsage && modelUsage.totals?.calls > 0 && (
+        <details className="dash-card usage-card">
+          <summary>模型用量 · 自后端本次启动以来</summary>
+          <div className="usage-table-wrap">
+            <table className="usage-table">
+              <thead>
+                <tr>
+                  <th scope="col">功能</th>
+                  <th scope="col">调用次数</th>
+                  <th scope="col">对话 tokens</th>
+                  <th scope="col">向量 tokens</th>
+                </tr>
+              </thead>
+              <tbody>
+                {modelUsage.operations.map(row => (
+                  <tr key={row.key}>
+                    <th scope="row">{row.label}</th>
+                    <td>{formatCount(row.calls)}</td>
+                    <td>{formatCount(row.chat_tokens)}</td>
+                    <td>{formatCount(row.embedding_tokens)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="card-desc">
+            只统计服务商返回的 token 数，不估算金额；知识库服务的调用不在其中。
+            {modelUsage.totals.calls_without_usage > 0
+              && ` 另有 ${modelUsage.totals.calls_without_usage} 次调用服务商未返回用量，未计入。`}
+          </p>
+        </details>
+      )}
     </div>
   )
+}
+
+function formatCount(value) {
+  return Number.isFinite(value) ? value.toLocaleString('zh-CN') : '—'
 }
 
 

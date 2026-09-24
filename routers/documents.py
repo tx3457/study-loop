@@ -142,6 +142,27 @@ async def get_documents():
     return {"documents": document_ids}
 
 
+# The bundled example ships in the backend image (``COPY . .``), while the
+# frontend image is built from ./frontend and cannot see it. Serving its text
+# lets the page feed it through the ordinary upload path instead of adding a
+# second ingest route with its own validation and failure modes.
+SAMPLE_DOCUMENT = Path(__file__).resolve().parent.parent / "examples" / "sample_document.md"
+
+
+@router.get("/documents/sample")
+async def get_sample_document():
+    """内置示例材料，让首次使用的人不用先找文件就能走完一次学习闭环。
+
+    只读、路径固定，不接受任何来自请求的路径成分。
+    """
+    try:
+        content = SAMPLE_DOCUMENT.read_text(encoding="utf-8")
+    except OSError as e:
+        logger.warning("示例材料不可用: error_type=%s", type(e).__name__)
+        raise HTTPException(status_code=404, detail="示例材料不可用") from e
+    return {"filename": SAMPLE_DOCUMENT.name, "content": content}
+
+
 @router.delete("/documents/{document_id}")
 async def delete_document_by_id(document_id: str):
     try:

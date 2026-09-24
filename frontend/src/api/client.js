@@ -117,6 +117,25 @@ export async function uploadDocument(file) {
   })
 }
 
+/**
+ * 模型服务配置自检：只列模型目录，不生成、不嵌入，后端缓存 30 秒。
+ * 配置有问题时后端用 503 返回同样结构的结果——那是答案而不是故障，
+ * 所以 200 和 503 都读正文，其余状态才按错误处理。
+ */
+export async function getProviderHealth() {
+  const res = await fetch(`${BASE_URL}/health/providers`, withAuth())
+  if (res.status !== 200 && res.status !== 503) {
+    const body = await res.json().catch(() => ({}))
+    throw apiError(res, body, `请求失败 (${res.status})`)
+  }
+  return res.json()
+}
+
+/** 内置示例材料（纯文本），由页面包装成 File 后走普通上传流程。 */
+export async function getSampleDocument() {
+  return request('/documents/sample')
+}
+
 /** 获取文档列表 */
 export async function getDocuments() {
   return request('/documents')
@@ -259,6 +278,16 @@ export async function getUserProfile(userId = 'default_user') {
 /** 学习历史（情节记忆：会话摘要列表） */
 export async function getUserSessions(userId = 'default_user') {
   return request(`/user/${encodeURIComponent(userId)}/sessions`)
+}
+
+/** 模型用量：服务商返回的 token 数，按功能归类；不估算金额。 */
+export async function getModelUsage() {
+  return request('/usage')
+}
+
+/** 今天该复习的知识点。调度早就在跑，这里只是把它读出来给人看。 */
+export async function getDueReviews(userId = 'default_user') {
+  return request(`/user/${encodeURIComponent(userId)}/reviews/due`)
 }
 
 /** 错题本。身份由后端从 Authorization 头解析，这里不再自报 user_id。 */

@@ -286,6 +286,43 @@ async def close_managed_provider_clients() -> None:
     )
 
 
+# The variable a person edits to fix each field, per capability. Kept beside
+# load_provider_configs because that function is the one that reads them; a
+# field inherited from the chat pair is fixed by editing the chat variable.
+_ENV_NAMES = {
+    ("chat", "api_key"): "LLM_API_KEY",
+    ("chat", "base_url"): "LLM_BASE_URL",
+    ("chat", "model"): "LLM_MODEL",
+    ("structured", "api_key"): "STRUCTURED_API_KEY",
+    ("structured", "base_url"): "STRUCTURED_BASE_URL",
+    ("structured", "model"): "STRUCTURED_MODEL",
+    ("embedding", "api_key"): "EMBEDDING_API_KEY",
+    ("embedding", "base_url"): "EMBEDDING_BASE_URL",
+    ("embedding", "model"): "LLM_EMBEDDING_MODEL",
+}
+_INHERITED_ENV_NAMES = {
+    "api_key": "LLM_API_KEY",
+    "base_url": "LLM_BASE_URL",
+    "model": "LLM_MODEL",
+}
+
+
+def issue_env_var(config: ProviderConfig, issue: str) -> str | None:
+    """Name the environment variable that resolves one configuration issue.
+
+    Returns the name only, never a value, so it is safe to show to a caller.
+    """
+    field_name = next(
+        (name for name in ("api_key", "base_url", "model") if issue.startswith(f"{name}_")),
+        None,
+    )
+    if field_name is None:
+        return None
+    if field_name in config.inherited_fields:
+        return _INHERITED_ENV_NAMES[field_name]
+    return _ENV_NAMES.get((config.capability, field_name))
+
+
 def load_provider_configs(
     environ: Mapping[str, str] | None = None,
 ) -> dict[str, ProviderConfig]:

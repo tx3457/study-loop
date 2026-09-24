@@ -4,6 +4,30 @@ StudyLoop is configured through a repository-local `.env` copied from
 `.env.example`. The file may contain credentials and is intentionally ignored by
 Git.
 
+## Minimum configuration
+
+`.env.example` has well over a hundred settings, but only five need a value to
+run the default Docker Compose setup. They sit together in a marked block at
+the top of the file:
+
+| Variable | What to put there |
+| --- | --- |
+| `LLM_API_KEY` | Your provider key |
+| `LLM_BASE_URL` | The provider's OpenAI-compatible base URL |
+| `LLM_MODEL` | A chat model that supports tool calling |
+| `LLM_EMBEDDING_MODEL` | An embedding model on the same provider |
+| `POSTGRES_PASSWORD` | Any non-empty password (Compose only) |
+
+Structured output and embeddings reuse the chat key and base URL until you
+override them, and every other setting has a working default.
+
+You do not have to find a mistake by trial and error. While the document
+library is empty, the Documents page asks `/health/providers` once and lists
+every value that is still missing, a placeholder or malformed, naming the exact
+`.env` variable to edit. The check only lists the provider's models, so it
+spends no tokens. The same page can load the bundled sample material, so a new
+setup can reach a first quiz without hunting for a file.
+
 ## Model providers
 
 The complete product flow requires OpenAI-compatible Chat, Structured Output,
@@ -130,7 +154,26 @@ curl -i http://localhost:8001/health/providers
   selected SQLite files and local memory snapshot directory.
 - `/health/providers` calls the provider's model-list endpoint and caches the
   result for 30 seconds. It does not run Chat, Structured Output, Tool Calling,
-  or Embeddings requests.
+  or Embeddings requests. A misconfigured capability also carries `fix_env`,
+  which pairs each issue with the variable to edit (names only, never values);
+  a field inherited from the chat pair points at the `LLM_*` variable.
+
+## Model usage
+
+`GET /usage` (behind the access-token gate) reports the tokens providers
+returned, grouped by the feature that triggered them — quiz practice, learning
+paths, the Autonomous Agent, document ingestion and so on. The Dashboard shows
+it in a collapsed card. Read it with these limits in mind:
+
+- Counts are tokens only. Prices vary by provider and are not returned, so no
+  currency amount is estimated.
+- Chat and embedding tokens are reported separately, since their prices differ
+  by orders of magnitude.
+- A response without usage data (streaming, or a provider that omits it) is
+  counted as a call with unknown tokens, not as zero.
+- Counts cover the backend process since it started and reset on restart. The
+  separate knowledge-base service makes its own model calls and is not
+  included.
 
 A readiness success proves that the required storage is currently accessible;
 it is not a complete upload or generation test. Restart the backend after a

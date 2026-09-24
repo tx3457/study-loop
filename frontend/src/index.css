@@ -213,6 +213,11 @@ button {
   background: #1d4ed8;
 }
 
+.state-action:disabled {
+  background: var(--text-tertiary);
+  cursor: not-allowed;
+}
+
 .prerequisite-state {
   padding: 48px 24px;
   border: 1px solid var(--border-light);

@@ -478,6 +478,97 @@
 
 /* ── Responsive ───────────────────────────────────────────────────── */
 
+/* ── 模型用量 ───────────────────────────────────────────────────── */
+
+.usage-card summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.usage-card[open] summary {
+  margin-bottom: 14px;
+}
+
+.usage-table-wrap {
+  overflow-x: auto;
+}
+
+.usage-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.usage-table th,
+.usage-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-light);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.usage-table th[scope="row"],
+.usage-table thead th:first-child {
+  text-align: left;
+  font-weight: 500;
+}
+
+.usage-table thead th {
+  color: var(--text-tertiary);
+  font-weight: 500;
+}
+
+/* ── 今日复习 ───────────────────────────────────────────────────── */
+
+.card-desc {
+  margin: 4px 0 16px;
+  color: var(--text-tertiary);
+  font-size: 13px;
+}
+
+.review-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.review-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  border: 1px solid var(--border-light);
+  border-radius: var(--radius-sm);
+  border-left: 4px solid var(--accent-gold);
+  padding: 12px 16px;
+}
+
+.review-point {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.review-meta {
+  color: var(--text-tertiary);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+@media (max-width: 768px) {
+  .review-item {
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .review-meta {
+    white-space: normal;
+  }
+}
+
 @media (max-width: 768px) {
   .stats-row {
     grid-template-columns: repeat(2, 1fr);

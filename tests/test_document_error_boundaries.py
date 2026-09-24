@@ -221,5 +221,50 @@ class TestUnicodeDocumentStorage(unittest.IsolatedAsyncioTestCase):
                     )
 
 
+class TestSampleDocument(unittest.TestCase):
+    """The first-run sample is served as text and ingested by the normal upload route."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.client = TestClient(app, raise_server_exceptions=False)
+
+    def test_sample_is_served_verbatim_from_the_bundled_file(self):
+        response = self.client.get("/documents/sample")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["filename"], "sample_document.md")
+        self.assertEqual(
+            payload["content"],
+            documents_router.SAMPLE_DOCUMENT.read_text(encoding="utf-8"),
+        )
+
+    def test_served_sample_is_accepted_by_the_ordinary_upload_route(self):
+        """The page wraps the text in a File and posts it; nothing else ingests it."""
+        sample = self.client.get("/documents/sample").json()
+        index = AsyncMock(return_value=1)
+
+        with patch.object(documents_router, "deal_document", index):
+            response = self.client.post(
+                "/documents/upload",
+                files={"file": (
+                    sample["filename"], sample["content"].encode("utf-8"), "text/markdown",
+                )},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        index.assert_awaited_once()
+
+    def test_missing_sample_is_a_clean_not_found(self):
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            documents_router, "SAMPLE_DOCUMENT", Path(directory) / "absent.md"
+        ):
+            response = self.client.get("/documents/sample")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json(), {"detail": "示例材料不可用"})
+        self.assertNotIn(directory, response.text)
+
+
 if __name__ == "__main__":
     unittest.main()
