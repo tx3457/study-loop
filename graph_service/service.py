@@ -533,59 +533,115 @@ class KnowledgeService:
     async def query(
         self, owner: str, kb_id: str, query: str, expected_revision: int, expected_epoch: int
     ) -> dict[str, Any]:
-        async with self.locks.read(kb_id):
-            kb = await self.repository.get_kb(owner, kb_id)
-            self.assert_index_config(kb)
-            if kb["status"] != "ready":
-                raise Unavailable(f"knowledge base is {kb['status']}")
-            if kb["revision"] != expected_revision or kb["epoch"] != expected_epoch:
-                raise Conflict("knowledge base scope changed")
-            async with asyncio.timeout(self.query_timeout_seconds):
+        # Check availability before queueing on the per-KB lock. An indexing job
+        # holds that lock for the whole run, so the identical checks below are
+        # unreachable exactly when they matter most: without this the caller
+        # blocks until its own HTTP timeout instead of being told the index is
+        # busy. The in-lock checks stay authoritative; this one only fails fast.
+        #
+        # Scaffolding, not a fix: a job can still take the write lock between
+        # this check and the one below. The deadline below now bounds that wait,
+        # so the worst case is a clear timeout rather than an indefinite queue,
+        # but failing fast here still beats waiting out the whole deadline.
+        # Delete this block once the read lock is gone -- keeping both would
+        # leave a permanent double read of the same row.
+        preflight = await self.repository.get_kb(owner, kb_id)
+        self.assert_index_config(preflight)
+        if preflight["status"] != "ready":
+            raise Unavailable(f"knowledge base is {preflight['status']}")
+        if (
+            preflight["revision"] != expected_revision
+            or preflight["epoch"] != expected_epoch
+        ):
+            raise Conflict("knowledge base scope changed")
+        # The deadline covers waiting for the lock, not just the engine call. An
+        # indexing job holds the write lock for its whole run, so a deadline
+        # scoped to the engine alone left the caller queued behind it with no
+        # bound of its own -- the mutation timeout, not this one, decided how
+        # long a reader waited.
+        async with asyncio.timeout(self.query_timeout_seconds):
+            async with self.locks.read(kb_id):
+                kb = await self.repository.get_kb(owner, kb_id)
+                self.assert_index_config(kb)
+                if kb["status"] != "ready":
+                    raise Unavailable(f"knowledge base is {kb['status']}")
+                if kb["revision"] != expected_revision or kb["epoch"] != expected_epoch:
+                    raise Conflict("knowledge base scope changed")
                 result = await self.engine.query(kb["workspace"], query)
-            after = await self.repository.get_kb(owner, kb_id)
-            if after["status"] != "ready" or after["epoch"] != expected_epoch:
-                raise Conflict("knowledge base changed during query")
-            evidence = []
-            for chunk in result.get("chunks", []):
-                source = await self.repository.fetchrow(
-                    "SELECT v.*,d.name,d.id AS document_id FROM sl_source_versions v "
-                    "JOIN sl_documents d ON d.id=v.document_id "
-                    "WHERE v.id=$1 AND v.knowledge_base_id=$2 AND v.status='active' "
-                    "AND d.status='active' AND d.current_version_id=v.id",
-                    uuid.UUID(str(chunk["full_doc_id"])),
-                    uuid.UUID(kb_id),
-                )
-                if source is None:
-                    continue
-                text = chunk.get("content", "")
-                locator = None
-                blocks = source["parsed_blocks"]
-                if isinstance(blocks, str):
-                    blocks = json.loads(blocks)
-                for block in blocks:
-                    if text and text in block["text"]:
-                        locator = block.get("metadata") or None
-                        break
-                item = {
-                    "evidence_id": f"kb:{kb_id}:{chunk['chunk_id']}",
-                    "kind": "kb_chunk",
-                    "knowledge_base_id": kb_id,
-                    "document_id": str(source["document_id"]),
-                    "source_version_id": str(source["id"]),
-                    "chunk_id": chunk["chunk_id"],
-                    "title": source["name"],
-                    "snippet": text[:500],
-                    "text": text,
+                after = await self.repository.get_kb(owner, kb_id)
+                if after["status"] != "ready" or after["epoch"] != expected_epoch:
+                    raise Conflict("knowledge base changed during query")
+                chunks = result.get("chunks", [])
+                # Resolve every cited version in one round trip. One statement per
+                # chunk put up to 20 sequential queries inside the lock, against a
+                # pool of 10 connections shared with the indexing worker.
+                wanted: list[uuid.UUID] = []
+                for chunk in chunks:
+                    try:
+                        wanted.append(uuid.UUID(str(chunk["full_doc_id"])))
+                    except (KeyError, TypeError, ValueError):
+                        # One malformed id from the index must not fail the whole
+                        # query; that chunk simply resolves to no live source below.
+                        continue
+                sources: dict[str, dict[str, Any]] = {}
+                if wanted:
+                    rows = await self.repository.fetch(
+                        "SELECT v.*,d.name,d.id AS document_id,d.source_url,d.source_fetched_at "
+                        "FROM sl_source_versions v "
+                        "JOIN sl_documents d ON d.id=v.document_id "
+                        "WHERE v.id=ANY($1::uuid[]) AND v.knowledge_base_id=$2 "
+                        "AND v.status='active' "
+                        "AND d.status='active' AND d.current_version_id=v.id",
+                        list(dict.fromkeys(wanted)),
+                        uuid.UUID(kb_id),
+                    )
+                    sources = {str(row["id"]): row for row in rows}
+                evidence = []
+                for chunk in chunks:
+                    try:
+                        version_key = str(uuid.UUID(str(chunk["full_doc_id"])))
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    source = sources.get(version_key)
+                    if source is None:
+                        continue
+                    text = chunk.get("content", "")
+                    locator = None
+                    blocks = source["parsed_blocks"]
+                    if isinstance(blocks, str):
+                        blocks = json.loads(blocks)
+                    for block in blocks:
+                        if text and text in block["text"]:
+                            locator = block.get("metadata") or None
+                            break
+                    item = {
+                        "evidence_id": f"kb:{kb_id}:{chunk['chunk_id']}",
+                        "kind": "kb_chunk",
+                        "knowledge_base_id": kb_id,
+                        "document_id": str(source["document_id"]),
+                        "source_version_id": str(source["id"]),
+                        "chunk_id": chunk["chunk_id"],
+                        "title": source["name"],
+                        "snippet": text[:500],
+                        "text": text,
+                        # Provenance tier, not a truth claim: material the user
+                        # uploaded is more accountable than a page this deployment
+                        # later ingested from the public web.
+                        "origin": "web_import" if source.get("source_url") else "user_upload",
+                    }
+                    if source.get("source_url"):
+                        item["source_url"] = source["source_url"]
+                    if source.get("source_fetched_at"):
+                        item["source_fetched_at"] = source["source_fetched_at"].isoformat()
+                    if locator:
+                        item["locator"] = locator
+                    evidence.append(item)
+                return {
+                    "scope": {"knowledge_base_id": kb_id, "revision": kb["revision"], "epoch": kb["epoch"]},
+                    "evidence": evidence,
+                    "entities": result.get("entities", []),
+                    "relationships": result.get("relationships", []),
                 }
-                if locator:
-                    item["locator"] = locator
-                evidence.append(item)
-            return {
-                "scope": {"knowledge_base_id": kb_id, "revision": kb["revision"], "epoch": kb["epoch"]},
-                "evidence": evidence,
-                "entities": result.get("entities", []),
-                "relationships": result.get("relationships", []),
-            }
 
     async def graph(
         self,

@@ -165,6 +165,8 @@ async def test_query_maps_chunks_to_immutable_source_versions(repository, settin
             "title": "notes.txt",
             "snippet": "Alpha marker",
             "text": "Alpha marker",
+            # An uploaded file carries no source URL, so it is the user's own material.
+            "origin": "user_upload",
             "locator": {"page": 1},
         }
     ]
@@ -248,6 +250,18 @@ async def test_snapshot_owner_session_expiry_and_import(repository, settings) ->
     doc = (await service.list_documents("alice", kb["id"]))["documents"][0]
     assert doc["kind"] == "web"
     assert doc["source_url"] == "https://example.test/page"
+
+    # Retrieval carries the provenance tier: an ingested page is not the user's
+    # own material, and its citation can point back to where it came from.
+    scope = await service.get_scope("alice", kb["id"])
+    result = await service.query("alice", kb["id"], "Alpha", scope["revision"], scope["epoch"])
+    [evidence] = result["evidence"]
+    assert evidence["origin"] == "web_import"
+    assert evidence["source_url"] == "https://example.test/page"
+    assert datetime.fromisoformat(evidence["source_fetched_at"]) == datetime.fromisoformat(
+        now.isoformat()
+    )
+
     await repository.pool.execute(
         "UPDATE sl_web_snapshots SET expires_at=now()-interval '1 second' WHERE id=$1",
         snapshot["id"],
