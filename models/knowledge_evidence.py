@@ -6,10 +6,18 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+# Where a passage came from, ordered by how accountable that origin is. This is
+# provenance, not a truth claim: it says who put the text within reach, never
+# that the text is correct. Kept separate from ``source_status``, which answers
+# whether the source is still live.
+ProvenanceOrigin = Literal["user_upload", "web_import", "web_snapshot"]
+
+
 class SourceCitation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     kind: Literal["kb_chunk", "web_snapshot"]
+    origin: ProvenanceOrigin = "user_upload"
     evidence_id: str = Field(min_length=1, max_length=256)
     title: str = Field(min_length=1, max_length=512)
     snippet: str = Field(min_length=1, max_length=2000)
@@ -24,10 +32,31 @@ class SourceCitation(BaseModel):
     locator: dict[str, str | int] | None = None
     source_status: Literal["current", "deleted", "historical", "unavailable"] = "current"
 
+    @model_validator(mode="before")
+    @classmethod
+    def backfill_origin(cls, data):
+        """Derive ``origin`` for records written before provenance tiers existed.
+
+        A persisted HITL snapshot must still deserialize; refusing to resume it
+        is the controller policy version's job, not a validation error here.
+        """
+        if isinstance(data, dict) and not data.get("origin"):
+            return {
+                **data,
+                "origin": (
+                    "web_snapshot" if data.get("kind") == "web_snapshot" else "user_upload"
+                ),
+            }
+        return data
+
     @model_validator(mode="after")
     def validate_source(self):
         if not self.title.strip() or not self.snippet.strip():
             raise ValueError("citation text must not be blank")
+        if (self.origin == "web_snapshot") != (self.kind == "web_snapshot"):
+            raise ValueError("citation origin contradicts its kind")
+        if self.origin == "web_import" and not self.url:
+            raise ValueError("an ingested web citation requires its source URL")
         if self.kind == "kb_chunk":
             if not all((self.knowledge_base_id, self.document_id,
                         self.source_version_id, self.chunk_id)) or self.snapshot_id:
@@ -63,6 +92,10 @@ class KnowledgeRunState(BaseModel):
     web_query: str = Field(default="", max_length=500)
     approved_web_urls: list[str] = Field(default_factory=list, max_length=32)
     outbound_blocked: bool = False
+    # Egress counters. Defaulted so a session persisted before they existed
+    # still deserializes; it starts from zero rather than being refused here.
+    web_searches_used: int = Field(default=0, ge=0)
+    web_fetches_used: int = Field(default=0, ge=0)
     evidence: dict[str, KnowledgeEvidence] = Field(default_factory=dict, max_length=64)
 
     @model_validator(mode="after")

@@ -138,6 +138,14 @@ const SOURCE_STATUS_LABELS = {
   unavailable: '来源不可用',
 }
 
+// Where the passage came from, not whether it is true. Separate axis from
+// SOURCE_STATUS_LABELS, which says whether the source is still live.
+const SOURCE_ORIGIN_LABELS = {
+  user_upload: '你的材料',
+  web_import: '已收录网页',
+  web_snapshot: '本次抓取',
+}
+
 export default function Autonomous() {
   const [searchParams] = useSearchParams()
   const deepLinkedKnowledgeBaseId = searchParams.get('knowledge_base_id') || ''
@@ -1036,13 +1044,24 @@ export default function Autonomous() {
             <section className="result-section source-section" aria-labelledby="kb-source-title">
               <h3 id="kb-source-title">知识库来源</h3>
               <ol className="source-card-list">
-                {kbSourceCitations.map(sourceCitation => (
-                  <li className="source-card" key={sourceCitation.evidence_id}>
-                    <div className="source-card-head"><strong>{sourceCitation.title || '知识库片段'}</strong><span>{SOURCE_STATUS_LABELS[sourceCitation.source_status] || '知识库资料'}</span></div>
-                    <blockquote className="source-snippet">{sourceCitation.snippet}</blockquote>
-                    <div className="citation-meta"><span>资料 <code>{sourceCitation.document_id}</code></span><span>版本 <code>{sourceCitation.source_version_id}</code></span><span>片段 <code>{sourceCitation.chunk_id}</code></span></div>
-                  </li>
-                ))}
+                {kbSourceCitations.map(sourceCitation => {
+                  const originLabel = SOURCE_ORIGIN_LABELS[sourceCitation.origin] || '知识库资料'
+                  // '当前来源' carries no information; only an unusual status does.
+                  const statusLabel = sourceCitation.source_status && sourceCitation.source_status !== 'current'
+                    ? SOURCE_STATUS_LABELS[sourceCitation.source_status]
+                    : null
+                  const ingestedUrl = sourceCitation.origin === 'web_import'
+                    ? safeExternalUrl(sourceCitation.url)
+                    : null
+                  return (
+                    <li className="source-card" key={sourceCitation.evidence_id}>
+                      <div className="source-card-head"><strong>{sourceCitation.title || '知识库片段'}</strong><span>{[originLabel, statusLabel].filter(Boolean).join(' · ')}</span></div>
+                      {ingestedUrl && <a href={ingestedUrl} target="_blank" rel="noopener noreferrer">{sourceCitation.url}</a>}
+                      <blockquote className="source-snippet">{sourceCitation.snippet}</blockquote>
+                      <div className="citation-meta"><span>资料 <code>{sourceCitation.document_id}</code></span><span>版本 <code>{sourceCitation.source_version_id}</code></span><span>片段 <code>{sourceCitation.chunk_id}</code></span>{sourceCitation.fetched_at && <span>收录自 {sourceCitation.fetched_at}</span>}</div>
+                    </li>
+                  )
+                })}
               </ol>
             </section>
           )}
@@ -1057,7 +1076,7 @@ export default function Autonomous() {
                   const safeUrl = safeExternalUrl(sourceCitation.url)
                   return (
                     <li className="source-card" key={sourceCitation.evidence_id}>
-                      <div className="source-card-head"><strong>{sourceCitation.title || '网页快照'}</strong><span>{sourceCitation.fetched_at || '抓取时间未知'}</span></div>
+                      <div className="source-card-head"><strong>{sourceCitation.title || '网页快照'}</strong><span>{SOURCE_ORIGIN_LABELS.web_snapshot} · {sourceCitation.fetched_at || '抓取时间未知'}</span></div>
                       {safeUrl && <a href={safeUrl} target="_blank" rel="noopener noreferrer">{sourceCitation.url}</a>}
                       <blockquote className="source-snippet">{sourceCitation.snippet}</blockquote>
                       <div className="citation-meta"><span>内容哈希 <code>{sourceCitation.content_hash}</code></span></div>

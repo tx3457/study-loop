@@ -24,7 +24,7 @@ from urllib.parse import urljoin, urlsplit
 
 import httpcore
 
-from services.tool_registry import tool_registry
+from services.mcp_client import mcp_registry
 
 
 MAX_BODY_BYTES = 2 * 1024 * 1024
@@ -542,10 +542,10 @@ async def search_web(query: str, *, max_results: int = 5) -> list[dict]:
     if isinstance(max_results, bool) or not isinstance(max_results, int) or max_results <= 0:
         raise _error("invalid_result_limit", 400)
     limit = min(max_results, 5)
-    if tool_registry.get("mcp_ddg_search") is None:
+    if mcp_registry.get("mcp_ddg_search") is None:
         raise _error("search_unavailable", 503)
     try:
-        raw = await tool_registry.invoke(
+        raw = await mcp_registry.invoke(
             "mcp_ddg_search",
             {"query": normalized_query, "max_results": limit},
         )

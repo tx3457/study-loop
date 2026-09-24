@@ -1023,6 +1023,13 @@ async def _run_react_loop(
                     continue
 
                 question = ask_args.question
+                # A flagged passage can steer what the model asks for. The
+                # outbound tools are already withdrawn at this point, but
+                # ask_user is a control tool and stays available, so the user is
+                # the last check: say the question may have been influenced
+                # rather than presenting it as a neutral request.
+                if knowledge_context is not None and knowledge_context.state.outbound_blocked:
+                    question = "（本轮材料中检测到可疑指令内容，请谨慎判断下面的问题）\n" + question
                 question_leaked, _ = check_output_leak(question)
                 if question_leaked:
                     messages.append({

@@ -84,7 +84,6 @@ def build_control_tools(*, ask_user_resume_hint: str) -> list[dict]:
 
 def build_react_system_prompt(
     *,
-    include_live_mcp: bool = False,
     include_review_loop: bool = False,
     replay_safe_only: bool = False,
 ) -> str:
@@ -100,13 +99,6 @@ def build_react_system_prompt(
             "update_learning_profile / plan_next_step / get_user_profile / "
             "get_learning_path",
         ]
-    if include_live_mcp and not replay_safe_only:
-        tool_lines.append(
-            "联网工具（若已接入）：mcp_ddg_search（联网搜索）/ "
-            "mcp_ddg_fetch_content（抓取网页正文）——"
-            "仅当本地文档库无法回答、需要文档外的最新/外部信息时才用；"
-            "学习与出题材料优先用已上传文档。"
-        )
     tool_lines.append("控制工具：finalize（结束并给最终答案）/ ask_user（向用户提问）")
 
     principles = [

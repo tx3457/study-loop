@@ -143,22 +143,22 @@ class TestRegisterMCPToolsToRegistry(unittest.IsolatedAsyncioTestCase):
     """ToolRegistry 桥接:批量注册 + 闭包正确性"""
 
     async def asyncSetUp(self):
-        from services.tool_registry import tool_registry
+        from services.mcp_client import mcp_registry
 
-        self._original_tools = dict(tool_registry._tools)
-        tool_registry._tools.clear()
+        self._original_tools = dict(mcp_registry._tools)
+        mcp_registry._tools.clear()
 
     async def asyncTearDown(self):
-        from services.tool_registry import tool_registry
+        from services.mcp_client import mcp_registry
 
-        tool_registry._tools.clear()
-        tool_registry._tools.update(self._original_tools)
+        mcp_registry._tools.clear()
+        mcp_registry._tools.update(self._original_tools)
 
     async def test_registers_all_tools_with_prefix(self):
         from services.mcp_client import (
             MCPClient, StdioMCPServerConfig, register_mcp_tools_to_registry,
         )
-        from services.tool_registry import tool_registry
+        from services.mcp_client import mcp_registry
 
         cfg = StdioMCPServerConfig(server_name="fs", command="echo", args=[])
         client = MCPClient(cfg)
@@ -168,16 +168,16 @@ class TestRegisterMCPToolsToRegistry(unittest.IsolatedAsyncioTestCase):
 
         names = await register_mcp_tools_to_registry(client)
         self.assertEqual(set(names), {"mcp_fs_read", "mcp_fs_write"})
-        self.assertTrue(tool_registry.has("mcp_fs_read"))
-        self.assertTrue(tool_registry.has("mcp_fs_write"))
-        self.assertEqual(tool_registry.get("mcp_fs_read").metadata.max_retries, 0)
-        self.assertEqual(tool_registry.get("mcp_fs_write").metadata.max_retries, 0)
+        self.assertTrue(mcp_registry.has("mcp_fs_read"))
+        self.assertTrue(mcp_registry.has("mcp_fs_write"))
+        self.assertEqual(mcp_registry.get("mcp_fs_read").metadata.max_retries, 0)
+        self.assertEqual(mcp_registry.get("mcp_fs_write").metadata.max_retries, 0)
         self.assertEqual(
-            tool_registry.get("mcp_fs_read").metadata.effect_mode.value,
+            mcp_registry.get("mcp_fs_read").metadata.effect_mode.value,
             "unknown",
         )
         self.assertEqual(
-            tool_registry.get("mcp_fs_write").metadata.effect_mode.value,
+            mcp_registry.get("mcp_fs_write").metadata.effect_mode.value,
             "unknown",
         )
 
@@ -188,7 +188,7 @@ class TestRegisterMCPToolsToRegistry(unittest.IsolatedAsyncioTestCase):
             StdioMCPServerConfig,
             register_mcp_tools_to_registry,
         )
-        from services.tool_registry import tool_registry
+        from services.mcp_client import mcp_registry
 
         client = MCPClient(StdioMCPServerConfig(
             server_name="ddg",
@@ -208,12 +208,12 @@ class TestRegisterMCPToolsToRegistry(unittest.IsolatedAsyncioTestCase):
 
         await register_mcp_tools_to_registry(client)
 
-        search = tool_registry.get("mcp_ddg_search")
-        write = tool_registry.get("mcp_ddg_write")
+        search = mcp_registry.get("mcp_ddg_search")
+        write = mcp_registry.get("mcp_ddg_write")
         self.assertEqual(search.metadata.effect_mode.value, "read_only")
         self.assertEqual(write.metadata.effect_mode.value, "unknown")
         with self.assertRaises(MCPToolExecutionError):
-            await tool_registry.invoke("mcp_ddg_search", {})
+            await mcp_registry.invoke("mcp_ddg_search", {})
 
     async def test_invalid_remote_tool_name_is_rejected_before_registration(self):
         from services.mcp_client import (
@@ -221,7 +221,7 @@ class TestRegisterMCPToolsToRegistry(unittest.IsolatedAsyncioTestCase):
             StdioMCPServerConfig,
             register_mcp_tools_to_registry,
         )
-        from services.tool_registry import tool_registry
+        from services.mcp_client import mcp_registry
 
         secret = "forged-log-entry"
         client = MCPClient(
@@ -236,15 +236,15 @@ class TestRegisterMCPToolsToRegistry(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "invalid MCP tool definition"):
             await register_mcp_tools_to_registry(client)
 
-        self.assertFalse(tool_registry.has("mcp_ddg_search"))
-        self.assertFalse(tool_registry.has(f"mcp_ddg_bad\n{secret}"))
+        self.assertFalse(mcp_registry.has("mcp_ddg_search"))
+        self.assertFalse(mcp_registry.has(f"mcp_ddg_bad\n{secret}"))
 
     async def test_closure_routes_to_correct_mcp_tool_name(self):
         """关键:多 tool 注册后,各自 handler 调对应 MCP name 而不是最后一个"""
         from services.mcp_client import (
             MCPClient, StdioMCPServerConfig, register_mcp_tools_to_registry,
         )
-        from services.tool_registry import tool_registry
+        from services.mcp_client import mcp_registry
 
         cfg = StdioMCPServerConfig(server_name="fs", command="echo", args=[])
         client = MCPClient(cfg)
@@ -267,9 +267,9 @@ class TestRegisterMCPToolsToRegistry(unittest.IsolatedAsyncioTestCase):
         await register_mcp_tools_to_registry(client)
 
         # 分别触发 3 个 handler,验证 call_tool 收到的 name 各不相同
-        read_tool = tool_registry.get("mcp_fs_read")
-        write_tool = tool_registry.get("mcp_fs_write")
-        ls_tool = tool_registry.get("mcp_fs_ls")
+        read_tool = mcp_registry.get("mcp_fs_read")
+        write_tool = mcp_registry.get("mcp_fs_write")
+        ls_tool = mcp_registry.get("mcp_fs_ls")
         await read_tool.handler(path="/x")
         await write_tool.handler(path="/y", content="z")
         await ls_tool.handler()
@@ -285,7 +285,8 @@ class TestRegisterMCPToolsToRegistry(unittest.IsolatedAsyncioTestCase):
             StdioMCPServerConfig,
             register_mcp_tools_to_registry,
         )
-        from services.tool_registry import SideEffectAmbiguousError, tool_registry
+        from services.mcp_client import mcp_registry
+        from services.tool_registry import SideEffectAmbiguousError
 
         secret = "SENSITIVE_MCP_AUDIT_SENTINEL_035e"
         run_id = "mcp-error-redaction"
@@ -306,9 +307,9 @@ class TestRegisterMCPToolsToRegistry(unittest.IsolatedAsyncioTestCase):
 
         with self.assertLogs(level="WARNING") as captured:
             with self.assertRaises(SideEffectAmbiguousError):
-                await tool_registry.invoke("mcp_fs_read", {}, run_id=run_id)
+                await mcp_registry.invoke("mcp_fs_read", {}, run_id=run_id)
 
-        audit = [record.to_dict() for record in tool_registry.get_audit(run_id=run_id)]
+        audit = [record.to_dict() for record in mcp_registry.get_audit(run_id=run_id)]
         observable = json.dumps(audit, ensure_ascii=False) + "\n" + "\n".join(captured.output)
         self.assertNotIn(secret, observable)
         self.assertEqual(audit[0]["error_message"], "handler_error:MCPToolExecutionError")
@@ -318,7 +319,7 @@ class TestRegisterMCPToolsToRegistry(unittest.IsolatedAsyncioTestCase):
         from services.mcp_client import (
             MCPClient, StdioMCPServerConfig, register_mcp_tools_to_registry,
         )
-        from services.tool_registry import tool_registry
+        from services.mcp_client import mcp_registry
 
         client = MCPClient(
             StdioMCPServerConfig(server_name="fs", command="echo", args=[])
@@ -327,11 +328,11 @@ class TestRegisterMCPToolsToRegistry(unittest.IsolatedAsyncioTestCase):
         client._initialized = True
 
         await register_mcp_tools_to_registry(client)
-        self.assertTrue(tool_registry.has("mcp_fs_read"))
+        self.assertTrue(mcp_registry.has("mcp_fs_read"))
 
         await client.cleanup()
 
-        self.assertFalse(tool_registry.has("mcp_fs_read"))
+        self.assertFalse(mcp_registry.has("mcp_fs_read"))
         self.assertEqual(client._registered_tools, {})
         self.assertIsNone(client._session)
         self.assertFalse(client._initialized)
@@ -340,33 +341,33 @@ class TestRegisterMCPToolsToRegistry(unittest.IsolatedAsyncioTestCase):
         from services.mcp_client import (
             MCPClient, StdioMCPServerConfig, register_mcp_tools_to_registry,
         )
-        from services.tool_registry import tool_registry
+        from services.mcp_client import mcp_registry
 
         config = StdioMCPServerConfig(server_name="fs", command="echo", args=[])
         old_client = MCPClient(config)
         old_client._session = _make_mock_session([_make_mock_tool("read")])
         old_client._initialized = True
         await register_mcp_tools_to_registry(old_client)
-        old_tool = tool_registry.get("mcp_fs_read")
+        old_tool = mcp_registry.get("mcp_fs_read")
 
         new_client = MCPClient(config)
         new_client._session = _make_mock_session([_make_mock_tool("read")])
         new_client._initialized = True
         await register_mcp_tools_to_registry(new_client)
-        new_tool = tool_registry.get("mcp_fs_read")
+        new_tool = mcp_registry.get("mcp_fs_read")
         self.assertIsNot(old_tool, new_tool)
 
         await old_client.cleanup()
-        self.assertIs(tool_registry.get("mcp_fs_read"), new_tool)
+        self.assertIs(mcp_registry.get("mcp_fs_read"), new_tool)
 
         await new_client.cleanup()
-        self.assertFalse(tool_registry.has("mcp_fs_read"))
+        self.assertFalse(mcp_registry.has("mcp_fs_read"))
 
     async def test_partial_registration_can_be_rolled_back_by_cleanup(self):
         from services.mcp_client import (
             MCPClient, StdioMCPServerConfig, register_mcp_tools_to_registry,
         )
-        from services.tool_registry import tool_registry
+        from services.mcp_client import mcp_registry
 
         client = MCPClient(
             StdioMCPServerConfig(server_name="fs", command="echo", args=[])
@@ -375,21 +376,89 @@ class TestRegisterMCPToolsToRegistry(unittest.IsolatedAsyncioTestCase):
             [_make_mock_tool("read"), _make_mock_tool("write")]
         )
         client._initialized = True
-        original_register = tool_registry.register
+        original_register = mcp_registry.register
 
         def fail_on_second_tool(tool):
             if tool.name == "mcp_fs_write":
                 raise RuntimeError("registry unavailable")
             original_register(tool)
 
-        with patch.object(tool_registry, "register", side_effect=fail_on_second_tool):
+        with patch.object(mcp_registry, "register", side_effect=fail_on_second_tool):
             with self.assertRaisesRegex(RuntimeError, "registry unavailable"):
                 await register_mcp_tools_to_registry(client)
 
-        self.assertTrue(tool_registry.has("mcp_fs_read"))
+        self.assertTrue(mcp_registry.has("mcp_fs_read"))
         await client.cleanup()
-        self.assertFalse(tool_registry.has("mcp_fs_read"))
-        self.assertFalse(tool_registry.has("mcp_fs_write"))
+        self.assertFalse(mcp_registry.has("mcp_fs_read"))
+        self.assertFalse(mcp_registry.has("mcp_fs_write"))
+
+
+class TestMCPToolsStayOutOfTheModelFacingSurface(unittest.IsolatedAsyncioTestCase):
+    """A remote tool must never appear in a list the model chooses from.
+
+    knowledge_web owns the security contract for public web access (SSRF checks,
+    per-hop redirect validation, pinned addresses, body limits). A raw MCP fetch
+    tool enforces none of that, so publishing it to the global registry would let
+    any agent path reach arbitrary URLs straight through the remote server.
+    """
+
+    async def test_registered_mcp_tools_are_absent_from_every_model_facing_list(self):
+        from services.mcp_client import (
+            MCPClient,
+            StdioMCPServerConfig,
+            mcp_registry,
+            register_mcp_tools_to_registry,
+        )
+        from services.tools import (
+            allowed_tool_names,
+            get_read_only_tool_capabilities,
+            get_tool_definitions,
+            replay_safe_tool_names,
+        )
+
+        client = MCPClient(StdioMCPServerConfig(
+            server_name="ddg",
+            command="echo",
+            read_only_tools=frozenset({"search", "fetch_content"}),
+        ))
+        client._session = _make_mock_session(
+            [_make_mock_tool("search"), _make_mock_tool("fetch_content")]
+        )
+        client._initialized = True
+
+        names = await register_mcp_tools_to_registry(client)
+        try:
+            self.assertEqual(set(names), {"mcp_ddg_search", "mcp_ddg_fetch_content"})
+            # Registered and callable by the application adapter ...
+            self.assertTrue(mcp_registry.has("mcp_ddg_search"))
+            self.assertTrue(mcp_registry.has("mcp_ddg_fetch_content"))
+
+            # ... but invisible to every surface a model picks tools from.
+            exposed = {d["function"]["name"] for d in get_tool_definitions()}
+            read_only_schemas, read_only_names = get_read_only_tool_capabilities()
+            exposed_read_only = {d["function"]["name"] for d in read_only_schemas}
+            allowed = allowed_tool_names()
+            replay_safe = replay_safe_tool_names()
+
+            # Control: an empty surface would make every assertion below pass
+            # for the wrong reason.
+            self.assertIn("search_document", exposed)
+            self.assertIn("search_document", allowed)
+            self.assertTrue(replay_safe)
+
+            for tool_name in names:
+                self.assertNotIn(tool_name, exposed)
+                self.assertNotIn(tool_name, allowed)
+                self.assertNotIn(tool_name, read_only_names)
+                self.assertNotIn(tool_name, exposed_read_only)
+                # replay_safe_tool_names is what the interrupt-capable
+                # assistant path offers the model.
+                self.assertNotIn(tool_name, replay_safe)
+        finally:
+            await client.cleanup()
+
+        self.assertFalse(mcp_registry.has("mcp_ddg_search"))
+        self.assertFalse(mcp_registry.has("mcp_ddg_fetch_content"))
 
 
 if __name__ == "__main__":
