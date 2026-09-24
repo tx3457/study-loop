@@ -141,6 +141,48 @@ these exceptions. Remove an exception when a patched version is adopted.
   unless it is retrieved again. The durable protection against cross-user writes
   remains `ToolMetadata.owner_argument`, which fails closed when no trusted user
   context is present.
+- Outbound web access is a separate capability with its own boundary, available
+  only inside a knowledge-base run and only when the deployment enables both
+  `KNOWLEDGE_BASES_ENABLED` and `MCP_LIVE_ENABLED`. The remote DuckDuckGo MCP
+  tools are registered in an isolated registry (`services/mcp_client.py`), not
+  the global one, so they never appear in `get_tool_definitions`,
+  `allowed_tool_names`, `replay_safe_tool_names` or any other list the model
+  chooses from. Reaching the public web goes through
+  `services/knowledge_web.py`, which owns the security contract the remote
+  server does not provide: scheme and port validation, rejection of
+  non-public addresses, a fresh resolution pinned to the connection so a
+  rebind cannot follow the check, per-hop revalidation across at most three
+  redirects, a content-type allowlist, bounded decompression, and a total
+  deadline. `search_web` takes no arguments -- the query is fixed to the user's
+  own words -- and `fetch_web` accepts only a URL the user supplied or a search
+  already returned, so retrieved private text cannot become an outbound
+  destination. Each run is further bounded by
+  `MAX_WEB_SEARCHES_PER_RUN`/`MAX_WEB_FETCHES_PER_RUN`.
+  Boundaries: address filtering relies on `ipaddress.is_global`, which admits
+  NAT64-mapped and site-local forms, so a DNS64 deployment should add an
+  explicit deny list; the fetch path has no process-wide concurrency limit; and
+  this environment's DNS resolves public names into a reserved range, so live
+  public retrieval has never been exercised end to end here.
+- Search results are untrusted text and are scanned per row. A result whose
+  title or snippet carries instruction-shaped prose is dropped and counted in
+  `filtered_result_count`; the surviving rows stay usable and only they are
+  authorized for `fetch_web`. This deliberately does not withdraw web access
+  for the whole run, matching the rule above that read-only tools keep working:
+  a learner asking what prompt injection is would otherwise disable their own
+  web access, and `fetch_web`'s authorization list already denies any target a
+  poisoned row might name. URLs are excluded from the scan because ordinary
+  paths (`/docs/system-prompt-basics`, `/wiki/Jailbreak_(film)`) match the
+  patterns without being an injection. A fetched page body that trips the scan
+  still withdraws the outbound tools for that run, and because `ask_user`
+  remains available as a control tool, a question asked after that point is
+  prefixed with a visible notice that the material may have influenced it.
+- Citations carry a provenance tier (`origin`): material the user uploaded,
+  a web page this deployment ingested into the knowledge base, or a snapshot
+  fetched during the current run. It records where a passage came from and how
+  accountable that origin is; it is not a claim that the passage is true, and
+  it is a separate axis from `source_status`, which says whether the source is
+  still live. Persisted sessions written before the tier existed deserialize
+  with it derived from the record's kind.
 - Read-only and idempotent tools may retry automatically. Unknown and
   non-idempotent tools do not. Autonomous, quiz-answer, adaptive-submit, and
   tool-chat clients may send an `Idempotency-Key`; completed responses are

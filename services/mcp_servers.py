@@ -4,10 +4,13 @@ Live MCP server 接入（灰度）
 接入 duckduckgo-mcp-server（uvx 启动，stdio transport，无需 API key）：
   - search        ：DuckDuckGo 联网搜索
   - fetch_content ：抓取指定 URL 的正文
-经 services.mcp_client.register_mcp_tools_to_registry 批量注册进全局 ToolRegistry，
-工具名形如 mcp_ddg_search / mcp_ddg_fetch_content。注册后 standalone autonomous 与
-chat/tools 可动态发现；interrupt-capable assistant 仅开放声明为可重放的工具，因此
-unknown MCP 默认不会进入该路径。
+经 services.mcp_client.register_mcp_tools_to_registry 注册进独立的 mcp_registry
+（不是全局 ToolRegistry），工具名形如 mcp_ddg_search / mcp_ddg_fetch_content。
+模型永远看不到这些工具：它们不进 get_tool_definitions / allowed_tool_names，
+只由持有该能力安全契约的应用适配器调用——目前只有 services.knowledge_web.search_web
+消费 mcp_ddg_search，并在自己这一层做 query 约束与结果边界。
+原始 fetch 工具没有消费者：公网抓取一律走 knowledge_web.fetch_public_page，
+它做 SSRF 校验、逐跳重定向校验、IP 钉定与正文大小限制，这些是远端 MCP server 不做的。
 
 灰度：MCP_LIVE_ENABLED=true 才连（默认 false）；连不上 fail-soft 不阻断启动（降级回无联网）。
 守底线：出题（quiz_agent）走 search_document 检索本地文档库，不碰这些联网工具；

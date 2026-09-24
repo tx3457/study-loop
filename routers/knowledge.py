@@ -42,8 +42,8 @@ from routers.documents import (
 from services.auth import require_user_id
 from services.idempotency import InvalidIdempotencyKeyError, normalize_idempotency_key
 from services.knowledge_client import KnowledgeServiceError, knowledge_client
+from services.mcp_client import mcp_registry
 from services.parser import DocumentParseError, UnsupportedFileError, parse_upload
-from services.tool_registry import tool_registry
 from services.vectorstore import _get_bm25_index, _get_public_document_collection
 
 
@@ -191,7 +191,7 @@ async def capabilities(owner_id: str = Depends(require_user_id)) -> KnowledgeCap
             available=bool(payload.get("available", True)),
             web_search_available=(
                 bool(payload.get("available", True))
-                and tool_registry.has("mcp_ddg_search")
+                and mcp_registry.has("mcp_ddg_search")
             ),
         )
     except (KnowledgeServiceError, ValueError, AttributeError):

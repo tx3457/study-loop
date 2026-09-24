@@ -22,10 +22,18 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from services.tool_registry import EffectMode, Tool, ToolMetadata, tool_registry
+from services.tool_registry import EffectMode, Tool, ToolMetadata, ToolRegistry
 
 logger = logging.getLogger(__name__)
 _FUNCTION_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+# MCP tools live in a registry of their own, never the global one. A remote
+# server's tools are reachable only through an application adapter that owns the
+# security contract for that capability (see services.knowledge_web.search_web).
+# Registering them globally would publish them to every model-facing tool list
+# (get_tool_definitions / allowed_tool_names), letting any agent path call a raw
+# remote fetch tool that bypasses the SSRF, redirect and body limits enforced here.
+mcp_registry = ToolRegistry.isolated()
 
 
 class MCPToolExecutionError(RuntimeError):
@@ -125,7 +133,7 @@ class MCPClient:
     async def cleanup(self) -> None:
         """释放子进程 + session 资源(幂等,best-effort)"""
         for name, tool in list(self._registered_tools.items()):
-            tool_registry.unregister(name, expected_tool=tool)
+            mcp_registry.unregister(name, expected_tool=tool)
         self._registered_tools.clear()
         try:
             await self._exit_stack.aclose()
@@ -198,7 +206,7 @@ async def register_mcp_tools_to_registry(
             ),
         )
         client._registered_tools[full_name] = tool
-        tool_registry.register(tool)
+        mcp_registry.register(tool)
         registered.append(full_name)
 
     logger.info(

@@ -12,7 +12,8 @@ import pytest
 
 from services import knowledge_web
 from services.knowledge_web import WebRetrievalError, fetch_public_page, search_web
-from services.tool_registry import EffectMode, Tool, ToolMetadata, tool_registry
+from services.mcp_client import mcp_registry
+from services.tool_registry import EffectMode, Tool, ToolMetadata
 
 
 PUBLIC_TEST_IP = ipaddress.ip_address("93.184.216.34")
@@ -279,8 +280,8 @@ def test_search_web_parses_bounded_markdown_and_rejects_malicious_urls() -> None
    Internal only.
 """
 
-    previous = tool_registry.get("mcp_ddg_search")
-    tool_registry.register(
+    previous = mcp_registry.get("mcp_ddg_search")
+    mcp_registry.register(
         Tool(
             name="mcp_ddg_search",
             description="test DDG",
@@ -296,9 +297,9 @@ def test_search_web_parses_bounded_markdown_and_rejects_malicious_urls() -> None
     try:
         results = asyncio.run(search_web(" safe query ", max_results=99))
     finally:
-        tool_registry.unregister("mcp_ddg_search")
+        mcp_registry.unregister("mcp_ddg_search")
         if previous is not None:
-            tool_registry.register(previous)
+            mcp_registry.register(previous)
 
     assert results == [
         {
@@ -323,8 +324,8 @@ def test_search_web_parses_upstream_ddg_numbered_format() -> None:
    Summary: Second summary.
 """
 
-    previous = tool_registry.get("mcp_ddg_search")
-    tool_registry.register(
+    previous = mcp_registry.get("mcp_ddg_search")
+    mcp_registry.register(
         Tool(
             name="mcp_ddg_search",
             description="test DDG",
@@ -336,9 +337,9 @@ def test_search_web_parses_upstream_ddg_numbered_format() -> None:
     try:
         results = asyncio.run(search_web("format"))
     finally:
-        tool_registry.unregister("mcp_ddg_search")
+        mcp_registry.unregister("mcp_ddg_search")
         if previous is not None:
-            tool_registry.register(previous)
+            mcp_registry.register(previous)
 
     assert results == [
         {"title": "First result", "url": "https://example.com/one", "snippet": "First summary."},
@@ -357,8 +358,8 @@ def test_search_web_rejects_error_observations(observation: str) -> None:
     async def handler(**kwargs) -> str:
         return observation
 
-    previous = tool_registry.get("mcp_ddg_search")
-    tool_registry.register(
+    previous = mcp_registry.get("mcp_ddg_search")
+    mcp_registry.register(
         Tool(
             name="mcp_ddg_search",
             description="test DDG",
@@ -371,9 +372,9 @@ def test_search_web_rejects_error_observations(observation: str) -> None:
         with pytest.raises(WebRetrievalError) as caught:
             asyncio.run(search_web("error observation"))
     finally:
-        tool_registry.unregister("mcp_ddg_search")
+        mcp_registry.unregister("mcp_ddg_search")
         if previous is not None:
-            tool_registry.register(previous)
+            mcp_registry.register(previous)
 
     assert caught.value.code == "search_failed"
     assert caught.value.status_code == 502
@@ -385,8 +386,8 @@ def test_search_web_preserves_valid_no_results_as_empty_list() -> None:
     async def handler(**kwargs) -> str:
         return "No results were found for your search query."
 
-    previous = tool_registry.get("mcp_ddg_search")
-    tool_registry.register(
+    previous = mcp_registry.get("mcp_ddg_search")
+    mcp_registry.register(
         Tool(
             name="mcp_ddg_search",
             description="test DDG",
@@ -398,20 +399,20 @@ def test_search_web_preserves_valid_no_results_as_empty_list() -> None:
     try:
         assert asyncio.run(search_web("no matches")) == []
     finally:
-        tool_registry.unregister("mcp_ddg_search")
+        mcp_registry.unregister("mcp_ddg_search")
         if previous is not None:
-            tool_registry.register(previous)
+            mcp_registry.register(previous)
 
 
 def test_search_web_requires_registered_ddg_tool() -> None:
-    previous = tool_registry.get("mcp_ddg_search")
+    previous = mcp_registry.get("mcp_ddg_search")
     if previous is not None:
-        tool_registry.unregister("mcp_ddg_search")
+        mcp_registry.unregister("mcp_ddg_search")
     try:
         with pytest.raises(WebRetrievalError) as caught:
             asyncio.run(search_web("query"))
     finally:
         if previous is not None:
-            tool_registry.register(previous)
+            mcp_registry.register(previous)
     assert caught.value.code == "search_unavailable"
     assert caught.value.status_code == 503

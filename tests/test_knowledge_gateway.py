@@ -9,7 +9,8 @@ from fastapi.testclient import TestClient
 
 from routers import knowledge
 from services.auth import require_user_id
-from services.tool_registry import EffectMode, Tool, ToolMetadata, tool_registry
+from services.mcp_client import mcp_registry
+from services.tool_registry import EffectMode, Tool, ToolMetadata
 
 
 def _app(owner_id: str = "alice") -> FastAPI:
@@ -85,8 +86,8 @@ def test_capability_uses_registered_local_ddg_tool_when_graph_is_available():
         handler=handler,
         metadata=ToolMetadata(max_retries=0, effect_mode=EffectMode.READ_ONLY),
     )
-    previous = tool_registry.get(tool.name)
-    tool_registry.register(tool)
+    previous = mcp_registry.get(tool.name)
+    mcp_registry.register(tool)
     upstream = _response(
         "GET",
         "/knowledge-bases/capabilities",
@@ -99,9 +100,9 @@ def test_capability_uses_registered_local_ddg_tool_when_graph_is_available():
         ):
             response = TestClient(_app()).get("/knowledge-bases/capabilities")
     finally:
-        tool_registry.unregister(tool.name, expected_tool=tool)
+        mcp_registry.unregister(tool.name, expected_tool=tool)
         if previous is not None:
-            tool_registry.register(previous)
+            mcp_registry.register(previous)
     assert response.json() == {
         "enabled": True,
         "available": True,
