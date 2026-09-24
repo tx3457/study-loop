@@ -20,6 +20,7 @@ from routers.eval import router as eval_router
 from routers.autonomous import router as autonomous_router
 from routers.adaptive import router as adaptive_router
 from routers.audit import router as audit_router
+from routers.usage import router as usage_router
 from routers.health import router as health_router
 from services.auth import require_user_id, verify_configuration
 from services.memory_persist import load_snapshot, persist_snapshot
@@ -187,6 +188,7 @@ app.include_router(eval_router, dependencies=_AUTHENTICATED)
 app.include_router(autonomous_router, dependencies=_AUTHENTICATED)
 app.include_router(adaptive_router, dependencies=_AUTHENTICATED)
 app.include_router(audit_router, dependencies=_AUTHENTICATED)
+app.include_router(usage_router, dependencies=_AUTHENTICATED)
 _include_experimental_routers(app)
 app.include_router(health_router)
 

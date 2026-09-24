@@ -446,6 +446,42 @@
   color: var(--text-tertiary);
 }
 
+.empty-state .state-action + .empty-desc {
+  margin-top: 10px;
+}
+
+/* 首次使用时的配置提示：是指引而不是报错，所以用金色而非红色。 */
+.config-notice {
+  max-width: 560px;
+  margin: 20px auto 0;
+  padding: 14px 18px;
+  border: 1px solid var(--accent-gold);
+  border-radius: var(--radius-sm);
+  background: var(--accent-gold-soft);
+  color: var(--text-secondary);
+  font-size: 13px;
+  text-align: left;
+}
+
+.config-notice-title {
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.config-notice ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+.config-notice li {
+  overflow-wrap: anywhere;
+}
+
+.config-notice-foot {
+  margin-top: 6px;
+  color: var(--text-tertiary);
+}
+
 /* ── Skeleton Loading ─────────────────────────────────────────────── */
 
 .doc-list-skeleton {

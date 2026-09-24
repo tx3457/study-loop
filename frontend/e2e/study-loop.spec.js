@@ -68,6 +68,35 @@ async function mockApi(page, handler) {
       ) {
         response = { body: null }
       }
+      // An empty library checks provider configuration once, and the Dashboard
+      // reads the review queue. Their neutral baseline is "configured" and "nothing
+      // due"; tests about either behavior override it in their own handler.
+      if (!response && request.method() === 'GET' && path === '/health/providers') {
+        response = { body: { status: 'ready', providers: {} } }
+      }
+      if (
+        !response
+        && request.method() === 'GET'
+        && path === '/user/default_user/reviews/due'
+      ) {
+        response = { body: { items: [], total: 0 } }
+      }
+      // The Dashboard also reads model usage; "no calls yet" keeps its card hidden.
+      if (!response && request.method() === 'GET' && path === '/usage') {
+        response = {
+          body: {
+            since: '2026-07-16T00:00:00Z',
+            unit: 'tokens',
+            currency_estimated: false,
+            excludes: ['knowledge_service'],
+            operations: [],
+            totals: {
+              calls: 0, calls_without_usage: 0, prompt_tokens: 0,
+              completion_tokens: 0, chat_tokens: 0, embedding_tokens: 0,
+            },
+          },
+        }
+      }
 
       if (!response) {
         unexpectedRequests.push(`${request.method()} ${path}`)
@@ -7792,4 +7821,204 @@ test('a response from an unmounted Quiz cannot overwrite a newer Dashboard recov
     releaseAnswer()
     releasePractice()
   }
+})
+
+test('an empty library loads the bundled sample through the ordinary upload', async ({ page }) => {
+  const problems = trackBrowserProblems(page)
+  let documents = []
+  let uploadBody = ''
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/documents') return { body: { documents } }
+    if (request.method() === 'GET' && path === '/documents/sample') {
+      return {
+        body: {
+          filename: 'sample_document.md',
+          content: '# Backpropagation overview\n\nGradients flow backwards through layers.',
+        },
+      }
+    }
+    if (request.method() === 'POST' && path === '/documents/upload') {
+      uploadBody = request.postDataBuffer()?.toString('utf-8') || ''
+      documents = ['sample_document.md']
+      return { body: { document_id: 'sample_document.md', chunks: 1 } }
+    }
+    return null
+  })
+
+  await page.goto('/documents')
+  // Control: a configured deployment shows no setup notice.
+  await expect(page.getByText('模型服务还没配好')).toHaveCount(0)
+  await page.getByRole('button', { name: '没有现成材料？先用示例试试' }).click()
+
+  await expect(page.getByText('材料 sample_document.md 已上传并建立索引')).toBeVisible()
+  // The sample went through the same multipart upload as a hand-picked file.
+  expect(uploadBody).toContain('filename="sample_document.md"')
+  expect(uploadBody).toContain('Gradients flow backwards through layers.')
+  expect(unexpectedRequests).toEqual([])
+  expect(problems).toEqual([])
+})
+
+test('an empty library names the exact .env lines when providers are misconfigured', async ({ page }) => {
+  const problems = trackBrowserProblems(page)
+  const chatPair = [
+    { issue: 'api_key_placeholder', env: 'LLM_API_KEY' },
+    { issue: 'base_url_placeholder', env: 'LLM_BASE_URL' },
+  ]
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/health/providers') {
+      // What a freshly copied .env.example produces: structured output and
+      // embeddings inherit the placeholder chat key and URL.
+      return {
+        status: 503,
+        body: {
+          status: 'degraded',
+          providers: {
+            chat: {
+              status: 'misconfigured',
+              fix_env: [...chatPair, { issue: 'model_placeholder', env: 'LLM_MODEL' }],
+            },
+            structured: {
+              status: 'misconfigured',
+              fix_env: [...chatPair, { issue: 'model_placeholder', env: 'LLM_MODEL' }],
+            },
+            embedding: {
+              status: 'misconfigured',
+              fix_env: [...chatPair, { issue: 'model_placeholder', env: 'LLM_EMBEDDING_MODEL' }],
+            },
+          },
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/documents')
+
+  const notice = page.getByRole('status').filter({ hasText: '模型服务还没配好' })
+  await expect(notice).toBeVisible()
+  // Nine issues collapse to one line per variable to edit.
+  await expect(notice.getByRole('listitem')).toHaveCount(4)
+  await expect(notice).toContainText(
+    '.env 中的 LLM_API_KEY 仍是示例占位值（影响：对话模型、结构化输出、向量模型）',
+  )
+  await expect(notice).toContainText(
+    '.env 中的 LLM_MODEL 仍是示例占位值（影响：对话模型、结构化输出）',
+  )
+  await expect(notice).toContainText(
+    '.env 中的 LLM_EMBEDDING_MODEL 仍是示例占位值（影响：向量模型）',
+  )
+  // The sample stays available: the notice explains, it does not block.
+  await expect(page.getByRole('button', { name: '没有现成材料？先用示例试试' })).toBeEnabled()
+  expect(unexpectedRequests).toEqual([])
+  // A 503 is the expected answer here, and Chromium logs every non-2xx load.
+  expect(problems.filter(problem => !problem.includes('Failed to load resource'))).toEqual([])
+})
+
+test('Dashboard shows what is due for review today, most overdue first', async ({ page }) => {
+  const problems = trackBrowserProblems(page)
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/user/default_user/sessions') {
+      return { body: [{ date: '2026-07-16', correct_rate: 0.6 }] }
+    }
+    if (request.method() === 'GET' && path === '/user/default_user/profile') {
+      return { body: { topic_mastery: { 'notes.md': 0.6 }, weak_points: [], total_sessions: 1 } }
+    }
+    if (request.method() === 'GET' && path === '/user/default_user/reviews/due') {
+      return {
+        body: {
+          total: 2,
+          items: [
+            { point: '反向传播', document_id: 'notes.md', due: '2026-07-10',
+              overdue_days: 6, interval: 1, streak: 0 },
+            { point: '链式法则', document_id: 'notes.md', due: '2026-07-16',
+              overdue_days: 0, interval: 6, streak: 2 },
+          ],
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/dashboard')
+
+  await expect(page.locator('.stat-card').filter({ hasText: '待复习' })).toContainText('2')
+  const items = page.locator('.review-item')
+  await expect(items).toHaveCount(2)
+  await expect(items.nth(0)).toContainText('反向传播')
+  await expect(items.nth(0)).toContainText('逾期 6 天')
+  // A streak of 0 is not "reviewed 0 times"; it is simply not shown.
+  await expect(items.nth(0)).not.toContainText('连续答对')
+  await expect(items.nth(1)).toContainText('今天到期')
+  await expect(items.nth(1)).toContainText('连续答对 2 次')
+  expect(unexpectedRequests).toEqual([])
+  expect(problems).toEqual([])
+})
+
+test('a failing review queue is a partial problem, never a blocked report', async ({ page }) => {
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/user/default_user/sessions') {
+      return { body: [{ date: '2026-07-16', correct_rate: 0.6 }] }
+    }
+    if (request.method() === 'GET' && path === '/user/default_user/profile') {
+      return { body: { topic_mastery: { 'notes.md': 0.6 }, weak_points: [], total_sessions: 1 } }
+    }
+    if (request.method() === 'GET' && path === '/user/default_user/reviews/due') {
+      return { status: 503, body: { detail: '复习安排暂时不可用' } }
+    }
+    return null
+  })
+
+  await page.goto('/dashboard')
+
+  await expect(page.getByRole('alert')).toContainText('复习安排')
+  await expect(page.getByText('无法加载学习报告')).toHaveCount(0)
+  await expect(page.locator('.stat-card').filter({ hasText: '学习次数' })).toContainText('1')
+  await expect(page.locator('.stat-card').filter({ hasText: '待复习' })).toContainText('—')
+  expect(unexpectedRequests).toEqual([])
+})
+
+test('Dashboard shows model usage per feature without inventing a cost', async ({ page }) => {
+  const problems = trackBrowserProblems(page)
+  const unexpectedRequests = await mockApi(page, ({ path, request }) => {
+    if (request.method() === 'GET' && path === '/user/default_user/sessions') return { body: [] }
+    if (request.method() === 'GET' && path === '/user/default_user/profile') return { body: null }
+    if (request.method() === 'GET' && path === '/usage') {
+      return {
+        body: {
+          since: '2026-07-16T00:00:00Z',
+          unit: 'tokens',
+          currency_estimated: false,
+          excludes: ['knowledge_service'],
+          operations: [
+            { key: 'quiz', label: '答题练习（含批改）', calls: 4, calls_without_usage: 1,
+              prompt_tokens: 9000, completion_tokens: 3345, chat_tokens: 12345, embedding_tokens: 0 },
+            { key: 'documents', label: '文档入库', calls: 2, calls_without_usage: 0,
+              prompt_tokens: 0, completion_tokens: 0, chat_tokens: 0, embedding_tokens: 800 },
+          ],
+          totals: { calls: 6, calls_without_usage: 1, prompt_tokens: 9000,
+            completion_tokens: 3345, chat_tokens: 12345, embedding_tokens: 800 },
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/dashboard')
+  // Usage exists before any quiz is graded (document embeddings cost tokens).
+  await expect(page.getByText('还没有学习数据')).toBeVisible()
+
+  const card = page.locator('details.usage-card')
+  await expect(card).toBeVisible()
+  // Collapsed by default: operational detail must not crowd the learning report.
+  await expect(card.locator('table')).toBeHidden()
+  await card.locator('summary').click()
+
+  const quizRow = card.getByRole('row', { name: /答题练习/ })
+  await expect(quizRow).toContainText('12,345')
+  await expect(card.getByRole('row', { name: /文档入库/ })).toContainText('800')
+  await expect(card).toContainText('不估算金额')
+  await expect(card).toContainText('知识库服务的调用不在其中')
+  await expect(card).toContainText('另有 1 次调用服务商未返回用量')
+  expect(unexpectedRequests).toEqual([])
+  expect(problems).toEqual([])
 })

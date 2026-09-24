@@ -56,7 +56,8 @@ Autonomous 是模型选择工具的有界 Agent；Adaptive 是模型选择结构
 
 ```bash
 cp .env.example .env
-# 配置模型服务，并设置非空 POSTGRES_PASSWORD
+# 只需填写 .env 顶部"最小配置"块里的 5 项：
+#   LLM_API_KEY、LLM_BASE_URL、LLM_MODEL、LLM_EMBEDDING_MODEL、POSTGRES_PASSWORD
 docker compose up --build -d --wait
 ```
 
@@ -65,9 +66,9 @@ docker compose up --build -d --wait
 - Web：<http://localhost:4001>
 - API 文档：<http://localhost:8001/docs>
 
-默认拓扑只绑定本机回环地址，不发布 PostgreSQL 端口，并固定使用一个 backend worker。Provider 配置、健康检查和可选能力见 [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md)；本地开发与测试命令见 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)。
+第一次打开时，文档页会核对模型配置，若还有没改的占位值，会直接指出是 `.env` 里的哪一行；手头没有材料可以点"先用示例试试"，载入仓库内的示例材料（[`examples/sample_document.md`](examples/sample_document.md)），接着就能出题、答题和查看报告。
 
-示例学习材料位于 [`examples/sample_document.md`](examples/sample_document.md)。
+默认拓扑只绑定本机回环地址，不发布 PostgreSQL 端口，并固定使用一个 backend worker。Provider 配置、健康检查、模型用量和可选能力见 [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md)；本地开发与测试命令见 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md)。
 
 ## 技术栈
 
@@ -99,4 +100,4 @@ Web 产品主线包括文档管理、学习路径、答题练习、自主 Agent�
 
 ## License
 
-Copyright (c) 2026 tx3457. All rights reserved. See [LICENSE](LICENSE).
+Copyright 2026 tx3457. Licensed under the [Apache License, Version 2.0](LICENSE); see [NOTICE](NOTICE).

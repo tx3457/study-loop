@@ -22,6 +22,12 @@ _REQUEST_ID_PATTERN = re.compile(r"^req_[0-9a-f]{32}$")
 _request_id: ContextVar[str | None] = ContextVar(
     "studyloop_request_id", default=None
 )
+# The request path, so work done deep inside a request (a model call made by a
+# tool three layers down) can be attributed to the feature that caused it
+# without threading a label through every call site.
+_request_path: ContextVar[str | None] = ContextVar(
+    "studyloop_request_path", default=None
+)
 
 
 class _ClientSendDisconnected(Exception):
@@ -42,6 +48,11 @@ def normalize_request_id(value: str | None) -> str:
 def current_request_id() -> str:
     """Return the active request id, or a safe placeholder outside HTTP."""
     return _request_id.get() or "request_unavailable"
+
+
+def current_request_path() -> str | None:
+    """Return the active request path, or None for work outside any request."""
+    return _request_path.get()
 
 
 def public_error_payload(
@@ -176,6 +187,7 @@ class RequestContextMiddleware:
         request_id = normalize_request_id(incoming_id)
         scope.setdefault("state", {})["request_id"] = request_id
         token: Token[str | None] = _request_id.set(request_id)
+        path_token: Token[str | None] = _request_path.set(scope.get("path"))
         response_status: int | None = None
         response_complete = False
 
@@ -222,4 +234,5 @@ class RequestContextMiddleware:
                         route_template,
                         response_status,
                     )
+            _request_path.reset(path_token)
             _request_id.reset(token)

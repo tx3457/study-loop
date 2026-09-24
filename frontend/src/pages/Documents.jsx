@@ -1,5 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { uploadDocument, getDocuments, deleteDocument } from '../api/client'
+import {
+  uploadDocument,
+  getDocuments,
+  deleteDocument,
+  getSampleDocument,
+  getProviderHealth,
+} from '../api/client'
+import { describeProviderProblems } from '../state/providerHealth'
 import './Documents.css'
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -14,6 +21,9 @@ export default function Documents() {
   const [documents, setDocuments] = useState([])
   const [loading, setLoading] = useState(true)
   const [uploading, setUploading] = useState(false)
+  const [sampleLoading, setSampleLoading] = useState(false)
+  const [providerProblems, setProviderProblems] = useState([])
+  const providerCheckedRef = useRef(false)
   const [uploadProgress, setUploadProgress] = useState(null) // {filename, status}
   const [dragOver, setDragOver] = useState(false)
   const [deleting, setDeleting] = useState(null) // document_id being deleted
@@ -64,6 +74,20 @@ export default function Documents() {
       }
     }
   }, [])
+
+  // 第一次打开、还没有任何材料时顺手核对一次模型配置：填错的 key 应当在
+  // 第一屏被发现，而不是等到第一次出题失败。只列模型目录、不耗 token，
+  // 每次页面生命周期最多一次；拿不到结果就不提示——它是提示，不是闸门。
+  const noDocuments = !loading && !listError && documents.length === 0
+  useEffect(() => {
+    if (!noDocuments || providerCheckedRef.current) return
+    providerCheckedRef.current = true
+    getProviderHealth()
+      .then(health => {
+        if (mountedRef.current) setProviderProblems(describeProviderProblems(health))
+      })
+      .catch(() => {})
+  }, [noDocuments])
 
   useEffect(() => {
     mountedRef.current = true
@@ -169,6 +193,30 @@ export default function Documents() {
           if (mountedRef.current) setUploadProgress(null)
         }, 1500)
       }
+    }
+  }
+
+  /* ── 示例材料 ──────────────────────────────────────────────────── */
+  // 首次使用时不必先去找一份文件。示例走的是和手动上传完全相同的流程，
+  // 所以进度、错误提示和列表核对都不需要另写一套。
+  const handleTrySample = async () => {
+    if (sampleLoading || uploadingRef.current || mutationRef.current || deleteCandidate) return
+    setSampleLoading(true)
+    setError(null)
+    try {
+      const sample = await getSampleDocument()
+      if (!mountedRef.current) return
+      if (typeof sample?.filename !== 'string' || typeof sample?.content !== 'string') {
+        throw new Error('示例材料格式无效')
+      }
+      const file = new File([sample.content], sample.filename, { type: 'text/markdown' })
+      await handleUpload(file)
+    } catch (err) {
+      if (mountedRef.current) {
+        setError(withRequestNumber(err.message || '示例材料暂时不可用', err))
+      }
+    } finally {
+      if (mountedRef.current) setSampleLoading(false)
     }
   }
 
@@ -508,6 +556,24 @@ export default function Documents() {
             </div>
             <p className="empty-title">还没有文档</p>
             <p className="empty-desc">上传你的第一份学习材料开始吧</p>
+            {providerProblems.length > 0 && (
+              <div className="config-notice" role="status">
+                <p className="config-notice-title">模型服务还没配好，上传和出题会失败：</p>
+                <ul>
+                  {providerProblems.map(line => <li key={line}>{line}</li>)}
+                </ul>
+                <p className="config-notice-foot">改完 .env 后重启后端即可生效。</p>
+              </div>
+            )}
+            <button
+              type="button"
+              className="state-action"
+              onClick={handleTrySample}
+              disabled={sampleLoading || uploading}
+            >
+              {sampleLoading || uploading ? '正在载入示例…' : '没有现成材料？先用示例试试'}
+            </button>
+            <p className="empty-desc">示例是一段关于反向传播的短材料，载入后即可出题、答题并查看报告</p>
           </div>
         ) : (
           <div className="doc-grid">

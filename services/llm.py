@@ -9,6 +9,7 @@ from services.provider_config import (
     run_with_provider_deadline,
 )
 from services.retry import with_retry
+from services.usage import usage_ledger
 
 _provider_configs = load_provider_configs()
 _chat_config = _provider_configs["chat"]
@@ -103,12 +104,16 @@ async def llm_chat(
     kwargs.setdefault("model", model)
 
     async def provider_attempt(transport_retries: int):
-        return await with_retry(
+        response = await with_retry(
             lambda: use_client.chat.completions.create(messages=messages, **kwargs),
             max_retries=transport_retries,
             base_delay=base_delay,
             timeout=timeout,
         )
+        # Every successful provider response is billed, including the one an
+        # empty-output retry below discards, so each attempt is recorded.
+        usage_ledger.record("chat", response)
+        return response
 
     async def validated_call():
         response = await provider_attempt(max_retries)
@@ -152,17 +157,20 @@ async def llm_parse(
     """
     use_client = client or structured_client
     kwargs.setdefault("model", structured_model)
-    return await run_with_provider_deadline(
-        lambda: with_retry(
+
+    async def parse_attempt():
+        response = await with_retry(
             lambda: use_client.beta.chat.completions.parse(
                 messages=messages, response_format=response_format, **kwargs
             ),
             max_retries=max_retries,
             base_delay=base_delay,
             timeout=timeout,
-        ),
-        total_timeout=total_timeout,
-    )
+        )
+        usage_ledger.record("structured", response)
+        return response
+
+    return await run_with_provider_deadline(parse_attempt, total_timeout=total_timeout)
 
 
 async def chat_stream(message: str):

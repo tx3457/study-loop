@@ -22,6 +22,7 @@ from services.provider_config import (
     ProviderConfig,
     ProviderConfigurationError,
     build_async_openai,
+    issue_env_var,
     load_provider_configs,
 )
 from services.provider_health import ProviderHealthChecker
@@ -208,6 +209,52 @@ class TestProviderConfig(unittest.IsolatedAsyncioTestCase):
         await client.close()
 
 
+class TestIssueEnvVar(unittest.TestCase):
+    """Each issue names the .env line that fixes it, following inheritance."""
+
+    def _fixes(self, config):
+        return {issue: issue_env_var(config, issue) for issue in config.issues}
+
+    def test_copied_example_points_at_the_chat_variables(self):
+        chat = load_provider_configs({
+            "LLM_API_KEY": "replace-with-your-provider-key",
+            "LLM_BASE_URL": "https://api.example.com/v1",
+            "LLM_MODEL": "replace-with-chat-model",
+        })["chat"]
+        self.assertEqual(self._fixes(chat), {
+            "api_key_placeholder": "LLM_API_KEY",
+            "base_url_placeholder": "LLM_BASE_URL",
+            "model_placeholder": "LLM_MODEL",
+        })
+
+    def test_inherited_fields_are_fixed_on_the_chat_pair(self):
+        env = _shared_provider_env()
+        env["LLM_API_KEY"] = ""
+        configs = load_provider_configs(env)
+        # Structured and embedding inherit the key, so the fix is LLM_API_KEY,
+        # not a STRUCTURED_/EMBEDDING_ variable the person never set.
+        self.assertEqual(issue_env_var(configs["structured"], "api_key_missing"), "LLM_API_KEY")
+        self.assertEqual(issue_env_var(configs["embedding"], "api_key_missing"), "LLM_API_KEY")
+
+    def test_a_partial_override_stops_inheritance(self):
+        env = _shared_provider_env()
+        env["EMBEDDING_BASE_URL"] = "https://embeddings.example/v1"
+        embedding = load_provider_configs(env)["embedding"]
+        # Setting only the URL means the key is no longer inherited; pointing at
+        # LLM_API_KEY here would send the person to the wrong line.
+        self.assertEqual(self._fixes(embedding), {"api_key_missing": "EMBEDDING_API_KEY"})
+
+    def test_embedding_model_is_never_inherited(self):
+        env = _shared_provider_env()
+        env["LLM_EMBEDDING_MODEL"] = ""
+        embedding = load_provider_configs(env)["embedding"]
+        self.assertEqual(self._fixes(embedding), {"model_missing": "LLM_EMBEDDING_MODEL"})
+
+    def test_unknown_issue_has_no_variable(self):
+        chat = load_provider_configs(_shared_provider_env())["chat"]
+        self.assertIsNone(issue_env_var(chat, "something_else"))
+
+
 class TestProviderHealthChecker(unittest.IsolatedAsyncioTestCase):
     async def test_deduplicates_shared_credentials_and_caches_catalog_result(self):
         factory = _RecordingFactory(
@@ -254,6 +301,11 @@ class TestProviderHealthChecker(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "degraded")
         self.assertEqual(embedding["status"], "misconfigured")
         self.assertEqual(embedding["issues"], ["model_missing"])
+        self.assertEqual(
+            embedding["fix_env"], [{"issue": "model_missing", "env": "LLM_EMBEDDING_MODEL"}]
+        )
+        # Names only: the probe result must never echo a configured value.
+        self.assertNotIn("secret-chat-key", json.dumps(result))
         self.assertTrue(embedding["catalog_reachable"])
         self.assertEqual(len(factory.calls), 1)
 
