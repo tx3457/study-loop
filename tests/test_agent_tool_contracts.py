@@ -25,19 +25,63 @@ def test_quiz_topic_is_optional_because_generation_reads_the_document():
 def test_quiz_handler_uses_nonempty_document_scope_when_topic_is_missing():
     generated = SimpleNamespace(model_dump_json=lambda **_kwargs: '{"ok":true}')
     generate_question = AsyncMock(return_value=generated)
+    adaptation = AsyncMock(return_value=(0.65, ["链式法则"]))
 
-    with patch.object(tools, "generate_question", generate_question):
+    with patch.object(tools, "generate_question", generate_question), \
+            patch.object(tools, "adaptive_generation_params", adaptation):
         result = asyncio.run(tools._generate_quiz(document_id="doc_graph", user_id="default_user"))
 
     assert json.loads(result) == {"ok": True}
+    adaptation.assert_awaited_once_with("default_user", "doc_graph", "medium")
     generate_question.assert_awaited_once_with(
         document_id="doc_graph",
         description="文档综合内容",
         count=3,
         difficulty="medium",
         type="choice",
+        difficulty_score=0.65,
+        weak_points=["链式法则"],
         owner_id="default_user",
     )
+
+
+def test_quiz_tool_aims_at_the_learners_weak_and_due_points():
+    """The Agent's quiz adapts exactly like the Quiz page: difficulty just above
+    measured mastery, and points due for review ahead of older weak points."""
+    import services.session as session_service
+
+    generated = SimpleNamespace(model_dump_json=lambda **_kwargs: '{"ok":true}')
+    generate_question = AsyncMock(return_value=generated)
+    profile = {"topic_mastery": {"doc_graph": 0.5}, "weak_points": ["BFS", "DFS"]}
+
+    with patch.object(tools, "generate_question", generate_question), \
+            patch.object(session_service, "get_user_profile", AsyncMock(return_value=profile)), \
+            patch.object(session_service, "get_due_reviews", AsyncMock(return_value=["DFS", "拓扑排序"])):
+        asyncio.run(tools._generate_quiz("doc_graph", "learner"))
+
+    kwargs = generate_question.await_args.kwargs
+    assert kwargs["difficulty_score"] == 0.65
+    # Due points lead; a point both due and weak appears once.
+    assert kwargs["weak_points"] == ["DFS", "拓扑排序", "BFS"]
+
+
+def test_quiz_tool_still_generates_when_the_profile_store_fails():
+    """Targeting is a refinement; an unavailable profile must not stop the quiz."""
+    import services.session as session_service
+
+    generated = SimpleNamespace(model_dump_json=lambda **_kwargs: '{"ok":true}')
+    generate_question = AsyncMock(return_value=generated)
+
+    with patch.object(tools, "generate_question", generate_question), \
+            patch.object(session_service, "get_user_profile",
+                         AsyncMock(side_effect=RuntimeError("store down"))), \
+            patch.object(session_service, "get_due_reviews", AsyncMock(return_value=[])):
+        result = asyncio.run(tools._generate_quiz("doc_graph", "learner", difficulty="hard"))
+
+    assert json.loads(result) == {"ok": True}
+    kwargs = generate_question.await_args.kwargs
+    assert kwargs["difficulty_score"] == 0.8
+    assert kwargs["weak_points"] == []
 
 
 def test_quiz_handler_preserves_an_explicit_topic():

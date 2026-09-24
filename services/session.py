@@ -17,6 +17,7 @@ from models.session import (
     SessionStartRequest,
 )
 from services.rag import generate_question
+from services.srs import get_due_reviews
 from services.vectorstore import ensure_document_available as _ensure_document_available
 
 logger = logging.getLogger(__name__)
@@ -104,21 +105,56 @@ def question_views(session: QuizSession) -> list[QuestionView]:
     ]
 
 
+async def adaptive_generation_params(
+    user_id: str, document_id: str, difficulty: str
+) -> tuple[float, list[str]]:
+    """本次出题的难度与侧重点，由这位学习者的历史决定。
+
+    答题页和 Agent 的 generate_quiz 工具共用这一份逻辑，两条路径才会以同样的
+    方式自适应。画像与复习调度都只是出题的侧重，任一不可用时照常出题，不让它们
+    成为出题的前提。
+    """
+    try:
+        profile = await get_user_profile(user_id)
+    except Exception as exc:
+        logger.warning(
+            "learner profile unavailable for question targeting: error_type=%s",
+            type(exc).__name__,
+        )
+        profile = None
+    if profile and document_id in profile.get("topic_mastery", {}):
+        # 有该文档的历史成绩：难度 = 掌握度 + 0.15（略高于当前水平，触发学习区间）
+        mastery = profile["topic_mastery"][document_id]
+        difficulty_score = round(min(mastery + 0.15, 1.0), 2)
+        weak_points = list(profile.get("weak_points", []))
+    else:
+        # 新用户或新文档：将文字难度转换为连续值，无薄弱知识点
+        difficulty_score = _DIFFICULTY_SCORE.get(difficulty, 0.5)
+        weak_points = []
+
+    # 到期的复习点优先于历史薄弱点：遗忘曲线上的今天就是最该重练的时机。
+    # 调度本来只喂给模型上下文，日常出题并不知道它的存在，于是"该复习了"和
+    # "出的题"是两回事。这里把它们接上，复习就不必是一个单独的功能。
+    try:
+        due = await get_due_reviews(user_id, document_id)
+    except Exception as exc:
+        logger.warning(
+            "review schedule unavailable for question targeting: error_type=%s",
+            type(exc).__name__,
+        )
+        due = []
+    if due:
+        weak_points = list(dict.fromkeys([*due, *weak_points]))
+    return difficulty_score, weak_points
+
+
 async def prepare_session(req: SessionStartRequest) -> QuizSession:
     """Generate and validate a QuizSession without choosing a storage backend."""
     await _ensure_document_available(req.document_id, owner_id=req.user_id)
 
-    # 自适应：读取用户画像，计算本次出题参数
-    profile = await get_user_profile(req.user_id)
-    if profile and req.document_id in profile.get("topic_mastery", {}):
-        # 有该文档的历史成绩：难度 = 掌握度 + 0.15（略高于当前水平，触发学习区间）
-        mastery = profile["topic_mastery"][req.document_id]
-        difficulty_score = round(min(mastery + 0.15, 1.0), 2)
-        weak_points = profile.get("weak_points", [])
-    else:
-        # 新用户或新文档：将文字难度转换为连续值，无薄弱知识点
-        difficulty_score = _DIFFICULTY_SCORE.get(req.difficulty, 0.5)
-        weak_points = []
+    difficulty_score, weak_points = await adaptive_generation_params(
+        req.user_id, req.document_id, req.difficulty
+    )
 
     quiz_response = await generate_question(
         req.document_id,
