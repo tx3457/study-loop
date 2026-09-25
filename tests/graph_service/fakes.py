@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from collections import defaultdict
 
+from graph_service.engine import DeletionRefused
+
 
 class FakeEngine:
     def __init__(self) -> None:
@@ -11,6 +13,10 @@ class FakeEngine:
         self.edges: list[dict] = []
         self.fail_next = False
         self.rebuild_clear_flags: list[bool] = []
+        self.rebuilds: list[str] = []
+        self.forgotten: list[str] = []
+        self.busy_workspaces: set[str] = set()
+        self.refuse_deletion: set[str] = set()
 
     async def insert(self, workspace: str, version_id: str, text: str, source_token: str) -> None:
         if self.fail_next:
@@ -19,7 +25,16 @@ class FakeEngine:
         self.documents[workspace][version_id] = text
 
     async def delete_document(self, workspace: str, version_id: str) -> None:
+        if version_id in self.refuse_deletion:
+            raise DeletionRefused(version_id)
         self.documents[workspace].pop(version_id, None)
+
+    async def forget(self, workspace: str) -> bool:
+        if workspace in self.busy_workspaces:
+            return False
+        self.documents.pop(workspace, None)
+        self.forgotten.append(workspace)
+        return True
 
     async def apply_correction(self, workspace: str, kind: str, payload: dict) -> None:
         self.corrections.append((workspace, kind, payload))
@@ -52,8 +67,11 @@ class FakeEngine:
         clear_llm_cache: bool = False,
     ) -> None:
         self.rebuild_clear_flags.append(clear_llm_cache)
+        self.rebuilds.append(workspace)
         self.documents[workspace].clear()
         for document in documents:
+            if not document.get("active", True):
+                continue
             await self.insert(
                 workspace,
                 document["version_id"],

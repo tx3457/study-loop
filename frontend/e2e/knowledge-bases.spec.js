@@ -439,7 +439,7 @@ test('document deletion confirms the destructive action and removes the document
   await page.goto('/knowledge-bases/kb-doc-delete')
   await page.getByRole('button', { name: '删除资料' }).click()
   const dialog = page.getByRole('dialog', { name: '删除知识库资料' })
-  await expect(dialog).toContainText('资料将从这个知识库的新检索和图谱中移除')
+  await expect(dialog).toContainText('原始文件、解析文本（含历史版本）和索引会被永久删除')
   await dialog.getByRole('button', { name: '确认删除' }).click()
   await expect(page.locator('.kb-document-list').getByText('obsolete.md', { exact: true })).toHaveCount(0)
   await expect(page.getByText('尚无资料。上传文件，或显式复制一份已有文档。')).toBeVisible()

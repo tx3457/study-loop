@@ -40,6 +40,24 @@ document name so newly uploaded content cannot be confused with old learning
 records; rename the file before uploading it again. This action is not a full
 privacy erasure workflow.
 
+Deleting from an optional knowledge base removes the source content, not only
+its index. A deleted document loses every version's original file, parsed text,
+content hash and source URL, the body of the web snapshot it was imported from
+(unless another live document still uses it), and the LightRAG extraction-cache
+entries no remaining chunk uses; only a titled tombstone remains so old citations
+resolve as deleted instead of failing. A deleted knowledge base keeps only a
+nameless tombstone and its delete job: its graph, vectors, caches, working
+directory, files, documents, corrections and graph-identity rows are removed, and
+every later read or write reports it as absent. A crash after the delete job
+commits is finished by the knowledge worker's periodic sweep; a delete job that
+fails leaves the documents readable (its index and caches may already be gone)
+until the deletion is retried. Deleting a
+single document does not remove LightRAG's merged entity-description cache or
+entity names registered by corrections. Existing backups, saved StudyLoop
+sessions, and physical erasure below the database (dead PostgreSQL tuples before
+VACUUM, filesystem blocks) are outside this guarantee; see
+[`docs/LIGHTRAG.md`](docs/LIGHTRAG.md).
+
 Public HTTP and SSE failures use fixed error codes and do not serialize raw
 provider, parser, MCP, or storage exception text. Every HTTP response carries a
 strictly validated `X-Request-ID` for correlation; runtime exception logs retain
