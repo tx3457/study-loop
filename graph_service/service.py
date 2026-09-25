@@ -14,7 +14,7 @@ from .engine import GraphEngine
 from .errors import Conflict, Expired, TooLarge, Unavailable
 from .locks import KeyedRWLocks
 from .materials import MaterialStore
-from .repository import Repository
+from .repository import DELETED_KB_STATUSES, Repository
 
 
 MAX_MATERIAL_BYTES = 20 * 1024 * 1024
@@ -30,6 +30,18 @@ def _json_value(value: Any) -> Any:
     if isinstance(value, list):
         return [_json_value(item) for item in value]
     return value
+
+
+async def _link_snapshot(connection, document_id, snapshot_id: str | None) -> None:
+    # Deleting the document clears the snapshot's retained copy of the page; see
+    # _BLANK_LINKED_SNAPSHOTS in repository.py.
+    if snapshot_id:
+        await connection.execute(
+            "INSERT INTO sl_document_snapshots(document_id,snapshot_id) VALUES($1,$2) "
+            "ON CONFLICT DO NOTHING",
+            document_id,
+            uuid.UUID(snapshot_id),
+        )
 
 
 def _request_hash(operation: str, payload: dict[str, Any]) -> str:
@@ -192,16 +204,14 @@ class KnowledgeService:
         }
 
     async def get_knowledge_base(self, owner: str, kb_id: str) -> dict[str, Any]:
-        row = await self.repository.get_kb(owner, kb_id)
-        if row["status"] == "deleting":
-            raise KeyError(kb_id)
-        return await self._kb_view(row)
+        return await self._kb_view(await self.repository.get_kb(owner, kb_id))
 
     async def list_knowledge_bases(
         self, owner: str, limit: int = 50, offset: int = 0
     ) -> dict[str, Any]:
         rows = await self.repository.fetch(
-            "SELECT * FROM sl_knowledge_bases WHERE owner=$1 AND status!='deleting' "
+            "SELECT * FROM sl_knowledge_bases WHERE owner=$1 "
+            "AND status NOT IN ('deleting','deleted') "
             "ORDER BY created_at LIMIT $2 OFFSET $3",
             owner,
             limit,
@@ -233,12 +243,14 @@ class KnowledgeService:
                 )
                 if updated is None:
                     existing = await connection.fetchrow(
-                        "SELECT index_config_hash FROM sl_knowledge_bases "
+                        "SELECT index_config_hash,status FROM sl_knowledge_bases "
                         "WHERE id=$1 AND owner=$2",
                         uuid.UUID(kb_id),
                         owner,
                     )
-                    if existing and existing["index_config_hash"] != self.index_hash:
+                    if existing is None or existing["status"] in DELETED_KB_STATUSES:
+                        raise KeyError(kb_id)
+                    if existing["index_config_hash"] != self.index_hash:
                         raise Unavailable(
                             "knowledge base index configuration changed; rebuild required"
                         )
@@ -351,8 +363,8 @@ class KnowledgeService:
                 content_hash,
             )
             if duplicate:
-                async def no_setup(_connection):
-                    return None
+                async def no_setup(connection):
+                    await _link_snapshot(connection, duplicate["document_id"], snapshot_id)
 
                 async with self.locks.write(kb_id):
                     return await self.repository.begin_job(
@@ -374,6 +386,8 @@ class KnowledgeService:
         version_uuid = uuid.uuid4()
         job_uuid = uuid.uuid4()
         source_token = "src_" + secrets.token_hex(20)
+        # A deleted knowledge base answers 404 before anything reaches its directory.
+        await self.repository.get_kb(owner, kb_id)
         material_path = self.materials.put(kb_id, str(version_uuid), raw)
         job_payload = {
             "document_id": str(document_uuid),
@@ -407,6 +421,7 @@ class KnowledgeService:
                         else None,
                     )
                 job_payload["previous_version_id"] = str(previous) if previous else None
+                await _link_snapshot(connection, document_uuid, snapshot_id)
                 await connection.execute(
                     "INSERT INTO sl_source_versions(id,document_id,knowledge_base_id,content_hash,"
                     "material_path,parsed_text,parsed_blocks,source_token) "

@@ -6,12 +6,15 @@ import logging
 import uuid
 from typing import Any
 
-from .engine import GraphEngine
+from .engine import DeletionRefused, GraphEngine
 from .repository import Repository
 
 
 LOGGER = logging.getLogger(__name__)
 ADVISORY_LOCK_ID = 0x53545544594C4F4F
+PURGING_OPERATIONS = frozenset({"delete_document", "delete_knowledge_base"})
+# Jobs after which some extraction-cache entries may no longer belong to a live chunk.
+CACHE_ORPHANING_OPERATIONS = frozenset({"delete_document", "replace_document", "rebuild"})
 
 
 class WriteWorker:
@@ -32,6 +35,9 @@ class WriteWorker:
         self.last_error_type: str | None = None
         self._needs_recovery = False
         self._next_snapshot_cleanup = 0.0
+        # Workspaces still to sweep once after start; None until listed.
+        self._orphan_cache_backlog: list[str] | None = None
+        self._material_cursor = None
 
     async def process_one(self) -> str | None:
         async with self.repository.pool.acquire() as connection:
@@ -63,6 +69,8 @@ class WriteWorker:
                         type(error).__name__,
                     )
                     await self.repository.fail_job(job, "index_failed")
+                else:
+                    await self._after_success(job, kb)
                 return str(job["id"])
             finally:
                 await connection.execute("SELECT pg_advisory_unlock($1)", ADVISORY_LOCK_ID)
@@ -89,11 +97,16 @@ class WriteWorker:
         elif operation == "replace_document":
             corrections = await self._corrections(job["knowledge_base_id"])
             if self._has_identity_corrections(corrections):
-                documents, corrections, _selected = await self._rebuild_inputs(job)
-                await self.engine.rebuild(workspace, documents, corrections)
+                await self._rebuild_for(job, workspace)
             else:
                 if payload.get("previous_version_id"):
-                    await self.engine.delete_document(workspace, payload["previous_version_id"])
+                    try:
+                        await self.engine.delete_document(
+                            workspace, payload["previous_version_id"]
+                        )
+                    except DeletionRefused:
+                        await self._rebuild_for(job, workspace)
+                        return
                 version = await self.repository.fetchrow(
                     "SELECT * FROM sl_source_versions WHERE id=$1 AND knowledge_base_id=$2",
                     uuid.UUID(payload["version_id"]),
@@ -113,10 +126,13 @@ class WriteWorker:
         elif operation == "delete_document":
             corrections = await self._corrections(job["knowledge_base_id"])
             if self._has_identity_corrections(corrections):
-                documents, corrections, _selected = await self._rebuild_inputs(job)
-                await self.engine.rebuild(workspace, documents, corrections)
+                await self._rebuild_for(job, workspace)
             else:
-                await self.engine.delete_document(workspace, payload["version_id"])
+                try:
+                    await self.engine.delete_document(workspace, payload["version_id"])
+                except DeletionRefused:
+                    await self._rebuild_for(job, workspace)
+                    return
                 await self._apply_corrections(workspace, corrections)
         elif operation == "correction":
             await self.engine.apply_correction(workspace, payload["kind"], payload["engine_payload"])
@@ -140,6 +156,99 @@ class WriteWorker:
             )
         else:
             raise RuntimeError(f"unsupported job operation: {operation}")
+
+    async def _rebuild_for(self, job: dict[str, Any], workspace: str) -> None:
+        # Rebuilding from the canonical versions this job leaves live is the one
+        # removal that works whatever state the SDK's per-document records are in.
+        documents, corrections, _selected = await self._rebuild_inputs(job)
+        await self.engine.rebuild(workspace, documents, corrections)
+
+    async def _after_success(self, job: dict[str, Any], kb: dict[str, Any]) -> None:
+        # Cleanup that cannot finish now must not fail a committed job or hold up
+        # indexing; the periodic sweep finishes it.
+        try:
+            if job["operation"] in CACHE_ORPHANING_OPERATIONS:
+                await self.repository.drop_orphan_extraction_cache(kb["workspace"])
+            if job["operation"] == "delete_document":
+                # Its own files now, whatever backlog the shared cursor is working through.
+                await self._unlink_materials(
+                    await self.repository.document_materials(job["payload"]["document_id"])
+                )
+            if job["operation"] in PURGING_OPERATIONS:
+                await self.purge_deleted_data()
+        except Exception as error:
+            LOGGER.error(
+                "post-job cleanup deferred job_id=%s error_type=%s",
+                job["id"],
+                type(error).__name__,
+            )
+
+    async def purge_deleted_data(self, *, max_material_pages: int = 10) -> None:
+        """Remove what deleted knowledge bases and documents still hold on disk and in rows.
+
+        Runs after each delete job and on the periodic sweep, so a crash between a
+        delete job committing and its files going away is finished on the next pass.
+        Only positively deleted data is touched; an upload still writing its file is
+        never mistaken for an orphan.
+        """
+        for kb in await self.repository.knowledge_bases_pending_purge():
+            try:
+                # Files first, by recorded path: the rows are the only record of
+                # where each one was written.
+                for path in await self.repository.knowledge_base_materials(kb["id"]):
+                    self.service.materials.delete(path)
+                await self.repository.purge_knowledge_base_rows(kb["id"])
+                if not await self.engine.forget(kb["workspace"]):
+                    continue
+                self.service.materials.delete_knowledge_base(str(kb["id"]))
+                await self.repository.mark_knowledge_base_purged(kb["id"])
+            except Exception as error:
+                LOGGER.error(
+                    "knowledge base purge deferred kb_id=%s error_type=%s",
+                    kb["id"],
+                    type(error).__name__,
+                )
+        # Bounded per pass so a large backlog cannot hold up indexing; the cursor
+        # carries on from there next time and wraps at the end, so files that keep
+        # failing are retried without starving the rest.
+        for _page in range(max_material_pages):
+            rows = await self.repository.deleted_materials(self._material_cursor)
+            if not rows:
+                self._material_cursor = None
+                break
+            await self._unlink_materials(rows)
+            self._material_cursor = rows[-1]["id"]
+
+    async def _unlink_materials(self, rows: list[dict[str, Any]]) -> None:
+        purged = []
+        for row in rows:
+            try:
+                self.service.materials.delete(row["material_path"])
+            except OSError as error:
+                LOGGER.error(
+                    "source material purge deferred version_id=%s error_type=%s",
+                    row["id"],
+                    type(error).__name__,
+                )
+            else:
+                purged.append(row["id"])
+        if purged:
+            await self.repository.mark_materials_purged(purged)
+
+    async def _periodic_cleanup(self) -> None:
+        try:
+            await self.purge_deleted_data()
+            # Once per process, one workspace per pass: caches left by failed jobs or
+            # older releases. A workspace that errors is not retried until restart;
+            # its next successful delete, replace or rebuild sweeps it anyway.
+            if self._orphan_cache_backlog is None:
+                self._orphan_cache_backlog = await self.repository.ready_workspaces()
+            if self._orphan_cache_backlog:
+                await self.repository.drop_orphan_extraction_cache(
+                    self._orphan_cache_backlog.pop()
+                )
+        except Exception as error:
+            LOGGER.error("periodic cleanup deferred error_type=%s", type(error).__name__)
 
     async def _replay_corrections(self, kb_id, workspace: str) -> None:
         await self._apply_corrections(workspace, await self._corrections(kb_id))
@@ -217,6 +326,7 @@ class WriteWorker:
                 now = asyncio.get_running_loop().time()
                 if now >= self._next_snapshot_cleanup:
                     await self.repository.cleanup_expired_snapshots(limit=100)
+                    await self._periodic_cleanup()
                     self._next_snapshot_cleanup = now + 60.0
                 processed = await self.process_one()
                 self.healthy = True

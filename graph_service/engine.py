@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 import os
+import shutil
 import unicodedata
 from collections import OrderedDict
 from contextlib import asynccontextmanager
@@ -12,6 +13,14 @@ from urllib.parse import unquote, urlparse
 
 from .config import Settings
 from .errors import TooLarge
+
+
+class DeletionRefused(RuntimeError):
+    """LightRAG refused a document deletion before its first write.
+
+    The refusal repeats on retry, so the caller rebuilds the workspace without the
+    document instead.
+    """
 
 
 class GraphEngine(Protocol):
@@ -31,6 +40,7 @@ class GraphEngine(Protocol):
         *,
         clear_llm_cache: bool = False,
     ) -> None: ...
+    async def forget(self, workspace: str) -> bool: ...
 
 
 def index_config_hash(settings: Settings) -> str:
@@ -294,7 +304,32 @@ class LightRAGEngine:
         async with self._use(workspace) as rag:
             known = await rag.aget_docs_by_ids(version_id)
             if version_id in known:
-                await rag.adelete_by_doc_id(version_id)
+                result = await rag.adelete_by_doc_id(version_id)
+                status = getattr(result, "status", "success")
+                if status == "fail" and getattr(result, "status_code", None) == 409:
+                    raise DeletionRefused(version_id)
+                if status not in {"success", "not_found"}:
+                    raise RuntimeError("LightRAG did not delete the source version")
+
+    async def forget(self, workspace: str) -> bool:
+        """Release a deleted workspace's SDK instance and working directory.
+
+        Returns False while a request still holds the instance; the caller retries.
+        """
+        async with self._guard:
+            if self._active.get(workspace):
+                return False
+            rag = self._instances.pop(workspace, None)
+            self._active.pop(workspace, None)
+        if rag is not None:
+            await rag.finalize_storages()
+        root = self.settings.working_dir.resolve()
+        working = (root / workspace).resolve()
+        if working.parent != root:
+            raise ValueError("workspace escapes the working directory")
+        if working.exists():
+            shutil.rmtree(working)
+        return True
 
     async def apply_correction(self, workspace: str, kind: str, payload: dict) -> None:
         async with self._use(workspace) as rag:

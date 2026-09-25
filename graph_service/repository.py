@@ -95,7 +95,62 @@ CREATE TABLE IF NOT EXISTS sl_web_snapshots (
 );
 ALTER TABLE sl_web_snapshots ADD COLUMN IF NOT EXISTS imported_at timestamptz;
 CREATE INDEX IF NOT EXISTS sl_snapshots_scope_idx ON sl_web_snapshots(owner, session_id, id);
+-- Every snapshot that fed a document, including an import that reused an existing
+-- document with the same text.
+CREATE TABLE IF NOT EXISTS sl_document_snapshots (
+    document_id uuid NOT NULL REFERENCES sl_documents(id) ON DELETE CASCADE,
+    snapshot_id uuid NOT NULL,
+    PRIMARY KEY(document_id, snapshot_id)
+);
+CREATE INDEX IF NOT EXISTS sl_document_snapshots_snapshot_idx
+ON sl_document_snapshots(snapshot_id);
+-- Foreign-key lookups for deletion cascades and the purge.
+CREATE INDEX IF NOT EXISTS sl_documents_kb_idx ON sl_documents(knowledge_base_id);
+CREATE INDEX IF NOT EXISTS sl_versions_document_idx ON sl_source_versions(document_id);
+CREATE INDEX IF NOT EXISTS sl_jobs_kb_idx ON sl_jobs(knowledge_base_id);
+CREATE INDEX IF NOT EXISTS sl_entity_aliases_entity_idx ON sl_entity_aliases(entity_id);
+CREATE INDEX IF NOT EXISTS sl_edge_aliases_edge_idx ON sl_edge_aliases(edge_id);
+-- Pages imported before links were recorded: every imported snapshot of the owner
+-- with the text of one of the document's versions. Over-linking only delays a
+-- clear until every linked document is deleted.
+INSERT INTO sl_document_snapshots(document_id,snapshot_id)
+SELECT DISTINCT v.document_id,s.id FROM sl_source_versions v
+JOIN sl_documents d ON d.id=v.document_id AND d.kind='web'
+JOIN sl_knowledge_bases k ON k.id=v.knowledge_base_id
+JOIN sl_web_snapshots s ON s.owner=k.owner AND s.content_hash=v.content_hash
+WHERE s.imported_at IS NOT NULL AND v.content_hash!=''
+AND NOT EXISTS (SELECT 1 FROM sl_document_snapshots x WHERE x.document_id=d.id)
+ON CONFLICT DO NOTHING;
+-- Documents deleted before deletion cleared their content; each a no-op once applied.
+UPDATE sl_web_snapshots s SET body='',url='',title='' FROM sl_document_snapshots l
+JOIN sl_documents d ON d.id=l.document_id
+WHERE d.status='deleted' AND s.id=l.snapshot_id AND (s.body!='' OR s.url!='')
+AND NOT EXISTS (SELECT 1 FROM sl_document_snapshots l2 JOIN sl_documents o ON o.id=l2.document_id
+                WHERE l2.snapshot_id=s.id AND o.status!='deleted');
+UPDATE sl_source_versions v SET parsed_text='',parsed_blocks='[]'::jsonb,content_hash=''
+FROM sl_documents d WHERE d.id=v.document_id AND d.status='deleted' AND v.parsed_text!='';
+UPDATE sl_documents SET source_url=NULL,source_fetched_at=NULL,legacy_document_id=NULL
+WHERE status='deleted'
+AND (source_url IS NOT NULL OR source_fetched_at IS NOT NULL OR legacy_document_id IS NOT NULL);
 """
+
+
+# An imported page's snapshot keeps its body past expiry so an import can replay
+# idempotently, which makes it a second copy of the document. It is cleared once no
+# live document was imported from it; the same page in another knowledge base is
+# another document and keeps it.
+_BLANK_LINKED_SNAPSHOTS = (
+    "UPDATE sl_web_snapshots s SET body='',url='',title='' FROM sl_document_snapshots l "
+    "JOIN sl_documents d ON d.id=l.document_id "
+    "WHERE d.{scope}=$1 AND s.id=l.snapshot_id AND (s.body!='' OR s.url!='') "
+    "AND NOT EXISTS (SELECT 1 FROM sl_document_snapshots l2 JOIN sl_documents o "
+    "ON o.id=l2.document_id WHERE l2.snapshot_id=s.id AND o.status!='deleted' "
+    "AND o.id!=d.id)"
+)
+
+# 'deleting': the index is gone and the purge below has not finished yet.
+# 'deleted': a tombstone kept only so the delete job stays observable.
+DELETED_KB_STATUSES = frozenset({"deleting", "deleted"})
 
 
 def _row(row: asyncpg.Record | None) -> dict[str, Any] | None:
@@ -119,7 +174,7 @@ class Repository:
         row = await self.fetchrow(
             "SELECT * FROM sl_knowledge_bases WHERE id=$1 AND owner=$2", kb_id, owner
         )
-        if row is None:
+        if row is None or row["status"] in DELETED_KB_STATUSES:
             raise KeyError(kb_id)
         return row
 
@@ -194,7 +249,7 @@ class Repository:
                 kb_id,
                 owner,
             )
-            if kb is None:
+            if kb is None or kb["status"] in DELETED_KB_STATUSES:
                 raise KeyError(kb_id)
             if kb["revision"] != expected_revision:
                 raise Conflict("knowledge base revision changed")
@@ -284,6 +339,23 @@ class Repository:
                     status,
                     version_id,
                 )
+            if job["operation"] == "delete_document" and document_id:
+                # Every version of the document, not only the one just removed from
+                # the index. The row stays so old citations still resolve to
+                # "deleted"; the original file goes in WriteWorker.purge_deleted_data.
+                await connection.execute(
+                    _BLANK_LINKED_SNAPSHOTS.format(scope="id"), document_id
+                )
+                await connection.execute(
+                    "UPDATE sl_source_versions SET parsed_text='',parsed_blocks='[]'::jsonb,"
+                    "content_hash='' WHERE document_id=$1",
+                    document_id,
+                )
+                await connection.execute(
+                    "UPDATE sl_documents SET source_url=NULL,source_fetched_at=NULL,"
+                    "legacy_document_id=NULL WHERE id=$1",
+                    document_id,
+                )
             if job["operation"] == "delete_knowledge_base":
                 await connection.execute(
                     "UPDATE sl_documents SET status='deleted' WHERE knowledge_base_id=$1",
@@ -345,6 +417,126 @@ class Repository:
             "UPDATE sl_knowledge_bases SET status='dirty',epoch=epoch+1,updated_at=now() "
             "WHERE index_config_hash!=$1 AND status='ready'",
             index_config_hash,
+        )
+
+    async def knowledge_bases_pending_purge(self) -> list[dict[str, Any]]:
+        return await self.fetch(
+            "SELECT id,workspace FROM sl_knowledge_bases WHERE status='deleting' ORDER BY updated_at"
+        )
+
+    async def purge_knowledge_base_rows(self, kb_id) -> None:
+        """Delete everything a deleted knowledge base holds, keeping a nameless tombstone.
+
+        The tombstone row and its delete job survive so a client polling that job
+        still sees it succeed. Idempotent: a crash part-way is finished by the next sweep.
+        """
+        async with self.pool.acquire() as connection, connection.transaction():
+            kb = await connection.fetchrow(
+                "SELECT id,owner FROM sl_knowledge_bases WHERE id=$1 AND status='deleting' "
+                "FOR UPDATE",
+                kb_id,
+            )
+            if kb is None:
+                return
+            await connection.execute(
+                _BLANK_LINKED_SNAPSHOTS.format(scope="knowledge_base_id"), kb_id
+            )
+            # Source versions and alias rows go with these by cascade.
+            for table in ("sl_documents", "sl_corrections", "sl_entities", "sl_edges"):
+                await connection.execute(
+                    f"DELETE FROM {table} WHERE knowledge_base_id=$1", kb_id
+                )
+            await connection.execute(
+                "DELETE FROM sl_jobs WHERE knowledge_base_id=$1 "
+                "AND operation!='delete_knowledge_base'",
+                kb_id,
+            )
+            # Create/update replays carry the name and description. Keeping the id
+            # alone lets a late retry of the create replay instead of making a new one.
+            await connection.execute(
+                "UPDATE sl_idempotency SET response=jsonb_build_object('id',response->'id') "
+                "WHERE owner=$1 AND response->>'id'=$2",
+                kb["owner"],
+                str(kb_id),
+            )
+            await connection.execute(
+                "UPDATE sl_knowledge_bases SET name='',description='',updated_at=now() "
+                "WHERE id=$1",
+                kb_id,
+            )
+
+    async def mark_knowledge_base_purged(self, kb_id) -> None:
+        await self.pool.execute(
+            "UPDATE sl_knowledge_bases SET status='deleted',updated_at=now() "
+            "WHERE id=$1 AND status='deleting'",
+            kb_id,
+        )
+
+    async def knowledge_base_materials(self, kb_id) -> list[str]:
+        rows = await self.fetch(
+            "SELECT material_path FROM sl_source_versions "
+            "WHERE knowledge_base_id=$1 AND material_path!=''",
+            kb_id,
+        )
+        return [row["material_path"] for row in rows]
+
+    async def document_materials(self, document_id) -> list[dict[str, Any]]:
+        return await self.fetch(
+            "SELECT id,material_path FROM sl_source_versions "
+            "WHERE document_id=$1 AND material_path!=''",
+            document_id,
+        )
+
+    async def deleted_materials(self, after=None, limit: int = 100) -> list[dict[str, Any]]:
+        # Keyset pages, so files that keep failing to unlink cannot starve the rest.
+        return await self.fetch(
+            "SELECT v.id,v.material_path FROM sl_source_versions v JOIN sl_documents d "
+            "ON d.id=v.document_id WHERE d.status='deleted' AND v.material_path!='' "
+            "AND ($1::uuid IS NULL OR v.id>$1) ORDER BY v.id LIMIT $2",
+            after,
+            limit,
+        )
+
+    async def drop_orphan_extraction_cache(self, workspace: str) -> int:
+        """Delete LightRAG extraction-cache entries no live chunk still uses.
+
+        Their prompts embed chunk text, so a replaced or deleted source is not gone
+        while they remain. Computed from what is stored rather than remembered by the
+        job, so it also finishes after a failed job's retry and for data left by older
+        releases. Reads LightRAG's PostgreSQL tables directly (lightrag-hku 1.5.7,
+        pinned by the index configuration hash); run only on a consistent workspace.
+        """
+        if await self.pool.fetchval("SELECT to_regclass('lightrag_llm_cache')") is None:
+            return 0
+        async with self.pool.acquire() as connection, connection.transaction():
+            # Bounded: the worker awaits this between jobs. A timeout rolls back and
+            # the next job or sweep tries again.
+            await connection.execute("SET LOCAL statement_timeout = '30s'")
+            result = await connection.execute(
+                "WITH live AS (SELECT DISTINCT e.id FROM lightrag_doc_chunks k "
+                "CROSS JOIN LATERAL jsonb_array_elements_text(k.llm_cache_list) AS e(id) "
+                "WHERE k.workspace=$1 AND jsonb_typeof(k.llm_cache_list)='array') "
+                "DELETE FROM lightrag_llm_cache c WHERE c.workspace=$1 "
+                "AND c.cache_type='extract' "
+                # A dirty workspace may be mid-rebuild with chunks not yet
+                # re-inserted; its retry needs the cache it would lose here.
+                "AND EXISTS (SELECT 1 FROM sl_knowledge_bases b "
+                "WHERE b.workspace=$1 AND b.status='ready') "
+                "AND NOT EXISTS (SELECT 1 FROM lightrag_doc_chunks k "
+                "WHERE k.workspace=$1 AND k.id=c.chunk_id) "
+                "AND NOT EXISTS (SELECT 1 FROM live WHERE live.id=c.id)",
+                workspace,
+            )
+        return int(result.rsplit(" ", 1)[-1])
+
+    async def ready_workspaces(self) -> list[str]:
+        rows = await self.fetch("SELECT workspace FROM sl_knowledge_bases WHERE status='ready'")
+        return [row["workspace"] for row in rows]
+
+    async def mark_materials_purged(self, version_ids: list) -> None:
+        await self.pool.execute(
+            "UPDATE sl_source_versions SET material_path='' WHERE id=ANY($1::uuid[])",
+            version_ids,
         )
 
     async def cleanup_expired_snapshots(self, limit: int = 100) -> int:

@@ -121,6 +121,102 @@ async def test_workspace_rebuild_clears_llm_cache_only_when_requested(
         await engine.close()
 
 
+async def cached_prompts_containing(repository, workspace: str, marker: str) -> int:
+    return await repository.pool.fetchval(
+        "SELECT count(*) FROM lightrag_llm_cache WHERE workspace=$1 "
+        "AND original_prompt LIKE '%' || $2 || '%'",
+        workspace,
+        marker,
+    )
+
+
+async def test_replace_and_delete_drop_the_cached_prompts_that_embed_the_source(
+    repository, settings
+) -> None:
+    """Extraction prompts embed chunk text, so a deleted source must leave the cache."""
+    engine = LightRAGEngine(
+        settings,
+        llm_func=deterministic_llm,
+        embedding_func=build_embedding_func(),
+    )
+    service = KnowledgeService(repository, MaterialStore(settings.materials_dir), engine)
+    worker = WriteWorker(repository, service, engine)
+    try:
+        kb = await service.create_knowledge_base("cache-owner", "Cache", "")
+        await service.ingest_document(
+            "cache-owner", kb["id"],
+            material_payload("ENTITY[Old] ENTITY[Anchor] REL[Old|Anchor] old_cache_marker"),
+            idempotency_key="cache-v1",
+        )
+        await worker.process_one()
+        await service.ingest_document(
+            "cache-owner", kb["id"],
+            {
+                **material_payload(
+                    "ENTITY[Kept] ENTITY[Anchor] REL[Kept|Anchor] kept_cache_marker"
+                ),
+                "expected_revision": 1,
+            },
+            idempotency_key="kept-v1",
+        )
+        await worker.process_one()
+        # Listed in creation order: the first is the document replaced below.
+        old_doc = (await service.list_documents("cache-owner", kb["id"]))["documents"][0]
+        workspace = (await repository.get_kb("cache-owner", kb["id"]))["workspace"]
+        # Control: extraction really went through the cache.
+        assert await cached_prompts_containing(repository, workspace, "old_cache_marker") > 0
+        # An entry a failed job or an older release left behind, and a query-keywords
+        # entry that belongs to no chunk and holds no source text.
+        await repository.pool.execute(
+            "INSERT INTO lightrag_llm_cache(workspace,id,original_prompt,return_value,"
+            "cache_type,chunk_id) VALUES($1,'orphan','orphan_cache_marker','r','extract',"
+            "'gone-chunk'),($1,'keywords','keywords_marker','r','keywords',NULL)",
+            workspace,
+        )
+        # Not while the base is dirty: a retried rebuild still needs its cache.
+        await repository.pool.execute(
+            "UPDATE sl_knowledge_bases SET status='dirty' WHERE workspace=$1", workspace
+        )
+        await repository.drop_orphan_extraction_cache(workspace)
+        assert await cached_prompts_containing(repository, workspace, "orphan_cache_marker") == 1
+        await repository.pool.execute(
+            "UPDATE sl_knowledge_bases SET status='ready' WHERE workspace=$1", workspace
+        )
+        await worker._periodic_cleanup()
+        assert await cached_prompts_containing(repository, workspace, "orphan_cache_marker") == 0
+        assert await cached_prompts_containing(repository, workspace, "keywords_marker") == 1
+        assert await cached_prompts_containing(repository, workspace, "old_cache_marker") > 0
+
+        await service.ingest_document(
+            "cache-owner", kb["id"],
+            {
+                **material_payload(
+                    "ENTITY[New] ENTITY[Anchor] REL[New|Anchor] new_cache_marker"
+                ),
+                "expected_revision": 2,
+            },
+            idempotency_key="cache-v2",
+            document_id=old_doc["id"],
+        )
+        await worker.process_one()
+        assert await cached_prompts_containing(repository, workspace, "old_cache_marker") == 0
+        assert await cached_prompts_containing(repository, workspace, "new_cache_marker") > 0
+
+        await service.delete_document("cache-owner", kb["id"], old_doc["id"], 3, "cache-delete")
+        await worker.process_one()
+        assert await cached_prompts_containing(repository, workspace, "new_cache_marker") == 0
+        # Control: the other document's cache survives both operations.
+        assert await cached_prompts_containing(repository, workspace, "kept_cache_marker") > 0
+
+        await service.delete_knowledge_base("cache-owner", kb["id"], 4, "cache-kb-delete")
+        await worker.process_one()
+        assert await cached_prompts_containing(repository, workspace, "kept_cache_marker") == 0
+        assert not (settings.working_dir / workspace).exists()
+        assert workspace not in engine._instances
+    finally:
+        await engine.close()
+
+
 async def test_service_indexes_and_resolves_evidence_with_real_lightrag(
     repository, settings
 ) -> None:
@@ -221,10 +317,14 @@ async def test_corrected_destructive_mutations_reconstruct_only_live_sources(
             idempotency_key="merge-beta",
         )
         await worker.process_one()
+        workspace = (await repository.get_kb("reconstruct-owner", kb["id"]))["workspace"]
+        assert await cached_prompts_containing(repository, workspace, "beta_marker") > 0
         await service.delete_document(
             "reconstruct-owner", kb["id"], beta_doc["id"], 4, "delete-beta"
         )
         await worker.process_one()
+        # Identity corrections force the rebuild path, which must purge the same way.
+        assert await cached_prompts_containing(repository, workspace, "beta_marker") == 0
         await service.ingest_document(
             "reconstruct-owner",
             kb["id"],
@@ -238,11 +338,12 @@ async def test_corrected_destructive_mutations_reconstruct_only_live_sources(
             document_id=alpha_doc["id"],
         )
         await worker.process_one()
+        assert await cached_prompts_containing(repository, workspace, "old_alpha_marker") == 0
+        assert await cached_prompts_containing(repository, workspace, "new_alpha_marker") > 0
         current = (await service.list_documents("reconstruct-owner", kb["id"]))[
             "documents"
         ][0]
         current_chunk = f"{current['version_id']}-chunk-000"
-        workspace = (await repository.get_kb("reconstruct-owner", kb["id"]))["workspace"]
         graph_source = await repository.pool.fetchval(
             "SELECT properties->>'source_id' FROM lightrag_graph_nodes "
             "WHERE workspace=$1 AND id='Unified'",
