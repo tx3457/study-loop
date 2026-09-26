@@ -1,0 +1,1256 @@
+[
+ {
+  "answer": "Sydney Harbour",
+  "answer_aliases": [
+   "Port Jackson"
+  ],
+  "hop": "2hop",
+  "question": "What body of water does the river that Toongabbie Creek flows into flow into?",
+  "question_id": "2hop__156658_155922",
+  "supporting_source_ids": [
+   "p_77e18441980b7cbf",
+   "p_fe7779f80fd81c78"
+  ]
+ },
+ {
+  "answer": "Liam Thomas Garrigan",
+  "answer_aliases": [
+   "Liam Garrigan"
+  ],
+  "hop": "2hop",
+  "question": "Who plays the person with the same name as he who was caught by surprise in Once Upon a Time?",
+  "question_id": "2hop__14078_49084",
+  "supporting_source_ids": [
+   "p_e7b37586991a8e74",
+   "p_7964b55c52e58b7e"
+  ]
+ },
+ {
+  "answer": "11,900",
+  "answer_aliases": [],
+  "hop": "2hop",
+  "question": "How many people work in the university that is related with Mark F. Green?",
+  "question_id": "2hop__123509_5385",
+  "supporting_source_ids": [
+   "p_acabfbbda0f34d3c",
+   "p_cccb039609061762"
+  ]
+ },
+ {
+  "answer": "Cordell Walker",
+  "answer_aliases": [],
+  "hop": "2hop",
+  "question": "What was the name of the Hero and the Terror star's character in Walker, Texas Ranger?",
+  "question_id": "2hop__96194_78303",
+  "supporting_source_ids": [
+   "p_67967a091e6c9b63",
+   "p_84bde0eb70a98a53"
+  ]
+ },
+ {
+  "answer": "Kicking Mule Records",
+  "answer_aliases": [],
+  "hop": "2hop",
+  "question": "What label is responsible for the performer of One Night in America?",
+  "question_id": "2hop__374767_152023",
+  "supporting_source_ids": [
+   "p_ca912b6c45aa8f73",
+   "p_0e5864cd5a5ea04b"
+  ]
+ },
+ {
+  "answer": "Great American Bash",
+  "answer_aliases": [
+   "The Great American Bash"
+  ],
+  "hop": "2hop",
+  "question": "Where did the wrestler who created the Money in the Bank Ladder Match win in 2008?",
+  "question_id": "2hop__80637_19033",
+  "supporting_source_ids": [
+   "p_e1d5699e603b87be",
+   "p_5d47c17833d315a1"
+  ]
+ },
+ {
+  "answer": "Hubbard County",
+  "answer_aliases": [
+   "Hubbard County, Minnesota"
+  ],
+  "hop": "2hop",
+  "question": "What administrative territorial entity contains the place where KPRM is licensed to broadcast to?",
+  "question_id": "2hop__304852_758385",
+  "supporting_source_ids": [
+   "p_8dfdca0ca0e9642c",
+   "p_73ef9b7d6d7afe2b"
+  ]
+ },
+ {
+  "answer": "Philip Mountbatten",
+  "answer_aliases": [],
+  "hop": "2hop",
+  "question": "Who is the spouse of Prince Edward, Earl of Wessex's mother?",
+  "question_id": "2hop__135029_712629",
+  "supporting_source_ids": [
+   "p_1b8bf42fbc841ab2",
+   "p_9d970f8299412038"
+  ]
+ },
+ {
+  "answer": "Honorable Justice Abiodun Smith",
+  "answer_aliases": [],
+  "hop": "2hop",
+  "question": "Who is the chief judge of Fred Aghogho Brume's birthplace?",
+  "question_id": "2hop__204493_69048",
+  "supporting_source_ids": [
+   "p_7438a09202fbb6fc",
+   "p_0be59481051e1c79"
+  ]
+ },
+ {
+  "answer": "406",
+  "answer_aliases": [],
+  "hop": "2hop",
+  "question": "At the end of what year did the tribes from the place where the Rossen culture is located invade the Roman Empire?",
+  "question_id": "2hop__603598_25719",
+  "supporting_source_ids": [
+   "p_6bf069f1e259fe0a",
+   "p_40c5b23cb28b69bf"
+  ]
+ },
+ {
+  "answer": "Katharine Ross",
+  "answer_aliases": [],
+  "hop": "2hop",
+  "question": "Who is the spouse of the person who voices Smokey the bear?",
+  "question_id": "2hop__78756_198548",
+  "supporting_source_ids": [
+   "p_d05a0587d0248b14",
+   "p_7f66907bf722c9a3"
+  ]
+ },
+ {
+  "answer": "as early as the 3rd century BC",
+  "answer_aliases": [],
+  "hop": "2hop",
+  "question": "When was the celestial object that eluded efforts to measure oxygen discovered to be the center of the solar system?",
+  "question_id": "2hop__40697_46621",
+  "supporting_source_ids": [
+   "p_c517c963ccbe5b57",
+   "p_df5d44989c280861"
+  ]
+ },
+ {
+  "answer": "northeastern Africa",
+  "answer_aliases": [
+   "Africa"
+  ],
+  "hop": "2hop",
+  "question": "Where is the river where the majority of Egyptians lived located in the world?",
+  "question_id": "2hop__37097_53663",
+  "supporting_source_ids": [
+   "p_988582be1f221ccb",
+   "p_1efcc348998c6c42"
+  ]
+ },
+ {
+  "answer": "Honorable Justice Abiodun Smith",
+  "answer_aliases": [],
+  "hop": "2hop",
+  "question": "Who is the chief judge of Friday Osanebi's birthplace?",
+  "question_id": "2hop__226204_69048",
+  "supporting_source_ids": [
+   "p_4cba51e3e8d1617e",
+   "p_7438a09202fbb6fc"
+  ]
+ },
+ {
+  "answer": "100",
+  "answer_aliases": [],
+  "hop": "2hop",
+  "question": "What is the U.S. News ranking of the law school at Bruce Nissen's employer?",
+  "question_id": "2hop__663184_57816",
+  "supporting_source_ids": [
+   "p_ecdf78c0823bdf68",
+   "p_25d3b211694ec604"
+  ]
+ },
+ {
+  "answer": "Kicking Mule Records",
+  "answer_aliases": [
+   "Real World Records"
+  ],
+  "hop": "2hop",
+  "question": "What label was responsible for who sang or played Delta Hardware?",
+  "question_id": "2hop__143650_152023",
+  "supporting_source_ids": [
+   "p_0e5864cd5a5ea04b",
+   "p_1aba1968f33b6874"
+  ]
+ },
+ {
+  "answer": "Nicholas Bacon",
+  "answer_aliases": [
+   "Sir Nicholas Bacon"
+  ],
+  "hop": "2hop",
+  "question": "Who is the father of the author of Novum Organum?",
+  "question_id": "2hop__507722_124896",
+  "supporting_source_ids": [
+   "p_091b7ab3d2b75562",
+   "p_1d34ad061edd381b"
+  ]
+ },
+ {
+  "answer": "1786",
+  "answer_aliases": [],
+  "hop": "2hop",
+  "question": "When was Q1 who was impeached in england for acts committed as governor general of india impeached?",
+  "question_id": "2hop__84937_21969",
+  "supporting_source_ids": [
+   "p_98b9dff97f7d9148",
+   "p_fb90ddee46a9e76b"
+  ]
+ },
+ {
+  "answer": "ATS - 6 (Applications Technology Satellite - 6)",
+  "answer_aliases": [
+   "ATS-6"
+  ],
+  "hop": "2hop",
+  "question": "What is the experimental satellite being forerunner to communication satellite of INSAT-4CR's manufacturer called?",
+  "question_id": "2hop__329591_91104",
+  "supporting_source_ids": [
+   "p_37780991471e5e04",
+   "p_8415509f6a59e10c"
+  ]
+ },
+ {
+  "answer": "\"Donda West Law\"",
+  "answer_aliases": [],
+  "hop": "2hop",
+  "question": "What was the name of the law passed by who was featured in the film the 6th Day?",
+  "question_id": "2hop__95687_2684",
+  "supporting_source_ids": [
+   "p_79a6d38f6b966e47",
+   "p_97766f30e6774ab3"
+  ]
+ },
+ {
+  "answer": "10,310,371 (2016 est.)",
+  "answer_aliases": [],
+  "hop": "2hop",
+  "question": "What is the population of the state where Dukes of Hazzard took place?",
+  "question_id": "2hop__71715_50429",
+  "supporting_source_ids": [
+   "p_b70a1558dcfb818d",
+   "p_cdaab90f373e4a4b"
+  ]
+ },
+ {
+  "answer": "Thomas Bach",
+  "answer_aliases": [],
+  "hop": "2hop",
+  "question": "Who is the president of the organization Julio Maglione is located?",
+  "question_id": "2hop__271045_68633",
+  "supporting_source_ids": [
+   "p_75802f356ae6e29e",
+   "p_7d0d110bca801a71"
+  ]
+ },
+ {
+  "answer": "918",
+  "answer_aliases": [],
+  "hop": "2hop",
+  "question": "When was the country Merewalh was a citizen of abolished?",
+  "question_id": "2hop__315072_120259",
+  "supporting_source_ids": [
+   "p_f21e277d618995ec",
+   "p_3ff06b682eca39e3"
+  ]
+ },
+ {
+  "answer": "Tianjin",
+  "answer_aliases": [],
+  "hop": "2hop",
+  "question": "In what city is Alain Lascoux's employer located?",
+  "question_id": "2hop__216535_370666",
+  "supporting_source_ids": [
+   "p_16706719d2c18397",
+   "p_3e8cabccb2ce7439"
+  ]
+ },
+ {
+  "answer": "Matthew Lawrence",
+  "answer_aliases": [],
+  "hop": "2hop",
+  "question": "Who is the brother of the Melissa and Joey Theme Song singer?",
+  "question_id": "2hop__82669_768138",
+  "supporting_source_ids": [
+   "p_757ba04012ecda4a",
+   "p_ab1c2c25f2f4cc6c"
+  ]
+ },
+ {
+  "answer": "Randall County",
+  "answer_aliases": [
+   "Randall County, Texas"
+  ],
+  "hop": "2hop",
+  "question": "In which county is Kimbrough Memorial Stadium located?",
+  "question_id": "2hop__528263_865831",
+  "supporting_source_ids": [
+   "p_88dd80cbdc44da01",
+   "p_1997cde696a24e5d"
+  ]
+ },
+ {
+  "answer": "72",
+  "answer_aliases": [],
+  "hop": "2hop",
+  "question": "By how many votes did the signer of the decree suspending the Communist Party of the Russian SFSR survive impeachment?",
+  "question_id": "2hop__5658_161105",
+  "supporting_source_ids": [
+   "p_9e2215e689504bd6",
+   "p_81e79bd93e9d20bb"
+  ]
+ },
+ {
+  "answer": "Dougray Scott",
+  "answer_aliases": [],
+  "hop": "2hop",
+  "question": "Who is married to the cast member of Carolina Moon?",
+  "question_id": "2hop__414193_176917",
+  "supporting_source_ids": [
+   "p_c490de53b1073eb9",
+   "p_e0b53f02f19c3d3e"
+  ]
+ },
+ {
+  "answer": "323 BC",
+  "answer_aliases": [],
+  "hop": "2hop",
+  "question": "When did the person who took over the territory and made it part of their empire die?",
+  "question_id": "2hop__39231_17335",
+  "supporting_source_ids": [
+   "p_302e9a165cb2ca5c",
+   "p_8bcc834bb8dfc8b1"
+  ]
+ },
+ {
+  "answer": "Chynna Phillips",
+  "answer_aliases": [],
+  "hop": "2hop",
+  "question": "Who is the child of the Victim of Romance performer?",
+  "question_id": "2hop__554167_451128",
+  "supporting_source_ids": [
+   "p_81ffc8b44eb74530",
+   "p_4e0b9c617b26d31b"
+  ]
+ },
+ {
+  "answer": "James Howard Meredith",
+  "answer_aliases": [
+   "James Meredith"
+  ],
+  "hop": "2hop",
+  "question": "who was the first black student admitted to the university that Stewart Patridge attended?",
+  "question_id": "2hop__123145_66723",
+  "supporting_source_ids": [
+   "p_f79cba8dd084a57a",
+   "p_f80b346a94e7bc7d"
+  ]
+ },
+ {
+  "answer": "Brian Thomas Moynihan",
+  "answer_aliases": [
+   "Brian Moynihan"
+  ],
+  "hop": "2hop",
+  "question": "Who is the CEO of FleetBoston Financial's purchaser?",
+  "question_id": "2hop__6827_86319",
+  "supporting_source_ids": [
+   "p_de790ec2a428d3a2",
+   "p_6a0e37536c30be2c"
+  ]
+ },
+ {
+  "answer": "Matt Bennett",
+  "answer_aliases": [],
+  "hop": "2hop",
+  "question": "Who is the guy in the video of the performer of One Last Time?",
+  "question_id": "2hop__586343_83289",
+  "supporting_source_ids": [
+   "p_c0d6876a7d0dd471",
+   "p_2219652468008ab0"
+  ]
+ },
+ {
+  "answer": "Mario Puzo",
+  "answer_aliases": [],
+  "hop": "2hop",
+  "question": "Who created the main character of The Godfather?",
+  "question_id": "2hop__85931_108632",
+  "supporting_source_ids": [
+   "p_f81a0879da8a5bb8",
+   "p_b82044cd41c02414"
+  ]
+ },
+ {
+  "answer": "David Hume",
+  "answer_aliases": [
+   "Hume"
+  ],
+  "hop": "2hop",
+  "question": "Who, along with the author of An Essay on the History of Civil Society, criticized the idea of social contract theorists?",
+  "question_id": "2hop__412633_15781",
+  "supporting_source_ids": [
+   "p_017381bf5d44110f",
+   "p_160b3ca013b1b7bd"
+  ]
+ },
+ {
+  "answer": "May 21, 1979",
+  "answer_aliases": [],
+  "hop": "2hop",
+  "question": "What date saw the writing of the song where the devil went down to the state where WDXQ is located?",
+  "question_id": "2hop__130404_59180",
+  "supporting_source_ids": [
+   "p_be17474f59160ceb",
+   "p_bc03a1000e4981cf"
+  ]
+ },
+ {
+  "answer": "661",
+  "answer_aliases": [],
+  "hop": "2hop",
+  "question": "When did the person who first brought a postal service into Umayyad lands become caliph?",
+  "question_id": "2hop__16581_16525",
+  "supporting_source_ids": [
+   "p_bbc8398635daf267",
+   "p_5fdf1854f02abefa"
+  ]
+ },
+ {
+  "answer": "Lyons' death in 1939",
+  "answer_aliases": [],
+  "hop": "2hop",
+  "question": "What event caused the founder of Australia's liberal party to become Prime Minister?",
+  "question_id": "2hop__29368_29376",
+  "supporting_source_ids": [
+   "p_c38759c70ccd8347",
+   "p_3d4e18359ff3932f"
+  ]
+ },
+ {
+  "answer": "Julie Dawn Cole",
+  "answer_aliases": [],
+  "hop": "2hop",
+  "question": "Who played the character with the same name as the Volcano Girls performer in Willy Wonka and the Chocolate Factory?",
+  "question_id": "2hop__864201_80026",
+  "supporting_source_ids": [
+   "p_88ac03d677f15807",
+   "p_f9c38fbb16afa967"
+  ]
+ },
+ {
+  "answer": "Firefox",
+  "answer_aliases": [
+   "Firefox web browser",
+   "Mozilla Firefox"
+  ],
+  "hop": "2hop",
+  "question": "What was the resulting browser of the group that owns Mozilla Messaging?",
+  "question_id": "2hop__612719_6455",
+  "supporting_source_ids": [
+   "p_4987719a7475059f",
+   "p_55a63f75e6cfaba8"
+  ]
+ },
+ {
+  "answer": "January 2015",
+  "answer_aliases": [],
+  "hop": "3hop",
+  "question": "When did the party that controls the House of Representatives right now, take control of the political body that the President calls on to support his USAF appointments?",
+  "question_id": "3hop2__87184_36497_76291",
+  "supporting_source_ids": [
+   "p_e3de0ee582ca38ce",
+   "p_450dafb44a30356f",
+   "p_0c3875782c5c338d"
+  ]
+ },
+ {
+  "answer": "Sea, Air, and Land",
+  "answer_aliases": [],
+  "hop": "3hop",
+  "question": "What does seal stand for in the U.S. military branch that operates a list of destroyer classes and the USS Stag?",
+  "question_id": "3hop1__838590_831637_91775",
+  "supporting_source_ids": [
+   "p_8491a65de95efc12",
+   "p_a35f94192b828c72",
+   "p_5de82255791981ef"
+  ]
+ },
+ {
+  "answer": "Tucson Raceway Park",
+  "answer_aliases": [
+   "Tucson, Arizona",
+   "Tucson"
+  ],
+  "hop": "3hop",
+  "question": "Where does the administrative territorial entity that contains the administrative territorial entity that contains summit hold NASCAR races?",
+  "question_id": "3hop1__273571_834494_34088",
+  "supporting_source_ids": [
+   "p_839517897c4dd87e",
+   "p_5eab631f01dc1a95",
+   "p_d42a498d275a0ce5"
+  ]
+ },
+ {
+  "answer": "$59,039",
+  "answer_aliases": [],
+  "hop": "3hop",
+  "question": "What is the average salary of a working person of the same nationality as MacGruder and Loud's creator?",
+  "question_id": "3hop1__694534_160088_85460",
+  "supporting_source_ids": [
+   "p_ae415a42a40f4341",
+   "p_df1b492fbd7d66e2",
+   "p_ebf7c2a75bd2ec8a"
+  ]
+ },
+ {
+  "answer": "the 2009 season",
+  "answer_aliases": [],
+  "hop": "3hop",
+  "question": "When did the team that won the AL East in 2017 last play in the event after which the MLB MVP is awarded?",
+  "question_id": "3hop2__88342_93066_47738",
+  "supporting_source_ids": [
+   "p_823be9f0a54383c5",
+   "p_c26f1287a039b9dc",
+   "p_6d3bce377ac48e09"
+  ]
+ },
+ {
+  "answer": "Ko Phi Phi Leh",
+  "answer_aliases": [
+   "Ko Phi Phi Le"
+  ],
+  "hop": "3hop",
+  "question": "Where did they film The Beach in the country where Siddhi Savetsila was born?",
+  "question_id": "3hop1__145194_160545_60577",
+  "supporting_source_ids": [
+   "p_04dc16ca643eab0b",
+   "p_484d9fd55f9fa161",
+   "p_e80eecd7046aaeaf"
+  ]
+ },
+ {
+  "answer": "1981",
+  "answer_aliases": [],
+  "hop": "3hop",
+  "question": "When did Nissan, the Acura Legend maker and the Scion Fuse manufacturer open US assembly plants?",
+  "question_id": "3hop2__132957_133264_40768",
+  "supporting_source_ids": [
+   "p_2e2b0b093721a57a",
+   "p_962fa1ef57edf01b",
+   "p_9cbea3805ac3dc04"
+  ]
+ },
+ {
+  "answer": "built in the 15th century",
+  "answer_aliases": [
+   "15th century"
+  ],
+  "hop": "3hop",
+  "question": "When was the Palau de la Generalitat constructed in the city where Martin from the region where Trasobares is located died?",
+  "question_id": "3hop1__220023_503371_21711",
+  "supporting_source_ids": [
+   "p_5f0706bc4175cfb4",
+   "p_41373c09e746ca2e",
+   "p_e984f43ed95865a8"
+  ]
+ },
+ {
+  "answer": "Sea, Air, and Land",
+  "answer_aliases": [],
+  "hop": "3hop",
+  "question": "What does seal stand for in the operator of list of destroyer classes of the operator of the USS Kajeruna seals?",
+  "question_id": "3hop1__673934_831637_91775",
+  "supporting_source_ids": [
+   "p_8491a65de95efc12",
+   "p_5de82255791981ef",
+   "p_43c81101d2e0ebf8"
+  ]
+ },
+ {
+  "answer": "16th - century",
+  "answer_aliases": [],
+  "hop": "3hop",
+  "question": "When did the merchant of the city where the composer of Al gran sole carico d'amore takes place?",
+  "question_id": "3hop1__222497_309482_89834",
+  "supporting_source_ids": [
+   "p_98b6f9cd33e1eb3a",
+   "p_b373f1c3f6392f87",
+   "p_21dca40b8a2a07c7"
+  ]
+ },
+ {
+  "answer": "Sales began worldwide in April 2012",
+  "answer_aliases": [],
+  "hop": "3hop",
+  "question": "When did the RX 350 from the Scion owner's luxury division change body style?",
+  "question_id": "3hop1__222979_40769_64047",
+  "supporting_source_ids": [
+   "p_7919472ea59ef28a",
+   "p_a9ef041054a8bf35",
+   "p_2e2b0b093721a57a"
+  ]
+ },
+ {
+  "answer": "permanent members of the United Nations Security Council",
+  "answer_aliases": [
+   "United Nations Security Council",
+   "UN Security Council"
+  ],
+  "hop": "3hop",
+  "question": "Who holds veto power in the organization that the victors of the conflict active when Hayek began \"Abuse of power\" were given permanent seats in.",
+  "question_id": "3hop1__30390_36635_87083",
+  "supporting_source_ids": [
+   "p_2ed84d05d42a9e3a",
+   "p_d61b99b0bbe341ba",
+   "p_f8dab37c258489d8"
+  ]
+ },
+ {
+  "answer": "1952",
+  "answer_aliases": [],
+  "hop": "3hop",
+  "question": "What year did the Governor of the city where the basilica named after the same saint as the one that Mantua Cathedral is dedicated to die?",
+  "question_id": "3hop1__136129_87694_124169",
+  "supporting_source_ids": [
+   "p_ba4fe796902ded4d",
+   "p_fea1386828ecf73d",
+   "p_c3fe91470f89d6c1"
+  ]
+ },
+ {
+  "answer": "$59,039",
+  "answer_aliases": [],
+  "hop": "3hop",
+  "question": "What is the average salary of a working person with the same nationality as the producer of The Wild Women of Chastity Gulch?",
+  "question_id": "3hop1__622497_160088_85460",
+  "supporting_source_ids": [
+   "p_ae415a42a40f4341",
+   "p_148c34e3ac7a8122",
+   "p_df1b492fbd7d66e2"
+  ]
+ },
+ {
+  "answer": "22",
+  "answer_aliases": [],
+  "hop": "3hop",
+  "question": "How many times did plague occur in the place of death of the creator of the Malchiostro Annunciation?",
+  "question_id": "3hop1__109196_720914_41132",
+  "supporting_source_ids": [
+   "p_91fb754f7a836d4d",
+   "p_cb8c780363dece80",
+   "p_b5509bc978d54554"
+  ]
+ },
+ {
+  "answer": "1981",
+  "answer_aliases": [],
+  "hop": "3hop",
+  "question": "When did Nissan, the Acura Legend maker and the top selling car brand open US assembly plants?",
+  "question_id": "3hop2__132957_76377_40768",
+  "supporting_source_ids": [
+   "p_9cbea3805ac3dc04",
+   "p_2e2b0b093721a57a",
+   "p_4817a1f7a89d7c96"
+  ]
+ },
+ {
+  "answer": "October 7, 2008",
+  "answer_aliases": [],
+  "hop": "3hop",
+  "question": "The Real Housewives series from the largest city of the state where WEKL transmits started when?",
+  "question_id": "3hop1__131820_59747_43101",
+  "supporting_source_ids": [
+   "p_ce31bcc22ee92fc1",
+   "p_2a5bedf79d253b4b",
+   "p_d1864be63ab18a3d"
+  ]
+ },
+ {
+  "answer": "22",
+  "answer_aliases": [],
+  "hop": "3hop",
+  "question": "How many times did plague occur in the birth city of the composer of La fida ninfa?",
+  "question_id": "3hop1__801799_547811_41132",
+  "supporting_source_ids": [
+   "p_91fb754f7a836d4d",
+   "p_4bc60290138c00b1",
+   "p_a6644b4d94b8568a"
+  ]
+ },
+ {
+  "answer": "Walter Sabo",
+  "answer_aliases": [],
+  "hop": "3hop",
+  "question": "Who was a prominent figure at the radio division of the broadcasting company that created the version of The Biggest Loser: The Final Chance, set in the country containing Labu?",
+  "question_id": "3hop1__377943_650651_7262",
+  "supporting_source_ids": [
+   "p_ce728a0b5448ccd0",
+   "p_a66c41c93c8c9439",
+   "p_baf76ab2ed00db2e"
+  ]
+ },
+ {
+  "answer": "Warner Music Group",
+  "answer_aliases": [
+   "Warner Music"
+  ],
+  "hop": "3hop",
+  "question": "Who is the owner of the record label of the guitarist who performed on the Top Gun theme?",
+  "question_id": "3hop1__45612_502967_84283",
+  "supporting_source_ids": [
+   "p_d9f976bd5b1a8053",
+   "p_2b29a3e6c96d0bb8",
+   "p_63f443b5dcf2f7e1"
+  ]
+ },
+ {
+  "answer": "1952",
+  "answer_aliases": [],
+  "hop": "3hop",
+  "question": "On what date did the Governor of the place of death of Princeps Pastorum's author end?",
+  "question_id": "3hop1__497845_629431_124169",
+  "supporting_source_ids": [
+   "p_5a40ef57a66f8d39",
+   "p_faf132deb48bc125",
+   "p_ba4fe796902ded4d"
+  ]
+ },
+ {
+  "answer": "Francisco Guterres",
+  "answer_aliases": [],
+  "hop": "3hop",
+  "question": "Who is the president of the newly declared independent country that is part of the Commission of Truth and Friendship with the country where Sambas is located?",
+  "question_id": "3hop1__749581_443779_52195",
+  "supporting_source_ids": [
+   "p_85d6b905a840b620",
+   "p_276962cfbb42f582",
+   "p_17866d9115df51b8"
+  ]
+ },
+ {
+  "answer": "South Central Coast",
+  "answer_aliases": [],
+  "hop": "3hop",
+  "question": "In what region of the country containing An Phú, is the city with the Zone 5 Military Museum located?",
+  "question_id": "3hop2__668732_467331_162182",
+  "supporting_source_ids": [
+   "p_832be2e09f953757",
+   "p_d3b4caf481ea720d",
+   "p_7b01925e99cc5cce"
+  ]
+ },
+ {
+  "answer": "for the conclave in Rome",
+  "answer_aliases": [
+   "Rome",
+   "Roma"
+  ],
+  "hop": "3hop",
+  "question": "Why did Roncalli leave the city where the creator of La Schiavona died?",
+  "question_id": "3hop1__109185_720914_27537",
+  "supporting_source_ids": [
+   "p_1f1ef3b26127ee47",
+   "p_b5509bc978d54554",
+   "p_da86bc73e96d2254"
+  ]
+ },
+ {
+  "answer": "Lawrence Hilton - Jacobs",
+  "answer_aliases": [],
+  "hop": "3hop",
+  "question": "Who played who sang is she really going out with him in the composer of speechless movie?",
+  "question_id": "3hop2__89048_809962_66294",
+  "supporting_source_ids": [
+   "p_3a880ea7e9d7364f",
+   "p_7aaf6ee81c5a63a4",
+   "p_5fc485dc5592a610"
+  ]
+ },
+ {
+  "answer": "Francisco Guterres",
+  "answer_aliases": [],
+  "hop": "3hop",
+  "question": "Arie Supriyatna's birth country was one participant in a Commission of Truth and Friendship. Who is the president of the other country that participated?",
+  "question_id": "3hop1__145212_443779_52195",
+  "supporting_source_ids": [
+   "p_276962cfbb42f582",
+   "p_17866d9115df51b8",
+   "p_afccfa45a9f442f2"
+  ]
+ },
+ {
+  "answer": "1,335,907",
+  "answer_aliases": [],
+  "hop": "3hop",
+  "question": "What's the population of the largest state in the region of the U.S. where trading practices were once threatened by the Navigation Acts?",
+  "question_id": "3hop1__159803_89752_75165",
+  "supporting_source_ids": [
+   "p_32ea227cd2a4f176",
+   "p_dbd1a5e22c753c9d",
+   "p_f8549534987728c3"
+  ]
+ },
+ {
+  "answer": "Tualatin Mountains",
+  "answer_aliases": [],
+  "hop": "3hop",
+  "question": "What mountain can you see from Portland in the state where Frozen Run's county is located?",
+  "question_id": "3hop1__604991_339990_54675",
+  "supporting_source_ids": [
+   "p_c374d57a49248a69",
+   "p_fe856e29c13a46ea",
+   "p_63e8fdc9babf4aa0"
+  ]
+ },
+ {
+  "answer": "Francisco Guterres",
+  "answer_aliases": [],
+  "hop": "3hop",
+  "question": "who is the president of newly declared independent country of the country of the birthplace of Mulham Arufin–Timor Leste Commission of Truth and Friendship?",
+  "question_id": "3hop1__144439_443779_52195",
+  "supporting_source_ids": [
+   "p_37c572bfd62d1b42",
+   "p_276962cfbb42f582",
+   "p_17866d9115df51b8"
+  ]
+ },
+ {
+  "answer": "rises in northern Minnesota and meanders slowly southwards",
+  "answer_aliases": [
+   "Minnesota"
+  ],
+  "hop": "3hop",
+  "question": "What is the direction of flow of the body of water by the city that Astronautalis is from?",
+  "question_id": "3hop1__152880_131926_87157",
+  "supporting_source_ids": [
+   "p_fa5ce36f072ada0a",
+   "p_507c1c5a685d7414",
+   "p_72cb7ead3ba4477f"
+  ]
+ },
+ {
+  "answer": "1932",
+  "answer_aliases": [],
+  "hop": "4hop",
+  "question": "When was the region immediately north of the region prevailing with the disgrace of the Near East and the final destination for the export crops established?",
+  "question_id": "4hop2__9988_158279_70784_61381",
+  "supporting_source_ids": [
+   "p_ec91dd0e33450587",
+   "p_a48372ad9fce2a92",
+   "p_6421666ff3e70d66",
+   "p_f7e20fac3cd1b17b"
+  ]
+ },
+ {
+  "answer": "University of South Carolina",
+  "answer_aliases": [
+   "USC",
+   "SC"
+  ],
+  "hop": "4hop",
+  "question": "Which university has more national championships, university of the state having Fort Hill or university of the state whose primary was won by Edwards besides the state having WEKL?",
+  "question_id": "4hop3__131820_29339_508306_70744",
+  "supporting_source_ids": [
+   "p_27cd1b8268057c78",
+   "p_afb12fbcde36bd2e",
+   "p_ce31bcc22ee92fc1",
+   "p_e72ddb7165f21b79"
+  ]
+ },
+ {
+  "answer": "two",
+  "answer_aliases": [],
+  "hop": "4hop",
+  "question": "How many ethnic minorities were looked at differently where the only group larger than the record label of The Lost Trident Sessions is headquartered?",
+  "question_id": "4hop1__151903_5274_458768_33637",
+  "supporting_source_ids": [
+   "p_ca71e65436e86e9d",
+   "p_93fb26c4e7754a34",
+   "p_0ab53ea6d24e21ee",
+   "p_020990590bbc6bec"
+  ]
+ },
+ {
+  "answer": "1839",
+  "answer_aliases": [],
+  "hop": "4hop",
+  "question": "When did the city where Hillcrest High School is located become capitol of the state in which a statue of a Latin mother goddess is located?",
+  "question_id": "4hop3__160230_470287_862998_72134",
+  "supporting_source_ids": [
+   "p_c399072d7313e34c",
+   "p_7487df883dd0105f",
+   "p_12517a4ce252e8ff",
+   "p_9d12c822636fcd0a"
+  ]
+ },
+ {
+  "answer": "Cabarrus County",
+  "answer_aliases": [],
+  "hop": "4hop",
+  "question": "What county shares a border with the other county, that contains the city, that is the birthplace of the performer of Never Gonna Fall in Love Again?",
+  "question_id": "4hop1__482815_624859_355213_203322",
+  "supporting_source_ids": [
+   "p_1fdd4cb7e900d4f0",
+   "p_a2972e0b5500c01a",
+   "p_e6fc5d3f18a1f09f",
+   "p_eee40c9ab683719b"
+  ]
+ },
+ {
+  "answer": "Cabarrus County",
+  "answer_aliases": [],
+  "hop": "4hop",
+  "question": "What county shares a border with the county where the birthplace of Tonight You're Mine's performer is located?",
+  "question_id": "4hop1__463635_624859_355213_203322",
+  "supporting_source_ids": [
+   "p_eee40c9ab683719b",
+   "p_179e0aeda4559de1",
+   "p_a2972e0b5500c01a",
+   "p_e6fc5d3f18a1f09f"
+  ]
+ },
+ {
+  "answer": "third-largest",
+  "answer_aliases": [],
+  "hop": "4hop",
+  "question": "Where does the city where Alexander Golitzen died rank in the top five largest urban areas of the state where the band that Jacoby Shaddix is a member of formed?",
+  "question_id": "4hop3__387712_132409_146285_35031",
+  "supporting_source_ids": [
+   "p_c84a3ef179ece0c0",
+   "p_cd4dfdb59badc492",
+   "p_15d652a7168b9864",
+   "p_618eada5436e079a"
+  ]
+ },
+ {
+  "answer": "1932",
+  "answer_aliases": [],
+  "hop": "4hop",
+  "question": "When was the region immediately north of the region where Israel is located and the final destination for the export crops established?",
+  "question_id": "4hop2__71753_158279_70784_61381",
+  "supporting_source_ids": [
+   "p_ec91dd0e33450587",
+   "p_a48372ad9fce2a92",
+   "p_0fe55822b59283cb",
+   "p_6421666ff3e70d66"
+  ]
+ },
+ {
+  "answer": "Alfredo Stroessner's Paraguay",
+  "answer_aliases": [
+   "Alfredo Stroessner"
+  ],
+  "hop": "4hop",
+  "question": "A country's military branch, the equivalent of which in the US helped the Old West's local police, was unprepared for the invasion of the country that developed the ZH-29. The unprepared country was the only communist country to have an embassy where?",
+  "question_id": "4hop2__105527_39078_8987_8974",
+  "supporting_source_ids": [
+   "p_b19305d19ab4699e",
+   "p_f6785bedc18e1607",
+   "p_4b1d40a658d4a437",
+   "p_35de20ca468d7122"
+  ]
+ },
+ {
+  "answer": "Pete Rose",
+  "answer_aliases": [],
+  "hop": "4hop",
+  "question": "Who has the most hits in the league whose member team has the most wins of the championship series which proceeds the MVP award?",
+  "question_id": "4hop1__88342_49853_128008_80286",
+  "supporting_source_ids": [
+   "p_823be9f0a54383c5",
+   "p_308a923f01209902",
+   "p_6164185c9873d9b3",
+   "p_7bf2746495b7193b"
+  ]
+ },
+ {
+  "answer": "two",
+  "answer_aliases": [],
+  "hop": "4hop",
+  "question": "How many ethnic minorities were looked at differently in the city where the headquarters of the only group larger than Vilaiyaadu Mankatha's record label is located?",
+  "question_id": "4hop1__152562_5274_458768_33637",
+  "supporting_source_ids": [
+   "p_0ab53ea6d24e21ee",
+   "p_020990590bbc6bec",
+   "p_ca71e65436e86e9d",
+   "p_90689e399bd36fa5"
+  ]
+ },
+ {
+  "answer": "Green Bay",
+  "answer_aliases": [],
+  "hop": "4hop",
+  "question": "What is the capital of the county that shares a border with the county where the headquarters of Pierce Manufacturing is located?",
+  "question_id": "4hop1__324759_765799_282674_759393",
+  "supporting_source_ids": [
+   "p_39c4bd32547a5820",
+   "p_28cbbdfabe964c22",
+   "p_7f60573afd6b1d6b",
+   "p_73f3b89de1a20c6d"
+  ]
+ },
+ {
+  "answer": "Rio Linda",
+  "answer_aliases": [],
+  "hop": "4hop",
+  "question": "What city shares a border with the city where a person went to work during the gold rush in the state where the Shakespeare Bridge is located?",
+  "question_id": "4hop1__131002_53706_795904_580996",
+  "supporting_source_ids": [
+   "p_4beb4e5156f99a9d",
+   "p_ec390c6e763dc347",
+   "p_94885be977978956",
+   "p_26d3ad8cc82be959"
+  ]
+ },
+ {
+  "answer": "Mario Andretti",
+  "answer_aliases": [],
+  "hop": "4hop",
+  "question": "Who won the Indy car race in the largest city and capitol of the state where the Changes Two performer is from?",
+  "question_id": "4hop1__813171_153080_159767_81096",
+  "supporting_source_ids": [
+   "p_61b69b6ad4ea2409",
+   "p_b3ad856a89e2d181",
+   "p_98a07edb3ccc50d9",
+   "p_c445c1f96beab482"
+  ]
+ },
+ {
+  "answer": "7,531",
+  "answer_aliases": [],
+  "hop": "4hop",
+  "question": "What was the population in 1900 of the second largest city in the US state having the Library District of the county containing Yuma?",
+  "question_id": "4hop1__342858_131850_33952_33939",
+  "supporting_source_ids": [
+   "p_1c62e523420f3853",
+   "p_5c05a372e4ad380f",
+   "p_b48ca5ae228e6149",
+   "p_59c3a0628712dbff"
+  ]
+ },
+ {
+  "answer": "Pristina",
+  "answer_aliases": [],
+  "hop": "4hop",
+  "question": "The language of a film titled and about the city where Tito was interred is the co-official language of a county. In what city is the national Radio and Television broadcaster for that country?",
+  "question_id": "4hop1__9002_698949_157828_239539",
+  "supporting_source_ids": [
+   "p_f102519b4f54b92c",
+   "p_79e5b95bc6e6c24b",
+   "p_2723a5150d5007ab",
+   "p_7d8105464c5d4aae"
+  ]
+ },
+ {
+  "answer": "May 1990",
+  "answer_aliases": [
+   "1990"
+  ],
+  "hop": "4hop",
+  "question": "A country was in effective control of both political and military functions of the organization the People's Socialist Republic of Albania belonged. When did this country agree to a unified Germany inside the organization that killed Gaddafi's grandsons?",
+  "question_id": "4hop3__373866_5189_31809_86687",
+  "supporting_source_ids": [
+   "p_a74427e6e1ae1eff",
+   "p_a29f88a939380568",
+   "p_42a6b801c9449d49",
+   "p_e4cf13a90b11e0ba"
+  ]
+ },
+ {
+  "answer": "Han Chinese emigrants",
+  "answer_aliases": [
+   "Han",
+   "Han Chinese"
+  ],
+  "hop": "4hop",
+  "question": "Who brought the language Hokkien to the country on the natural boundary between the country that hosted the tournament and the country where A Don is from?",
+  "question_id": "4hop2__161602_474028_88460_18966",
+  "supporting_source_ids": [
+   "p_a7fc8ad3843b61c0",
+   "p_f1559d716bf01f28",
+   "p_1f45fcacd3de61d2",
+   "p_0bc2ba7415bc4304"
+  ]
+ },
+ {
+  "answer": "Alex Bregman",
+  "answer_aliases": [],
+  "hop": "4hop",
+  "question": "Who won the All-Star MVP for the league that the team that has attended the competition where they give out the MLB MVP award after the most?",
+  "question_id": "4hop1__88342_75218_128008_67954",
+  "supporting_source_ids": [
+   "p_0596887fe32f04ff",
+   "p_823be9f0a54383c5",
+   "p_6164185c9873d9b3",
+   "p_86f077b794a4d7f2"
+  ]
+ },
+ {
+  "answer": "Alfredo Stroessner's Paraguay",
+  "answer_aliases": [
+   "Alfredo Stroessner"
+  ],
+  "hop": "4hop",
+  "question": "The military group of which the Air Defense Artillery is a branch was unprepared for the invasion of the territory the Nazis occupied. The country of this group was the only communist country to have an embassy where?",
+  "question_id": "4hop2__161324_14670_8987_8974",
+  "supporting_source_ids": [
+   "p_4b1d40a658d4a437",
+   "p_b004656020d86455",
+   "p_35de20ca468d7122",
+   "p_8cc8af00fcb267df"
+  ]
+ },
+ {
+  "answer": "Mario Andretti",
+  "answer_aliases": [],
+  "hop": "4hop",
+  "question": "Who won the Indy car race in the largest populated city in the state where the performer of A Modern Jazz Symposium of Music and Poetry is from?",
+  "question_id": "4hop1__846600_153080_33897_81096",
+  "supporting_source_ids": [
+   "p_98a07edb3ccc50d9",
+   "p_7e1b780e7f019c56",
+   "p_420c9aa7148f98aa",
+   "p_b3ad856a89e2d181"
+  ]
+ },
+ {
+  "answer": "Saxony-Anhalt",
+  "answer_aliases": [],
+  "hop": "4hop",
+  "question": "Where is the district that the person who wanted to reform and address Medardo Joseph Mazombwe's religion preached a sermon on Marian devotion before his death located?",
+  "question_id": "4hop1__571599_49925_13759_736921",
+  "supporting_source_ids": [
+   "p_4e27a283fef849b7",
+   "p_3cb4a53b6e959480",
+   "p_02630e7ccab81cab",
+   "p_d63cfcdbf18fa095"
+  ]
+ },
+ {
+  "answer": "Presque Isle County",
+  "answer_aliases": [],
+  "hop": "4hop",
+  "question": "Which county shares a border with the county where the most populous city in the state where the Dukes of Hazzard took place is located?",
+  "question_id": "4hop1__71715_59747_211319_557671",
+  "supporting_source_ids": [
+   "p_462554f76679ccd7",
+   "p_d1864be63ab18a3d",
+   "p_b70a1558dcfb818d",
+   "p_5f1527f5b5482709"
+  ]
+ },
+ {
+  "answer": "University of South Carolina",
+  "answer_aliases": [
+   "SCar",
+   "USC",
+   "SC"
+  ],
+  "hop": "4hop",
+  "question": "University of the state having Fort Hill or university of the state whose primary was won by Edwards besides the state having James B. Simmons House has more national championships?",
+  "question_id": "4hop3__129318_29339_508306_70744",
+  "supporting_source_ids": [
+   "p_e72ddb7165f21b79",
+   "p_27cd1b8268057c78",
+   "p_d10d42838b24f231",
+   "p_afb12fbcde36bd2e"
+  ]
+ },
+ {
+  "answer": "1932",
+  "answer_aliases": [],
+  "hop": "4hop",
+  "question": "When was the region that lies to the north of the region Israel is located and where the Battle of Qurah and Umm al Maradim is took place established?",
+  "question_id": "4hop2__71753_648517_70784_61381",
+  "supporting_source_ids": [
+   "p_6421666ff3e70d66",
+   "p_febd202c2bb0a8a4",
+   "p_ec91dd0e33450587",
+   "p_0fe55822b59283cb"
+  ]
+ },
+ {
+  "answer": "Alfredo Stroessner's Paraguay",
+  "answer_aliases": [
+   "Alfredo Stroessner"
+  ],
+  "hop": "4hop",
+  "question": "A country's military branch, which in the US contains the Air Defense Artillery, was unprepared for the invasion of the country that experienced a normalization period. The unprepared country was the only communist country to have an embassy where?",
+  "question_id": "4hop2__567956_14670_8987_8974",
+  "supporting_source_ids": [
+   "p_4b1d40a658d4a437",
+   "p_8cc8af00fcb267df",
+   "p_eceb8fd94d97c81b",
+   "p_35de20ca468d7122"
+  ]
+ },
+ {
+  "answer": "1930",
+  "answer_aliases": [],
+  "hop": "4hop",
+  "question": "When was the region immediately north of the region that prevailed with the disgrace of Near East and the terrain feature on which shamal is located created?",
+  "question_id": "4hop2__9988_261673_70784_79935",
+  "supporting_source_ids": [
+   "p_d8dd686764b34e20",
+   "p_a5cab0bf9acc5c9e",
+   "p_6421666ff3e70d66",
+   "p_f7e20fac3cd1b17b"
+  ]
+ },
+ {
+  "answer": "University of South Carolina",
+  "answer_aliases": [
+   "SC"
+  ],
+  "hop": "4hop",
+  "question": "Edwards won the primary in a state excluding the state that sent the most tourists in to Tennessee in 2013. Who has the most national championships between that state's university and Fort Hill's city's university?",
+  "question_id": "4hop3__31333_29339_508306_70744",
+  "supporting_source_ids": [
+   "p_d6ba218935d13437",
+   "p_27cd1b8268057c78",
+   "p_afb12fbcde36bd2e",
+   "p_e72ddb7165f21b79"
+  ]
+ },
+ {
+  "answer": "Cabarrus County",
+  "answer_aliases": [],
+  "hop": "4hop",
+  "question": "What county shares a border with the other county, that contains the city, where the singer of Hungry Eyes in the movie Dirty Dancing, was born?",
+  "question_id": "4hop1__89530_624859_355213_203322",
+  "supporting_source_ids": [
+   "p_eee40c9ab683719b",
+   "p_e6fc5d3f18a1f09f",
+   "p_922574617ed728a6",
+   "p_a2972e0b5500c01a"
+  ]
+ },
+ {
+  "answer": "Mario Andretti",
+  "answer_aliases": [],
+  "hop": "4hop",
+  "question": "Who won the Indy Car Race in the largest populated city of the state where the performer of The Black Saint and the Sinner Lady is from?",
+  "question_id": "4hop1__708184_153080_33897_81096",
+  "supporting_source_ids": [
+   "p_c839bdda6c719f47",
+   "p_b3ad856a89e2d181",
+   "p_98a07edb3ccc50d9",
+   "p_420c9aa7148f98aa"
+  ]
+ }
+]

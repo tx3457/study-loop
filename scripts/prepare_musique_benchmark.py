@@ -43,13 +43,15 @@ def document_text(title: str, text: str) -> str:
     return f"{title}\n{text}"
 
 
-def build(rows: list[dict]) -> tuple[list[dict], list[dict]]:
+def build(
+    rows: list[dict], seed: int = SEED, exclude: frozenset[str] = frozenset()
+) -> tuple[list[dict], list[dict]]:
     by_stratum: dict[str, list[dict]] = {name: [] for name in STRATA}
     for row in rows:
-        if not row["answerable"]:
+        if not row["answerable"] or row["id"] in exclude:
             continue
         by_stratum[row["id"].split("__")[0][:4]].append(row)
-    rng = random.Random(SEED)
+    rng = random.Random(seed)
     selected: list[dict] = []
     for name, size in STRATA.items():
         pool = sorted(by_stratum[name], key=lambda row: row["id"])
@@ -93,6 +95,13 @@ def _write(path: Path, payload) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("source", type=Path, help="musique_ans_v1.0_dev.jsonl")
+    parser.add_argument("--output", type=Path, default=OUTPUT)
+    parser.add_argument("--seed", type=int, default=SEED)
+    parser.add_argument("--benchmark-id", default="musique_multihop_v1")
+    parser.add_argument(
+        "--exclude", type=Path, action="append", default=[],
+        help="questions.json of a sample this one must not overlap (a held-out set)",
+    )
     args = parser.parse_args()
     raw = args.source.read_bytes()
     actual = hashlib.sha256(raw).hexdigest()
@@ -100,10 +109,14 @@ def main() -> int:
         print(f"source SHA-256 {actual} does not match the pinned {SOURCE_SHA256}", file=sys.stderr)
         return 2
     rows = [json.loads(line) for line in raw.decode().splitlines() if line.strip()]
-    questions, corpus = build(rows)
-    OUTPUT.mkdir(parents=True, exist_ok=True)
+    excluded = frozenset(
+        q["question_id"] for path in args.exclude for q in json.loads(path.read_text())
+    )
+    questions, corpus = build(rows, args.seed, excluded)
+    output = args.output
+    output.mkdir(parents=True, exist_ok=True)
     manifest = {
-        "benchmark_id": "musique_multihop_v1",
+        "benchmark_id": args.benchmark_id,
         "source": {
             "dataset": "MuSiQue-Ans v1.0 dev",
             "file": "musique_ans_v1.0_dev.jsonl",
@@ -112,16 +125,17 @@ def main() -> int:
             "citation": "Trivedi et al., MuSiQue: Multihop Questions via Single-hop "
                         "Question Composition, TACL 2022",
         },
-        "seed": SEED,
+        "seed": args.seed,
         "strata": STRATA,
+        **({"excluded_question_count": len(excluded)} if excluded else {}),
         "question_count": len(questions),
         "corpus_size": len(corpus),
         "files": {
-            "questions.json": _write(OUTPUT / "questions.json", questions),
-            "corpus.json": _write(OUTPUT / "corpus.json", corpus),
+            "questions.json": _write(output / "questions.json", questions),
+            "corpus.json": _write(output / "corpus.json", corpus),
         },
     }
-    _write(OUTPUT / "manifest.json", manifest)
+    _write(output / "manifest.json", manifest)
     print(json.dumps({k: manifest[k] for k in ("question_count", "corpus_size", "strata")}))
     return 0
 

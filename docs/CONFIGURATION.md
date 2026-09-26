@@ -71,6 +71,14 @@ exception. It is not a public HTTP endpoint or a default CI step.
   `RERANKER_ENABLED=true`.
 - Query rewriting, HyDE, multi-query retrieval, and reranking are feature
   flagged and disabled in `.env.example` for a lightweight first run.
+- `HYBRID_DENSE_WEIGHT` and `HYBRID_BM25_WEIGHT` weight the two rankings in the
+  document retrieval's reciprocal-rank fusion. The default 1:1 is plain RRF and
+  keeps the previous behaviour exactly; `0` turns a retriever off, and an invalid,
+  negative or all-zero setting falls back to 1:1 with a warning. Weights are read
+  on every query. On English multi-hop questions, favouring dense retrieval trended
+  better but did not clear the pre-registered bar on a held-out sample, and Chinese
+  material is unmeasured, so the default is unchanged
+  ([fusion report](lightrag/evaluation/FUSION_REPORT.md)).
 - LangSmith, Langfuse, tracing, and live MCP integrations are opt-in and disabled
   by default.
 

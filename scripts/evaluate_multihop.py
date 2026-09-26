@@ -12,6 +12,15 @@ one state directory and every live phase resumes where it stopped.
     python scripts/evaluate_multihop.py answer --state S             # knowledge env
     python scripts/evaluate_multihop.py score --state S              # any env, offline
 
+The fusion-weight study (evaluation/musique_multihop_holdout/protocol.json) sweeps
+the main app's RRF weights on the tuning sample and judges the pick on a held-out one:
+
+    python scripts/evaluate_multihop.py sweep-baseline --state T                      # main-app env
+    python scripts/evaluate_multihop.py sweep-baseline --state H \
+        --benchmark evaluation/musique_multihop_holdout                               # main-app env
+    python scripts/evaluate_multihop.py sweep-score --state T --holdout-state H \
+        --benchmark evaluation/musique_multihop_holdout                               # offline
+
 Live phases need KNOWLEDGE_EVAL_DATABASE_URL (a disposable pgvector database)
 for the graph phase and the provider keys from .env. --limit N runs only the
 first N questions and their paragraphs, for a smoke run.
@@ -50,15 +59,15 @@ def _read(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def load_benchmark(limit: int | None = None) -> dict[str, Any]:
+def load_benchmark(limit: int | None = None, root: Path = BENCHMARK) -> dict[str, Any]:
     """Load the frozen sample after checking it against its manifest."""
-    manifest = _read(BENCHMARK / "manifest.json")
+    manifest = _read(root / "manifest.json")
     for name, expected in manifest["files"].items():
-        actual = hashlib.sha256((BENCHMARK / name).read_bytes()).hexdigest()
+        actual = hashlib.sha256((root / name).read_bytes()).hexdigest()
         if actual != expected:
             raise SystemExit(f"{name} changed after freezing: {actual} != {expected}")
-    questions = _read(BENCHMARK / "questions.json")
-    corpus = _read(BENCHMARK / "corpus.json")
+    questions = _read(root / "questions.json")
+    corpus = _read(root / "corpus.json")
     by_id = {item["source_id"]: item for item in corpus}
     for question in questions:
         missing = set(question["supporting_source_ids"]) - set(by_id)
@@ -75,7 +84,7 @@ def load_benchmark(limit: int | None = None) -> dict[str, Any]:
         keep |= set(others[: 18 * len(questions)])
         corpus = [item for item in corpus if item["source_id"] in keep]
     return {"manifest": manifest, "questions": questions, "corpus": corpus,
-            "protocol": _read(BENCHMARK / "protocol.json")}
+            "protocol": _read(root / "protocol.json")}
 
 
 def _write(path: Path, payload: Any) -> None:
@@ -174,7 +183,7 @@ def decide(f1_comparison: dict[str, float], rule: dict[str, Any]) -> str:
 # ---------------------------------------------------------------- baseline
 
 
-async def _retrieve_baseline(state: Path, bench: dict[str, Any]) -> None:
+async def _baseline_setup(state: Path, bench: dict[str, Any]):
     _load_env()
     os.environ["LLM_EMBEDDING_MODEL"] = os.environ.get("KNOWLEDGE_EMBEDDING_MODEL", "BAAI/bge-m3")
     os.environ["CHROMA_DIR"] = str(state / "chroma")
@@ -194,22 +203,105 @@ async def _retrieve_baseline(state: Path, bench: dict[str, Any]) -> None:
         _write(marker, {"seconds": time.perf_counter() - started,
                         "embedding_model": os.environ["LLM_EMBEDDING_MODEL"],
                         "paragraphs": len(bench["corpus"])})
+    return vectorstore, text_to_source, owner, document_id
+
+
+async def _baseline_ranked(vectorstore, text_to_source, owner, document_id, question) -> list[str]:
+    raw = await vectorstore.hybrid_query_document(
+        document_id, question["question"], n_results=max(K_VALUES),
+        enable_rerank=False, owner_id=owner,
+    )
+    texts = list(raw.get("documents", [[]])[0])
+    ranked = dedupe([text_to_source.get(text, "") for text in texts])
+    if len(ranked) != len(texts):
+        raise RuntimeError("baseline returned text outside the frozen corpus")
+    return ranked
+
+
+async def _retrieve_baseline(state: Path, bench: dict[str, Any]) -> None:
+    vectorstore, text_to_source, owner, document_id = await _baseline_setup(state, bench)
     rows = []
     for question in bench["questions"]:
         started = time.perf_counter()
-        raw = await vectorstore.hybrid_query_document(
-            document_id, question["question"], n_results=max(K_VALUES),
-            enable_rerank=False, owner_id=owner,
-        )
+        ranked = await _baseline_ranked(vectorstore, text_to_source, owner, document_id, question)
         latency = (time.perf_counter() - started) * 1000
-        texts = list(raw.get("documents", [[]])[0])
-        ranked = dedupe([text_to_source.get(text, "") for text in texts])
-        if len(ranked) != len(texts):
-            raise RuntimeError("baseline returned text outside the frozen corpus")
         rows.append({"question_id": question["question_id"], "ranked": ranked,
                      "latency_ms": latency})
     _write(state / "retrieval_hybrid_rrf.json", {"embedding_model": os.environ["LLM_EMBEDDING_MODEL"],
                                                  "questions": rows})
+
+
+async def _sweep_baseline(state: Path, bench: dict[str, Any], weights: list[str]) -> None:
+    setup = await _baseline_setup(state, bench)
+    sweep: dict[str, Any] = {"embedding_model": os.environ["LLM_EMBEDDING_MODEL"], "weights": {}}
+    for weight in weights:
+        dense, bm25 = weight.split(":")
+        # hybrid_query_document reads the weights on every call.
+        os.environ["HYBRID_DENSE_WEIGHT"], os.environ["HYBRID_BM25_WEIGHT"] = dense, bm25
+        sweep["weights"][weight] = [
+            {"question_id": q["question_id"], "ranked": await _baseline_ranked(*setup, q)}
+            for q in bench["questions"]
+        ]
+        print(f"swept {weight}", flush=True)
+    _write(state / "sweep_baseline.json", sweep)
+
+
+def _weight_distance(weight: str) -> float:
+    dense, bm25 = (float(part) for part in weight.split(":"))
+    return abs(dense / (dense + bm25) - 0.5)
+
+
+def _sweep_metrics(state: Path, bench: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    supporting = {q["question_id"]: q["supporting_source_ids"] for q in bench["questions"]}
+    result = {}
+    for weight, rows in _read(state / "sweep_baseline.json")["weights"].items():
+        per = {k: [] for k in ("recall@5", "recall@10", "recall@20", "full_support@10")}
+        for row in rows:
+            gold = supporting[row["question_id"]]
+            for k in (5, 10, 20):
+                per[f"recall@{k}"].append(recall_at(row["ranked"], gold, k))
+            per["full_support@10"].append(full_support_at(row["ranked"], gold, 10))
+        result[weight] = {"columns": per,
+                          "mean": {key: sum(v) / len(v) for key, v in per.items()}}
+    return result
+
+
+def select_weight(metrics: dict[str, dict[str, Any]]) -> str:
+    """Frozen selection rule: full_support@10, then recall@10, then closest to 1:1."""
+    return max(metrics, key=lambda w: (metrics[w]["mean"]["full_support@10"],
+                                       metrics[w]["mean"]["recall@10"],
+                                       -_weight_distance(w)))
+
+
+def sweep_score(tuning: Path, holdout: Path, holdout_bench: dict[str, Any]) -> dict[str, Any]:
+    tuning_metrics = _sweep_metrics(tuning, load_benchmark())
+    holdout_metrics = _sweep_metrics(holdout, holdout_bench)
+    chosen = select_weight(tuning_metrics)
+    comparison = None
+    decision = "no_change"
+    if chosen != "1:1":
+        base, pick = holdout_metrics["1:1"]["columns"], holdout_metrics[chosen]["columns"]
+        comparison = {
+            "recall@10": paired_bootstrap(base["recall@10"], pick["recall@10"]),
+            "full_support@10": {
+                # Named for this comparison; mcnemar_exact's keys name the GraphRAG one.
+                ("only_1_1" if key == "only_baseline" else
+                 "only_selected" if key == "only_graph" else key): value
+                for key, value in mcnemar_exact(
+                    base["full_support@10"], pick["full_support@10"]).items()
+            },
+        }
+        if comparison["recall@10"]["ci95_low"] > 0:
+            decision = "candidate"
+    result = {
+        "tuning": {w: m["mean"] for w, m in tuning_metrics.items()},
+        "holdout": {w: m["mean"] for w, m in holdout_metrics.items()},
+        "selected_on_tuning": chosen,
+        "holdout_comparison_vs_1_1": comparison,
+        "decision": decision,
+    }
+    _write(holdout / "sweep_results.json", result)
+    return result
 
 
 # ---------------------------------------------------------------- graph
@@ -571,14 +663,19 @@ def score(state: Path, bench: dict[str, Any]) -> dict[str, Any]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("phase", choices=["validate", "retrieve-baseline", "retrieve-graph",
-                                          "answer", "score"])
+                                          "answer", "score", "sweep-baseline", "sweep-score"])
+    parser.add_argument("--benchmark", type=Path, default=BENCHMARK,
+                        help="frozen sample directory (default: the GraphRAG comparison sample)")
+    parser.add_argument("--holdout-state", type=Path, help="sweep-score: held-out state directory")
+    parser.add_argument("--weights", default="1:0,4:1,3:1,2:1,1.5:1,1:1,1:1.5,1:2",
+                        help="sweep-baseline: dense:bm25 fusion weights")
     parser.add_argument("--state", type=Path, help="state directory shared by the phases")
     parser.add_argument("--limit", type=int, help="smoke run on the first N questions")
     parser.add_argument("--parallel", type=int, default=8,
                         help="concurrent LightRAG documents and LLM calls while indexing")
     parser.add_argument("--concurrency", type=int, default=8, help="concurrent answer calls")
     args = parser.parse_args()
-    bench = load_benchmark(args.limit)
+    bench = load_benchmark(args.limit, args.benchmark.resolve())
     if args.phase == "validate":
         print(json.dumps({"status": "fixtures_valid", "questions": len(bench["questions"]),
                           "corpus": len(bench["corpus"]), "live_model_calls": False}))
@@ -592,6 +689,14 @@ def main() -> int:
         asyncio.run(_retrieve_graph(args.state, bench, args.parallel))
     elif args.phase == "answer":
         asyncio.run(_answer(args.state, bench, args.concurrency))
+    elif args.phase == "sweep-baseline":
+        asyncio.run(_sweep_baseline(args.state, bench, args.weights.split(",")))
+    elif args.phase == "sweep-score":
+        if args.holdout_state is None:
+            parser.error("--holdout-state is required for sweep-score")
+        result = sweep_score(args.state, args.holdout_state, bench)
+        print(json.dumps({k: result[k] for k in ("selected_on_tuning", "decision",
+                                                 "holdout_comparison_vs_1_1")}, indent=1))
     else:
         summary = score(args.state, bench)["summary"]
         print(json.dumps({key: summary[key] for key in ("n", "decision", "latency_ms")}, indent=1))

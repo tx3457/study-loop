@@ -1,0 +1,23 @@
+{
+ "benchmark_id": "musique_multihop_holdout_v1",
+ "corpus_size": 1659,
+ "excluded_question_count": 100,
+ "files": {
+  "corpus.json": "dcaccac8b4b104eb04cbe63b6f1ed16f7a70a01fb145038f630e145fc555b7a9",
+  "questions.json": "11375ce8c797d2e2d23566095dfab5102256c853e1f3c5f56174a2e6c586cfe4"
+ },
+ "question_count": 100,
+ "seed": 20260926,
+ "source": {
+  "citation": "Trivedi et al., MuSiQue: Multihop Questions via Single-hop Question Composition, TACL 2022",
+  "dataset": "MuSiQue-Ans v1.0 dev",
+  "file": "musique_ans_v1.0_dev.jsonl",
+  "license": "CC BY 4.0",
+  "sha256": "15fa63794d18a94ce12411aca6e2327e65b6e83b0b1490efab3f1962e48abf3b"
+ },
+ "strata": {
+  "2hop": 40,
+  "3hop": 30,
+  "4hop": 30
+ }
+}
