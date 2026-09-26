@@ -1,0 +1,8 @@
+{
+ "model": "Qwen/Qwen3.8-27B",
+ "enable_thinking": {
+  "enable_thinking": false
+ },
+ "temperature": 0,
+ "context_chunks": 10
+}

@@ -1,0 +1,38 @@
+{
+ "index": {
+  "prompt_tokens": 2073202,
+  "completion_tokens": 768668,
+  "total_tokens": 2841870,
+  "call_count": 1161,
+  "llm_calls": 1161
+ },
+ "query": {
+  "prompt_tokens": 66081,
+  "completion_tokens": 4323,
+  "total_tokens": 70404,
+  "call_count": 100,
+  "llm_calls": 100
+ },
+ "sessions": [
+  {
+   "note": "First session stopped on provider HTTP 402 (balance insufficient) and was killed before usage was written. 747 documents were processed; their token usage is unknown, not zero. Smoke measurement: about 1928 prompt + 691 completion tokens per paragraph.",
+   "llm_model": "Pro/deepseek-ai/DeepSeek-V3.2",
+   "embedding_model": "BAAI/bge-m3",
+   "llm_max_async": 16
+  },
+  {
+   "llm_model": "Pro/deepseek-ai/DeepSeek-V3.2",
+   "embedding_model": "BAAI/bge-m3",
+   "llm_max_async": 16,
+   "index_seconds_this_session": 3764.8741829040227
+  },
+  {
+   "llm_model": "Pro/deepseek-ai/DeepSeek-V3.2",
+   "embedding_model": "BAAI/bge-m3",
+   "llm_max_async": 16,
+   "index_seconds_this_session": 0.31193545705173165,
+   "failed_documents": []
+  }
+ ],
+ "usage_complete": false
+}

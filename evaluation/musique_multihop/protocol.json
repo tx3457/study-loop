@@ -1,0 +1,57 @@
+{
+ "schema_version": 1,
+ "benchmark_id": "musique_multihop_v1",
+ "frozen_before_model_calls": true,
+ "purpose": "Decide whether GraphRAG (LightRAG) earns further investment by measuring, on multi-hop questions over a pooled corpus with distractors, whether it retrieves better evidence and yields better answers than the existing hybrid retrieval, at what cost.",
+ "production_fidelity": {
+  "answer_context": "Production knowledge answers see retrieved text chunks only; LightRAG entities and relationships are not passed to the model (services/knowledge_agent.py). The primary comparison therefore gives both methods chunks only.",
+  "lightrag_query": "graph_service.engine.LightRAGEngine.query as in production: aquery_data mode=mix, top_k=40, chunk_top_k=20, rerank disabled.",
+  "lightrag_index": "graph_service.engine.LightRAGEngine with Settings.from_env (the KNOWLEDGE_* production configuration); only the database, directories and llm_max_async differ.",
+  "baseline": "services.vectorstore.deal_document + hybrid_query_document: BM25 + dense + RRF, rerank disabled (RERANKER_ENABLED=false in production).",
+  "embedding": "Both methods use the knowledge embedding model (BAAI/bge-m3). The main app's configured bge-large-zh-v1.5 is Chinese-only and would handicap the baseline on English text; the deviation is recorded, not hidden.",
+  "dependency_isolation": "Each method runs in the environment it runs in production (main app vs knowledge service); they pin different openai versions."
+ },
+ "corpus": {
+  "unit": "One MuSiQue paragraph (title + text) is one baseline chunk and one LightRAG document.",
+  "pooling": "All 20 paragraphs of every sampled question, deduplicated, form one knowledge base."
+ },
+ "methods": {
+  "hybrid_rrf": "Primary baseline.",
+  "lightrag_mix": "Primary GraphRAG arm (production mode).",
+  "lightrag_naive": "Diagnostic: LightRAG's vector-only retrieval over the same index, separating the graph's contribution from differences in chunk storage and embedding calls.",
+  "lightrag_mix_with_graph_facts": "Diagnostic answer arm: the mix chunks plus the entity and relationship descriptions LightRAG returned, showing what production leaves unused."
+ },
+ "retrieval_metrics": {
+  "ranked_list": "Source IDs deduplicated in first-retrieved order.",
+  "recall_at_k": "Supporting source IDs in the top k divided by supporting source IDs, k in {5, 10, 20}.",
+  "full_support_at_k": "1 if every supporting source ID is in the top k, else 0.",
+  "latency": "Wall-clock per query, p50 and p95."
+ },
+ "answering": {
+  "context_chunks": 10,
+  "model": "The production knowledge answer profile: KNOWLEDGE_QA_MODEL (falling back to KNOWLEDGE_LLM_MODEL) on the knowledge provider, thinking as KNOWLEDGE_QA_ENABLE_THINKING. Temperature 0 instead of the configured production value, for repeatability. One call per question and arm, no retries; a failed call scores 0 and is reported.",
+  "prompt": "System: Answer the question using only the passages. Reply with JSON {\"answer\": \"<shortest phrase that answers the question>\"}. If the passages do not contain the answer, reply {\"answer\": \"unknown\"}. User: numbered passages (title and text), then the question.",
+  "metrics": "SQuAD normalisation (lowercase, strip punctuation and articles, collapse whitespace); exact match and token F1 against the answer and its aliases, taking the maximum."
+ },
+ "statistics": {
+  "paired_bootstrap": "10000 resamples of questions, seed 20260925; 95% percentile interval of the mean difference.",
+  "binary_outcomes": "Exact McNemar test for exact match and full_support@10.",
+  "breakdown": "Every metric is also reported per hop group (2hop, 3hop, 4hop); groups are descriptive, not separately tested."
+ },
+ "decision_rule": {
+  "primary_endpoint": "Answer token F1, lightrag_mix minus hybrid_rrf.",
+  "invest": "Mean difference >= +5 F1 points AND the 95% interval's lower bound > 0.",
+  "shrink": "The 95% interval's upper bound < +2 F1 points: no practically relevant benefit is plausible. GraphRAG stays optional and off by default; no further investment in its concurrency, pooling or scale work.",
+  "inconclusive": "Anything else. Report the retrieval endpoints (full_support@10, recall@10) and cost, and decide with them rather than rerunning until a threshold is met.",
+  "cost_is_reported_not_gated": "Index token usage, index wall time and query latency are reported beside the outcome; they inform how much to invest, not the category."
+ },
+ "cost_accounting": {
+  "index_tokens": "LightRAG extraction calls report provider usage through the SDK token tracker; a call without usage is counted as unknown, not zero.",
+  "currency": "Not estimated; the provider bill is the authority."
+ },
+ "not_measured": [
+  "Chinese material (the product's real language); this is an English benchmark.",
+  "Production Autonomous multi-round tool use; answering is one shared single call.",
+  "Global or thematic questions, where GraphRAG claims a different advantage."
+ ]
+}
