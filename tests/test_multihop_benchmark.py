@@ -63,3 +63,26 @@ def test_statistics_are_centred_and_exact():
 def test_decision_rule_matches_the_frozen_protocol(mean, low, high, expected):
     comparison = {"mean_difference": mean, "ci95_low": low, "ci95_high": high}
     assert bench.decide(comparison, bench.load_benchmark()["protocol"]["decision_rule"]) == expected
+
+
+def test_holdout_sample_is_frozen_and_disjoint_from_the_tuning_sample():
+    holdout = bench.load_benchmark(root=bench.REPO_ROOT / "evaluation" / "musique_multihop_holdout")
+    tuning = bench.load_benchmark()
+    assert len(holdout["questions"]) == 100
+    assert not {q["question_id"] for q in holdout["questions"]} & {
+        q["question_id"] for q in tuning["questions"]
+    }
+    assert holdout["protocol"]["frozen_before_model_calls"] is True
+
+
+def test_weight_selection_follows_the_frozen_tie_breaks():
+    def metrics(**means):
+        return {w: {"mean": {"full_support@10": fs, "recall@10": r}} for w, (fs, r) in means.items()}
+
+    # Highest full support wins outright.
+    assert bench.select_weight(metrics(**{"1:1": (0.25, 0.6), "2:1": (0.30, 0.5)})) == "2:1"
+    # Equal full support: recall decides.
+    assert bench.select_weight(metrics(**{"1:1": (0.3, 0.6), "3:1": (0.3, 0.7)})) == "3:1"
+    # Fully tied: the weight closest to 1:1, so no change when nothing is better.
+    assert bench.select_weight(metrics(**{"4:1": (0.3, 0.7), "1:1": (0.3, 0.7)})) == "1:1"
+    assert bench.select_weight(metrics(**{"4:1": (0.3, 0.7), "1.5:1": (0.3, 0.7)})) == "1.5:1"

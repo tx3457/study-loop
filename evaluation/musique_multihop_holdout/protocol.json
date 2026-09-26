@@ -1,0 +1,28 @@
+{
+ "schema_version": 1,
+ "benchmark_id": "musique_multihop_holdout_v1",
+ "frozen_before_model_calls": true,
+ "purpose": "Decide whether weighting dense retrieval above BM25 in the main app's RRF fusion finds multi-hop evidence better than the current 1:1 fusion, with the weight chosen on one sample and judged on another it never saw.",
+ "method": "services.vectorstore.hybrid_query_document with HYBRID_DENSE_WEIGHT / HYBRID_BM25_WEIGHT, rerank disabled, BAAI/bge-m3 embeddings, corpus indexed as in musique_multihop_v1 (one paragraph per chunk, title + text).",
+ "weights_dense_to_bm25": ["1:0", "4:1", "3:1", "2:1", "1.5:1", "1:1", "1:1.5", "1:2"],
+ "tuning": {
+  "sample": "evaluation/musique_multihop (musique_multihop_v1), already used for the GraphRAG comparison.",
+  "selection": "The weight with the highest full_support@10; ties broken by recall@10, then by the weight closest to 1:1. 1:1 itself may win, which means no change."
+ },
+ "holdout": {
+  "sample": "This directory: 100 questions drawn with seed 20260926, stratified 40/30/30 by hops, disjoint from the tuning sample, pooled into their own corpus.",
+  "comparison": "Selected weight versus 1:1 on the held-out sample only.",
+  "primary_endpoint": "recall@10, paired bootstrap 95% interval (10000 resamples, seed 20260925).",
+  "secondary": "full_support@10 by exact McNemar; recall@5 and recall@20 descriptive. Every weight is reported descriptively on the held-out sample, but only the selected one is compared."
+ },
+ "decision_rule": {
+  "candidate": "The primary interval's lower bound > 0: the selected weight becomes a candidate default for English-like material.",
+  "no_change": "Otherwise 1:1 stays.",
+  "default_is_not_changed_here": "Chinese material, where exact term matching may matter more, has not been measured; a candidate becomes the default only after a Chinese check."
+ },
+ "not_measured": [
+  "Answer quality: retrieval only, no model answers.",
+  "Chinese material.",
+  "Interaction with the optional reranker, query rewriting or HyDE."
+ ]
+}

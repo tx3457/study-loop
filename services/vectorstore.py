@@ -65,6 +65,54 @@ def _positive_finite_float_environment(name: str, default: float) -> float:
     return value
 
 
+def _fusion_weight_environment(name: str) -> float:
+    raw_value = os.getenv(name)
+    if raw_value is None or not raw_value.strip():
+        return 1.0
+    try:
+        value = float(raw_value)
+    except ValueError:
+        value = -1.0
+    if not math.isfinite(value) or value < 0:
+        logger.warning("[vectorstore] invalid %s; using 1.0", name)
+        return 1.0
+    return value
+
+
+def hybrid_fusion_weights() -> tuple[float, float]:
+    """(dense, BM25) weights for the RRF fusion, read per call; 1:1 is plain RRF.
+
+    Read on every query so an evaluation can compare settings in one process.
+    Zero turns a retriever off; both zero is rejected rather than returning nothing.
+    """
+    dense = _fusion_weight_environment("HYBRID_DENSE_WEIGHT")
+    bm25 = _fusion_weight_environment("HYBRID_BM25_WEIGHT")
+    if dense == 0 and bm25 == 0:
+        logger.warning("[vectorstore] both hybrid fusion weights are zero; using 1:1")
+        return 1.0, 1.0
+    return dense, bm25
+
+
+def weighted_rrf(
+    ranked_lists: list[tuple[float, list[str], list[str]]], limit: int, k: int = 60
+) -> tuple[list[str], list[str]]:
+    """Fuse (weight, ids, docs) rankings by weighted reciprocal rank.
+
+    Each list adds weight / (k + rank) for rank starting at 1. Ties keep the order
+    in which ids were first seen, so equal weights reproduce plain RRF exactly.
+    """
+    scores: dict[str, float] = {}
+    id_to_doc: dict[str, str] = {}
+    for weight, ids, docs in ranked_lists:
+        if weight == 0:
+            continue
+        for rank, (doc_id, doc) in enumerate(zip(ids, docs, strict=True)):
+            scores[doc_id] = scores.get(doc_id, 0) + weight / (k + rank + 1)
+            id_to_doc.setdefault(doc_id, doc)
+    top_ids = sorted(scores, key=scores.get, reverse=True)[:limit]
+    return top_ids, [id_to_doc[doc_id] for doc_id in top_ids]
+
+
 def _positive_integer_environment(name: str, default: int) -> int:
     raw_value = os.getenv(name)
     if raw_value is None or not raw_value.strip():
@@ -962,10 +1010,12 @@ async def hybrid_query_document(
     vec_docs = vec_results["documents"][0]  # list[str]
     vec_ids = vec_results["ids"][0]  # list[str]
 
+    dense_weight, bm25_weight = hybrid_fusion_weights()
+
     # 2. BM25 检索:索引按(属主, document_id)缓存(文档增删时失效),避免每次全量重建
     idx = await _get_bm25_index(collection, document_id, owner_id)
     all_docs, all_ids, bm25 = idx["all_docs"], idx["all_ids"], idx["bm25"]
-    if bm25 is None:
+    if bm25 is None or bm25_weight == 0:
         bm25_ids, bm25_docs = [], []
     else:
         bm25_ranked = await _run_chroma_io(
@@ -978,21 +1028,10 @@ async def hybrid_query_document(
         bm25_ids = [all_ids[i] for i, _ in bm25_ranked]
         bm25_docs = [all_docs[i] for i, _ in bm25_ranked]
 
-    # 3. RRF 融合(召回融合,k=60)
-    K = 60
-    rrf_scores: dict[str, float] = {}
-    id_to_doc: dict[str, str] = {}
-
-    for rank, doc_id in enumerate(vec_ids):
-        rrf_scores[doc_id] = rrf_scores.get(doc_id, 0) + 1 / (K + rank + 1)
-        id_to_doc[doc_id] = vec_docs[rank]
-
-    for rank, doc_id in enumerate(bm25_ids):
-        rrf_scores[doc_id] = rrf_scores.get(doc_id, 0) + 1 / (K + rank + 1)
-        id_to_doc[doc_id] = bm25_docs[rank]
-
-    rrf_top_ids = sorted(rrf_scores, key=rrf_scores.get, reverse=True)[:recall_n]
-    rrf_top_docs = [id_to_doc[doc_id] for doc_id in rrf_top_ids]
+    # 3. 加权 RRF 融合(召回融合,k=60;默认 1:1 即普通 RRF)
+    rrf_top_ids, rrf_top_docs = weighted_rrf(
+        [(dense_weight, vec_ids, vec_docs), (bm25_weight, bm25_ids, bm25_docs)], recall_n
+    )
 
     # 4. Cross-Encoder 精排(可降级)
     if use_rerank and len(rrf_top_docs) > 1:
@@ -1011,9 +1050,7 @@ async def hybrid_query_document(
             # 降级:用 RRF top n_results
 
     # 5. 不精排 / 精排失败 → 用 RRF top n_results
-    top_ids = rrf_top_ids[:n_results]
-    top_docs = [id_to_doc[doc_id] for doc_id in top_ids]
-    return {"documents": [top_docs], "ids": [top_ids]}
+    return {"documents": [rrf_top_docs[:n_results]], "ids": [rrf_top_ids[:n_results]]}
 
 
 @traceable(
