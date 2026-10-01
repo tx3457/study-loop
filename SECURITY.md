@@ -115,6 +115,37 @@ text rather than executable embedding configuration. Any Chroma upgrade, remote
 client/server deployment, or changed advisory must trigger a new review of
 these exceptions. Remove an exception when a patched version is adopted.
 
+### Starlette security baseline
+
+Both API runtimes pin FastAPI 0.133.1 and Starlette 1.3.1. FastAPI 0.122.0
+restricted Starlette to versions below 0.51; the 0.133 series supports Starlette
+1.x. The explicit Starlette pin includes fixes for
+[PYSEC-2026-161](https://github.com/Kludex/starlette/security/advisories/GHSA-86qp-5c8j-p5mr),
+[PYSEC-2026-2281](https://github.com/Kludex/starlette/security/advisories/GHSA-wqp7-x3pw-xc5r),
+[PYSEC-2026-2280](https://github.com/Kludex/starlette/security/advisories/GHSA-x746-7m8f-x49c),
+[PYSEC-2026-248](https://github.com/Kludex/starlette/security/advisories/GHSA-jp82-jpqv-5vv3), and
+[PYSEC-2026-249](https://github.com/Kludex/starlette/security/advisories/GHSA-82w8-qh3p-5jfq).
+None is added to the audit exceptions.
+
+Upgrading FastAPI also enables the strict JSON Content-Type default introduced
+in 0.132.0: external JSON API clients must send `Content-Type: application/json`
+(or a supported `+json` media type). Bundled clients already supply this header.
+
+The URL-encoded form-limit bypass (PYSEC-2026-249) applies to upload routes:
+FastAPI parses form bodies before evaluating authentication dependencies, and
+the application's file-size checks run later inside the handler. An absent
+Origin is allowed for non-browser clients, so neither the token gate nor the
+browser-origin guard replaces parser limits. Regression tests exercise both
+upload APIs and knowledge-document replacement with too many fields and
+oversized field values without credentials.
+The patched parser rejects them with HTTP 400 before authentication, while a
+small form still reaches the token gate.
+
+The inspected application does not use `StaticFiles`, `HTTPEndpoint`, or
+reconstructed `request.url` values for security decisions, and the bundled
+containers run Linux. Those absent prerequisites reduce exposure to the other
+four advisories; they are still fixed through the dependency upgrade.
+
 ## Known boundaries
 
 - Tool schemas constrain what the model is asked to emit. Required arguments,
