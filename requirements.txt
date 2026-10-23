@@ -25,7 +25,7 @@ langgraph-checkpoint-postgres==3.1.1
 pypdf==6.16.1
 docx2txt==0.8
 pytesseract==0.3.13
-Pillow==12.3.0
+Pillow==13.0.0
 pdf2image==1.17.0   # 扫描型 PDF fallback（系统需 apt install poppler-utils）
 
 # Optional MCP clients for external tools
