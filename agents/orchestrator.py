@@ -124,13 +124,22 @@ async def _critic_adapter(state: OrchestratorState) -> dict:
     chunks: list[str] = []
     description = state.get("description", "")
     document_id = state.get("document_id", "")
-    if description and document_id:
+    # search_document 按属主绑定：user_id 既是参数，也作为可信上下文交给注册表核对
+    user_id = state.get("user_id", "")
+    if description and document_id and user_id:
         try:
             result_json = await dispatch_tool(
                 "search_document",
-                {"document_id": document_id, "query": description},
+                {"user_id": user_id, "document_id": document_id, "query": description},
+                user_id=user_id,
             )
-            chunks = json.loads(result_json).get("chunks", [])
+            result = json.loads(result_json)
+            if "error" in result:
+                logger.warning(
+                    "[critic_adapter] pre-fetch chunks rejected: reason=%s",
+                    result.get("reason"),
+                )
+            chunks = result.get("chunks", [])
         except Exception as e:
             logger.warning(
                 "[critic_adapter] pre-fetch chunks failed: error_type=%s",

@@ -4,7 +4,7 @@
 不消耗 LLM API,通过 mock services/learning_path 的 5 个纯函数 + path_reviser 的 LLM 调用,
 验证图拓扑 + 循环路由 + 精修契约。
 
-验证 9 个契约:
+验证 10 个契约:
 1. 编译后子图含 6 个节点:extract_brief / explore / compress / synthesize / critique / path_reviser
 2. critique 通过 → END(不进 path_reviser)
 3. critique 不通过 + PATH_REVISER_ENABLED=true → path_reviser → critique 重审
@@ -14,6 +14,8 @@
 7. _route_after_critique 路由表行为
 8. path_reviser LLM 失败 → 返回 {} 不更新 learning_path(降级)
 9. planner_agent adapter 把 OrchestratorState 正确转 PlannerState
+10. 文档属主一路传到属主校验和 explore;校验不过时在任何 LLM 调用之前停下
+    (阶段函数用 autospec mock,签名漂移——比如漏传 owner_id——会直接失败)
 
 跑法:
   python -m pytest tests/test_planner_loop.py -q
@@ -23,7 +25,7 @@ import sys
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -195,20 +197,46 @@ class TestSubgraphIntegration(unittest.IsolatedAsyncioTestCase):
 
         path = _mock_path()
         # mock 5 个纯函数 + LLM 不会被触发(critique 通过)
-        with patch.object(pa, "extract_brief", AsyncMock(return_value=_mock_brief())), \
-             patch.object(pa, "explore", AsyncMock(return_value=_mock_exploration())), \
-             patch.object(pa, "compress", AsyncMock(return_value=_mock_compressed())), \
-             patch.object(pa, "synthesize", AsyncMock(return_value=path)), \
-             patch.object(pa, "critique", AsyncMock(return_value=_mock_critique(needs_revision=False))):
+        # autospec 按真实签名校验参数:业务函数签名变了而子图没跟着改,这里会直接失败
+        with patch.object(pa, "ensure_document_available", autospec=True) as ensure, \
+             patch.object(pa, "extract_brief", autospec=True, return_value=_mock_brief()), \
+             patch.object(pa, "explore", autospec=True,
+                          return_value=_mock_exploration()) as explore, \
+             patch.object(pa, "compress", autospec=True, return_value=_mock_compressed()), \
+             patch.object(pa, "synthesize", autospec=True, return_value=path), \
+             patch.object(pa, "critique", autospec=True,
+                          return_value=_mock_critique(needs_revision=False)):
 
             result = await pa.planner_subgraph.ainvoke({
                 "document_id": "doc1",
+                "owner_id": "alice",
                 "user_intent": "学 RAG",
                 "enable_critique": True,
                 "revision_count": 0,
             })
         self.assertEqual(result["learning_path"]["document_id"], "doc1")
         self.assertEqual(result["revision_count"], 1)  # critique 跑了 1 次
+        ensure.assert_awaited_once_with("doc1", owner_id="alice")
+        explore.assert_awaited_once_with("doc1", ANY, owner_id="alice")
+
+    async def test_unowned_document_stops_before_any_llm_stage(self):
+        """属主校验不过(别人的文档或不存在)→ 不调任何 LLM 阶段,adapter 返回 None"""
+        from chromadb.errors import NotFoundError
+
+        from agents import planner_agent as pa
+
+        with patch.object(pa, "ensure_document_available", autospec=True,
+                          side_effect=NotFoundError("Document 'doc1' not found")), \
+             patch.object(pa, "extract_brief", autospec=True) as extract_brief, \
+             patch.object(pa, "explore", autospec=True) as explore:
+            result = await pa.planner_agent({
+                "document_id": "doc1",
+                "user_id": "mallory",
+                "description": "",
+            })
+        self.assertIsNone(result["learning_path"])
+        extract_brief.assert_not_awaited()
+        explore.assert_not_awaited()
 
     async def test_fail_then_reviser_then_pass(self):
         """第一轮 critique 不通过 → reviser → 第二轮通过"""
@@ -230,16 +258,18 @@ class TestSubgraphIntegration(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        with patch.object(pa, "extract_brief", AsyncMock(return_value=_mock_brief())), \
-             patch.object(pa, "explore", AsyncMock(return_value=_mock_exploration())), \
-             patch.object(pa, "compress", AsyncMock(return_value=_mock_compressed())), \
-             patch.object(pa, "synthesize", AsyncMock(return_value=path)), \
+        with patch.object(pa, "ensure_document_available", autospec=True), \
+             patch.object(pa, "extract_brief", autospec=True, return_value=_mock_brief()), \
+             patch.object(pa, "explore", autospec=True, return_value=_mock_exploration()), \
+             patch.object(pa, "compress", autospec=True, return_value=_mock_compressed()), \
+             patch.object(pa, "synthesize", autospec=True, return_value=path), \
              patch.object(pa, "critique", fake_critique), \
              patch.object(pa, "_client", mock_client), \
              patch.dict(os.environ, {"PATH_REVISER_ENABLED": "true"}):
 
             result = await pa.planner_subgraph.ainvoke({
                 "document_id": "doc1",
+                "owner_id": "alice",
                 "user_intent": "x",
                 "enable_critique": True,
                 "revision_count": 0,
@@ -260,12 +290,16 @@ class TestAdapter(unittest.IsolatedAsyncioTestCase):
         path = _mock_path(doc_id="adapter_doc")
         fake_result = {"learning_path": path.model_dump()}
 
-        with patch.object(pa.planner_subgraph, "ainvoke", AsyncMock(return_value=fake_result)):
+        invoke = AsyncMock(return_value=fake_result)
+        with patch.object(pa.planner_subgraph, "ainvoke", invoke):
             result = await pa.planner_agent({
                 "document_id": "adapter_doc",
+                "user_id": "alice",
                 "description": "学测试",
             })
         self.assertEqual(result["learning_path"]["document_id"], "adapter_doc")
+        # 属主来自 router 写入的可信 user_id
+        self.assertEqual(invoke.await_args.args[0]["owner_id"], "alice")
 
     async def test_adapter_returns_none_on_subgraph_failure(self):
         from agents import planner_agent as pa

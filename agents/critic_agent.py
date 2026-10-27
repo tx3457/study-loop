@@ -140,6 +140,7 @@ async def _reinforce_evidence(state: CriticState) -> dict:
     """二次检索：当 relevance 或 coverage 置信度低时，调 dispatch_tool 拉新 chunks"""
     weak_points = state.get("weak_points", [])
     document_id = state.get("document_id", "")
+    user_id = state.get("user_id", "")
 
     # 用 weak_points 拼一个新查询
     if weak_points:
@@ -149,15 +150,21 @@ async def _reinforce_evidence(state: CriticState) -> dict:
         questions = state.get("quiz", {}).get("questions", [])
         query = questions[0].get("question", "") if questions else ""
 
-    if not query or not document_id:
+    if not query or not document_id or not user_id:
         return {"reinforce_chunks": [], "triggered_search": False}
 
     try:
+        # search_document 按属主绑定：user_id 既是参数，也作为可信上下文交给注册表核对
         result_json = await dispatch_tool(
             "search_document",
-            {"document_id": document_id, "query": query},
+            {"user_id": user_id, "document_id": document_id, "query": query},
+            user_id=user_id,
         )
         result = json.loads(result_json)
+        if "error" in result:
+            logger.warning(
+                "[critic] reinforce_evidence rejected: reason=%s", result.get("reason")
+            )
         new_chunks = result.get("chunks", [])
         logger.info("[critic] reinforce_evidence: chunks=%d", len(new_chunks))
     except Exception as e:

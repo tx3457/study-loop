@@ -74,7 +74,8 @@ class TestNoCallSiteOmitsTheOwner(unittest.TestCase):
     上面两个类比对的是签名；这个类比对的是**调用点**。所有相关用例都 patch 掉了
     被调方，mock 接受任何参数，所以漏传 owner_id 在测试里是看不见的——
     `_generate_quiz`、`routers/quiz.py` 和 `services/session.py` 三处就是这样
-    带着运行时 TypeError 通过了全量测试。
+    带着运行时 TypeError 通过了全量测试。后来 LangGraph 规划子图调 `explore`
+    也漏了 owner_id——`explore` 当时不在下面这张表里，所以扫描没看到它。
     """
 
     REQUIRE_OWNER = {
@@ -82,6 +83,7 @@ class TestNoCallSiteOmitsTheOwner(unittest.TestCase):
         "bm25_only_query_document", "deal_document", "delete_document",
         "get_all_document", "ensure_document_available",
         "generate_question", "generate_lesson", "generate_learning_path",
+        "explore",
     }
     PACKAGES = ("services", "routers", "agents")
 
@@ -111,6 +113,74 @@ class TestNoCallSiteOmitsTheOwner(unittest.TestCase):
             missing, [],
             "这些调用点没有传 owner_id，运行时会 TypeError：\n" + "\n".join(missing),
         )
+
+    def test_owner_list_covers_every_owner_scoped_service(self):
+        """REQUIRE_OWNER 是手写的表，漏在表外的函数等于没被扫描。这里反过来核对：
+        services 里凡是把 owner_id 定为必填关键字参数的公开函数，都得在表里。"""
+        import ast
+
+        root = Path(__file__).parent.parent
+        uncovered = []
+        for path in sorted((root / "services").glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in tree.body:
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                if node.name.startswith("_") or node.name in self.REQUIRE_OWNER:
+                    continue
+                required_keywords = {
+                    arg.arg
+                    for arg, default in zip(node.args.kwonlyargs, node.args.kw_defaults)
+                    if default is None
+                }
+                if "owner_id" in required_keywords:
+                    uncovered.append(f"{path.relative_to(root)}:{node.lineno} {node.name}")
+        self.assertEqual(
+            uncovered, [],
+            "这些函数要求 owner_id，却不在 REQUIRE_OWNER 里，调用点不会被扫描：\n"
+            + "\n".join(uncovered),
+        )
+
+    def test_internal_dispatch_of_owner_bound_tools_passes_the_owner(self):
+        """代码自己调 dispatch_tool 时，同样要过注册表的属主校验：参数字典里要有属主
+        字段，可信 user_id 还要作为关键字交给注册表。缺了参数，调用在校验阶段就被判为
+        参数无效，返回的错误 JSON 很容易被当成"没有结果"吞掉——LangGraph 的三处
+        critic 检索就是这样一直拿着空证据在评题。"""
+        import ast
+
+        import services.tools  # noqa: F401  触发注册
+        from services.tool_registry import tool_registry
+
+        owner_argument = {
+            name: tool_registry.get(name).metadata.owner_argument
+            for name in tool_registry.list_tools()
+            if tool_registry.get(name).metadata.owner_argument
+        }
+        root = Path(__file__).parent.parent
+        problems = []
+        for package in self.PACKAGES:
+            for path in sorted((root / package).glob("*.py")):
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+                for node in ast.walk(tree):
+                    if not isinstance(node, ast.Call) or len(node.args) < 2:
+                        continue
+                    name = getattr(node.func, "id", None) or getattr(
+                        node.func, "attr", None
+                    )
+                    tool = node.args[0]
+                    if name != "dispatch_tool" or not (
+                        isinstance(tool, ast.Constant) and tool.value in owner_argument
+                    ):
+                        continue  # 工具名是变量（由模型选）时，靠注册表在运行时把关
+                    where = f"{path.relative_to(root)}:{node.lineno} {tool.value}"
+                    if "user_id" not in {k.arg for k in node.keywords}:
+                        problems.append(f"{where}：没把可信 user_id 交给注册表")
+                    arguments = node.args[1]
+                    if isinstance(arguments, ast.Dict):
+                        keys = {k.value for k in arguments.keys if isinstance(k, ast.Constant)}
+                        if owner_argument[tool.value] not in keys:
+                            problems.append(f"{where}：参数里没有 {owner_argument[tool.value]}")
+        self.assertEqual(problems, [], "\n" + "\n".join(problems))
 
 
 class TestToolSchemaMatchesItsHandler(unittest.TestCase):
