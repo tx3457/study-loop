@@ -51,6 +51,7 @@ class AutonomousSession:
     registry_sha256: str = ""
     semantic_reservation_digests: tuple[tuple[str, str], ...] = ()
     knowledge_state: KnowledgeRunState | None = None
+    untrusted_content: bool = False
 
 
 class StepRecord(BaseModel):
@@ -232,6 +233,9 @@ class _AutonomousSessionPayload(BaseModel):
         default_factory=list,
         max_length=256,
     )
+    # 暂停前本次运行是否读到过被标记为注入的检索正文。可疑正文仍留在
+    # messages 里，续跑必须沿用同一条写入禁令。
+    untrusted_content: bool = False
 
     @model_validator(mode="after")
     def validate_pause_boundary(self):
@@ -508,8 +512,14 @@ def session_to_payload(session: AutonomousSession) -> dict:
         semantic_reservation_digests=list(
             session.semantic_reservation_digests
         ),
+        untrusted_content=session.untrusted_content,
     )
-    return payload.model_dump(mode="json")
+    data = payload.model_dump(mode="json")
+    # 未受污染时不写这个键：旧版本按 extra="forbid" 读快照，回滚后这些
+    # 会话仍能续跑；受污染的快照被旧版本拒绝，宁可作废也不丢掉写入禁令。
+    if not data["untrusted_content"]:
+        del data["untrusted_content"]
+    return data
 
 
 def session_from_payload(
@@ -569,4 +579,5 @@ def session_from_payload(
         semantic_reservation_digests=tuple(
             snapshot.semantic_reservation_digests
         ),
+        untrusted_content=snapshot.untrusted_content,
     )

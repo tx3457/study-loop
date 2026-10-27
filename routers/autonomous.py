@@ -26,7 +26,7 @@ from fastapi import Depends, APIRouter, Header, HTTPException, Path as ApiPath
 from pydantic import BaseModel, Field, ValidationError, model_serializer, model_validator
 
 from models.citation import CitationView, GroundingStatus
-from models.knowledge_evidence import SourceCitation
+from models.knowledge_evidence import KnowledgeRunState, SourceCitation
 from services.auth import require_user_id
 from services.citations import (
     CitationResolution,
@@ -462,10 +462,7 @@ async def _validate_replayed_response(
                 detail="暂停会话快照无效；请重新开始",
             ) from exc
 
-        pending_question = _pending_ask_question(
-            session.messages, session.pending_ask_call_id
-        )
-        if response.user_question != pending_question:
+        if response.user_question != _session_question(session):
             raise HTTPException(
                 status_code=410,
                 detail="缓存的暂停问题与会话快照不一致；请重新开始",
@@ -574,7 +571,7 @@ async def _validate_knowledge_replayed_response(
         state = session.knowledge_state
         if (state is None or state.knowledge_base_id != response.knowledge_base_id
                 or state.web_enabled != response.web_enabled
-                or _pending_ask_question(session.messages, session.pending_ask_call_id) != response.user_question):
+                or _session_question(session) != response.user_question):
             raise HTTPException(410, "暂停会话知识库范围不一致")
         if owner_id is not None and owner_id != state.owner_id:
             raise HTTPException(404, "暂停会话不存在")
@@ -1022,14 +1019,18 @@ async def _run_react_loop(
                     ))
                     continue
 
-                question = ask_args.question
                 # A flagged passage can steer what the model asks for. The
-                # outbound tools are already withdrawn at this point, but
-                # ask_user is a control tool and stays available, so the user is
-                # the last check: say the question may have been influenced
-                # rather than presenting it as a neutral request.
-                if knowledge_context is not None and knowledge_context.state.outbound_blocked:
-                    question = "（本轮材料中检测到可疑指令内容，请谨慎判断下面的问题）\n" + question
+                # outbound and write tools are already withdrawn at this point,
+                # but ask_user is a control tool and stays available, so the user
+                # is the last check: say the question may have been influenced
+                # rather than presenting it as a neutral request. The same flags
+                # go into the snapshot, so replays rebuild this exact question.
+                untrusted_content = active_registry.has_untrusted_content(run_id)
+                question = _displayed_question(
+                    ask_args.question,
+                    untrusted_content=untrusted_content,
+                    knowledge_state=knowledge_context.state if knowledge_context else None,
+                )
                 question_leaked, _ = check_output_leak(question)
                 if question_leaked:
                     messages.append({
@@ -1078,6 +1079,7 @@ async def _run_react_loop(
                         active_registry.snapshot_run_policy_state(run_id)
                     ),
                     knowledge_state=knowledge_context.state if knowledge_context else None,
+                    untrusted_content=untrusted_content,
                 )
                 response = AutonomousResponse(
                     plan=_public_plan(plan),
@@ -1330,10 +1332,38 @@ def _build_response(
     )
 
 
-def _paused_response(session: AutonomousSession) -> AutonomousResponse:
-    question = _pending_ask_question(
-        session.messages, session.pending_ask_call_id
+_SUSPICIOUS_QUESTION_PREFIX = "（本轮材料中检测到可疑指令内容，请谨慎判断下面的问题）\n"
+
+
+def _displayed_question(
+    question: str | None,
+    *,
+    untrusted_content: bool,
+    knowledge_state: KnowledgeRunState | None,
+) -> str | None:
+    """The ask_user question as shown to the user.
+
+    Derived only from fields the pause snapshot persists, so replays and
+    lost-ACK recovery rebuild exactly what the live pause returned.
+    """
+    if question and (
+        untrusted_content
+        or (knowledge_state is not None and knowledge_state.outbound_blocked)
+    ):
+        return _SUSPICIOUS_QUESTION_PREFIX + question
+    return question
+
+
+def _session_question(session: AutonomousSession) -> str | None:
+    return _displayed_question(
+        _pending_ask_question(session.messages, session.pending_ask_call_id),
+        untrusted_content=session.untrusted_content,
+        knowledge_state=session.knowledge_state,
     )
+
+
+def _paused_response(session: AutonomousSession) -> AutonomousResponse:
+    question = _session_question(session)
     if not question:
         raise ValueError("persisted pause is missing its ask_user question")
     return AutonomousResponse(
@@ -1842,6 +1872,10 @@ async def continue_autonomous(
             run_id,
             session.semantic_reservation_digests,
         )
+        # 续跑换了 run_id，污点要显式带过来；否则用户一回答，被注入的
+        # 正文还在上下文里，写入禁令却已解除。
+        if session.untrusted_content:
+            active_registry.mark_run_untrusted_content(run_id)
     except ValueError as exc:
         await autonomous_sessions.consume(req.conversation_id, claim_token)
         await _abort_receipt(receipt_lease)
