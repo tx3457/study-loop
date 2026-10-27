@@ -379,3 +379,17 @@ async def parse_upload(file_bytes: bytes, filename: str) -> list[Document]:
         )
         raise DocumentParseError from exc
 
+
+def pdf_page_number(metadata: dict) -> Optional[int]:
+    """PDF 片段所在的页码（从 1 开始），非 PDF 或缺页信息时返回 None。
+
+    PyPDFLoader 和扫描件 OCR 路径都把页码按 0 起写进 ``page``；chunker 按页
+    切分并继承 metadata，所以每个 PDF 片段只落在一页上。
+    """
+    if (metadata.get("file_type") or "").lower() != "pdf":
+        return None
+    page = metadata.get("page")
+    if isinstance(page, int) and not isinstance(page, bool) and page >= 0:
+        return page + 1
+    return None
+

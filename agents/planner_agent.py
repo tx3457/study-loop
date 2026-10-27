@@ -46,6 +46,7 @@ from services.llm import (
     structured_model as _model,
 )
 from services.tracing import traceable
+from services.vectorstore import ensure_document_available
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 logger = logging.getLogger(__name__)
@@ -66,6 +67,7 @@ def _path_reviser_enabled() -> bool:
 class PlannerState(TypedDict, total=False):
     # ── 输入 ──────────────────────────────────────────────────────
     document_id: str
+    owner_id: str                # 文档属主,adapter 从可信身份 user_id 写入
     user_intent: str
     enable_critique: bool        # 评测 ablation 用,默认 True
 
@@ -87,6 +89,8 @@ class PlannerState(TypedDict, total=False):
 # ══════════════════════════════════════════════════════════════════════════
 @traceable(name="planner.extract_brief", run_type="chain")
 async def _node_extract_brief(state: PlannerState) -> dict:
+    # 与 generate_learning_path 一致：先确认文档属于当前用户，再花 LLM 调用
+    await ensure_document_available(state["document_id"], owner_id=state["owner_id"])
     brief = await extract_brief(
         state["document_id"],
         state.get("user_intent", ""),
@@ -97,7 +101,7 @@ async def _node_extract_brief(state: PlannerState) -> dict:
 @traceable(name="planner.explore", run_type="retriever")
 async def _node_explore(state: PlannerState) -> dict:
     brief = PathBrief(**state["brief"])
-    report = await explore(state["document_id"], brief)
+    report = await explore(state["document_id"], brief, owner_id=state["owner_id"])
     return {"exploration_report": report.model_dump()}
 
 
@@ -256,6 +260,9 @@ async def planner_agent(state: OrchestratorState) -> dict:
     """Orchestrator 调用入口:转 state → 跑子图 → 取 learning_path 写回。"""
     planner_input: PlannerState = {
         "document_id": state["document_id"],
+        # 属主取 state 里的 user_id（由调用方 router 从可信身份写入）；
+        # 缺失时为空串，属主校验会失败关闭
+        "owner_id": state.get("user_id", ""),
         "user_intent": state.get("description") or "",
         "enable_critique": True,
         "revision_count": 0,

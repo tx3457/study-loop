@@ -19,7 +19,14 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    model_serializer,
+    model_validator,
+)
 from models.knowledge_evidence import KnowledgeRunState
 
 from services.citations import EvidenceChunk, EvidenceRegistry
@@ -202,6 +209,8 @@ class _EvidenceChunkPayload(BaseModel):
     document_id: str = Field(min_length=1)
     text: str
     rank: int = Field(ge=1)
+    # 可选字段：页码引入前写下的快照没有它，按 None 续跑。
+    page_number: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def validate_nonblank_strings(self):
@@ -209,6 +218,15 @@ class _EvidenceChunkPayload(BaseModel):
             if not getattr(self, field_name).strip():
                 raise ValueError(f"{field_name} must not be blank")
         return self
+
+    @model_serializer(mode="wrap")
+    def omit_missing_page_number(self, handler):
+        # 没有页码时不写这个键：旧版本按 extra="forbid" 读快照，回滚后
+        # 非 PDF 的暂停会话仍能续跑。
+        data = handler(self)
+        if data.get("page_number") is None:
+            data.pop("page_number", None)
+        return data
 
 
 class _AutonomousSessionPayload(BaseModel):
@@ -502,6 +520,7 @@ def session_to_payload(session: AutonomousSession) -> dict:
                 document_id=evidence.document_id,
                 text=evidence.text,
                 rank=evidence.rank,
+                page_number=evidence.page_number,
             )
             for chunk_id, evidence in session.evidence_registry.items()
         },

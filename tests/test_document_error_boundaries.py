@@ -126,7 +126,11 @@ class TestDocumentUploadErrorBoundaries(unittest.TestCase):
         self.assertEqual(response.json()["document_id"], filename)
         self.assertEqual(response.json()["filename"], filename)
         index.assert_awaited_once_with(
-            filename, filename, ["梯度下降"], owner_id=DEFAULT_DOCUMENT_OWNER
+            filename,
+            filename,
+            ["梯度下降"],
+            owner_id=DEFAULT_DOCUMENT_OWNER,
+            page_numbers=[None],
         )
 
     def test_document_list_uses_public_id_from_collection_metadata(self):

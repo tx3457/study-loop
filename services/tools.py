@@ -48,6 +48,9 @@ async def _search_document(document_id: str, query: str, user_id: str) -> str:
     chunk_ids = result["ids"][0][:3]
     if len(chunks) != len(chunk_ids):
         raise ValueError("retrieval returned misaligned documents and ids")
+    page_numbers = (result.get("page_numbers") or [[]])[0][:3]
+    if page_numbers and len(page_numbers) != len(chunk_ids):
+        raise ValueError("retrieval returned misaligned page numbers and ids")
 
     # chunks 是用户上传文件的原文，会被 tool_loop 原样回灌给模型。它是数据，
     # 不是指令：显式标注来源可信度，并在命中注入模式时打标，让 tool_loop 给
@@ -60,6 +63,9 @@ async def _search_document(document_id: str, query: str, user_id: str) -> str:
         "chunk_ids": chunk_ids,
         "content_trust": "untrusted_document_text",
     }
+    # 只有 PDF 片段有页码；全无页码时不加这个键，非 PDF 文档的载荷保持原样。
+    if any(page is not None for page in page_numbers):
+        payload["page_numbers"] = page_numbers
     if suspicious:
         payload["injection_flagged"] = True
         payload["injection_reason"] = reason

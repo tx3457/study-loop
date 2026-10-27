@@ -1029,6 +1029,9 @@ export default function Autonomous() {
                     <blockquote className="citation-snippet">{citation.snippet}</blockquote>
                     <div className="citation-meta">
                       <span>文档 <code>{citation.document_id}</code></span>
+                      {Number.isInteger(citation.page_number) && (
+                        <span>第 {citation.page_number} 页</span>
+                      )}
                       {Number.isInteger(citation.chunk_index) && (
                         <span>片段序号 <code>{citation.chunk_index}</code></span>
                       )}
