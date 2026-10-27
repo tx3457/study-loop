@@ -348,8 +348,12 @@ class TestPostgresMemoryRuntime(unittest.IsolatedAsyncioTestCase):
                 )
                 await _wait_for_thread_event(fake_store.started, timeout=0.25)
 
+                # The storm lasts over a second. A drain that restarted its
+                # deadline on each cancel could only return once the storm or
+                # the 1 s watchdog ends, well past 0.5 s. The fixed deadline
+                # returns after ~0.03 s; slow CI runners have taken 0.19 s.
                 async def keep_cancelling() -> None:
-                    for _ in range(100):
+                    for _ in range(500):
                         await asyncio.sleep(0.002)
                         read.cancel("later cancellation")
 
@@ -357,9 +361,9 @@ class TestPostgresMemoryRuntime(unittest.IsolatedAsyncioTestCase):
                 read.cancel("original cancellation")
                 repeated_cancels = asyncio.create_task(keep_cancelling())
                 with self.assertRaises(asyncio.CancelledError) as raised:
-                    await asyncio.wait_for(read, timeout=0.5)
+                    await asyncio.wait_for(read, timeout=2)
 
-                self.assertLess(time.monotonic() - started, 0.15)
+                self.assertLess(time.monotonic() - started, 0.5)
                 self.assertEqual(raised.exception.args, ("original cancellation",))
                 self.assertEqual(
                     len(set(memory._BACKGROUND_STORE_IO) - original_background),
