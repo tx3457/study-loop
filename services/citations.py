@@ -19,6 +19,7 @@ class EvidenceChunk:
     document_id: str
     text: str
     rank: int
+    page_number: int | None = None
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,9 @@ def collect_search_evidence(
     document_id = payload.get("document_id")
     chunks = payload.get("chunks")
     chunk_ids = payload.get("chunk_ids")
+    page_numbers = payload.get("page_numbers")
+    if page_numbers is None and isinstance(chunk_ids, list):
+        page_numbers = [None] * len(chunk_ids)
     if (
         not isinstance(document_id, str)
         or not document_id.strip()
@@ -66,6 +70,13 @@ def collect_search_evidence(
             for chunk_id in chunk_ids
         )
         or len(set(chunk_ids)) != len(chunk_ids)
+        or not isinstance(page_numbers, list)
+        or len(page_numbers) != len(chunk_ids)
+        or any(
+            page is not None
+            and (not isinstance(page, int) or isinstance(page, bool) or page < 1)
+            for page in page_numbers
+        )
     ):
         return 0
 
@@ -75,8 +86,11 @@ def collect_search_evidence(
             document_id=document_id,
             text=chunk,
             rank=rank,
+            page_number=page,
         )
-        for rank, (chunk_id, chunk) in enumerate(zip(chunk_ids, chunks), 1)
+        for rank, (chunk_id, chunk, page) in enumerate(
+            zip(chunk_ids, chunks, page_numbers), 1
+        )
     }
     for chunk_id, evidence in additions.items():
         existing = registry.get(chunk_id)
@@ -112,6 +126,7 @@ def resolve_citations(
             chunk_id=evidence.chunk_id,
             document_id=evidence.document_id,
             chunk_index=int(index_match.group(1)) if index_match else None,
+            page_number=evidence.page_number,
             rank=evidence.rank,
             snippet=evidence.text[:240],
         ))

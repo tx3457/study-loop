@@ -402,8 +402,8 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
         release_build = threading.Event()
 
         def get_chunks(*, include):
-            if include == ["documents"]:
-                return {"ids": ["notes.md_chunk_0"], "documents": ["secret text"]}
+            if "documents" in include:
+                return {"ids": ["notes.md_chunk_0"], "documents": ["secret text"], "metadatas": [{}]}
             return {"ids": ["notes.md_chunk_0"]}
 
         original_build = vectorstore.build_bm25_index
@@ -449,8 +449,8 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
         }
 
         def get_chunks(*, include):
-            if include == ["documents"]:
-                return {"ids": ["notes.md_chunk_0"], "documents": ["secret text"]}
+            if "documents" in include:
+                return {"ids": ["notes.md_chunk_0"], "documents": ["secret text"], "metadatas": [{}]}
             return {"ids": ["notes.md_chunk_0"]}
 
         collection.get.side_effect = get_chunks
@@ -502,8 +502,8 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
         original_build = vectorstore.build_bm25_index
 
         def get_chunks(*, include):
-            if include == ["documents"]:
-                return {"ids": ["notes.md_chunk_0"], "documents": ["secret text"]}
+            if "documents" in include:
+                return {"ids": ["notes.md_chunk_0"], "documents": ["secret text"], "metadatas": [{}]}
             return {"ids": ["notes.md_chunk_0"]}
 
         def gate_bm25_build(documents):
@@ -548,8 +548,8 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
         original_build = vectorstore.build_bm25_index
 
         def get_chunks(*, include):
-            if include == ["documents"]:
-                return {"ids": ["notes.md_chunk_0"], "documents": ["secret text"]}
+            if "documents" in include:
+                return {"ids": ["notes.md_chunk_0"], "documents": ["secret text"], "metadatas": [{}]}
             return {"ids": ["notes.md_chunk_0"]}
 
         def gate_bm25_build(documents):

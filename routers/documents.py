@@ -13,7 +13,12 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from models.quiz import Quiz
 from services.chunker import default_chunker
-from services.parser import DocumentParseError, UnsupportedFileError, parse_upload
+from services.parser import (
+    DocumentParseError,
+    UnsupportedFileError,
+    parse_upload,
+    pdf_page_number,
+)
 from services.vectorstore import (
     DEFAULT_DOCUMENT_OWNER,
     DocumentAlreadyExistsError,
@@ -93,8 +98,8 @@ async def upload_document(file: UploadFile = File(...)):
         logger.warning("文档解析未产生可安全索引的内容: %s", filename)
         raise HTTPException(status_code=422, detail=PARSE_ERROR_DETAIL)
 
-    chunks = default_chunker.split_documents(docs)
-    chunk_texts = [c.page_content for c in chunks if c.page_content.strip()]
+    chunks = [c for c in default_chunker.split_documents(docs) if c.page_content.strip()]
+    chunk_texts = [c.page_content for c in chunks]
     if not chunk_texts:
         raise HTTPException(
             status_code=400,
@@ -103,7 +108,11 @@ async def upload_document(file: UploadFile = File(...)):
 
     try:
         chunk_count = await deal_document(
-            filename, filename, chunk_texts, owner_id=DEFAULT_DOCUMENT_OWNER
+            filename,
+            filename,
+            chunk_texts,
+            owner_id=DEFAULT_DOCUMENT_OWNER,
+            page_numbers=[pdf_page_number(c.metadata) for c in chunks],
         )
     except DocumentAlreadyExistsError as e:
         raise HTTPException(status_code=409, detail=str(e)) from e

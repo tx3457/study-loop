@@ -91,7 +91,7 @@ def test_zero_bm25_weight_skips_bm25_scoring(monkeypatch):
             patch.object(vectorstore, "_embed", AsyncMock(return_value=Embedding())), \
             patch.object(vectorstore, "_run_chroma_io", side_effect=run_io), \
             patch.object(vectorstore, "_get_bm25_index", AsyncMock(return_value={
-                "all_docs": ["B1"], "all_ids": ["b1"], "bm25": object()})), \
+                "all_docs": ["B1"], "all_ids": ["b1"], "bm25": object(), "page_numbers": {}})), \
             patch.object(vectorstore, "rank_bm25", rank):
         result = asyncio.run(vectorstore.hybrid_query_document(
             "doc", "query", n_results=2, enable_rerank=False, owner_id="owner"

@@ -693,6 +693,7 @@ def _deal_document_sync(
     embeddings: list,
     cancellation_event: threading.Event,
     owner_id: str,
+    page_numbers: list[int | None],
 ) -> int:
     """Perform one complete staging→published transition on the Chroma worker."""
     storage_id = _storage_document_id(document_id, owner_id)
@@ -722,7 +723,17 @@ def _deal_document_sync(
             embeddings=embeddings,
             ids=[f"{storage_id}_chunk_{i}" for i in range(len(chunks))],
             metadatas=[
-                {"source": chunks[i][:50], "doc_id": document_id, "chunk_index": i}
+                {
+                    "source": chunks[i][:50],
+                    "doc_id": document_id,
+                    "chunk_index": i,
+                    # Chroma 不接受 None 值：没有页码的片段（非 PDF）不写这个键。
+                    **(
+                        {"page_number": page_numbers[i]}
+                        if page_numbers[i] is not None
+                        else {}
+                    ),
+                }
                 for i in range(len(chunks))
             ],
         )
@@ -789,8 +800,19 @@ def _cleanup_staging_collection_sync(staging_name: str, document_id: str) -> Non
 
 
 async def deal_document(
-    document_id: str, filename: str, chunks: list[str], *, owner_id: str
+    document_id: str,
+    filename: str,
+    chunks: list[str],
+    *,
+    owner_id: str,
+    page_numbers: list[int | None] | None = None,
 ):
+    """page_numbers 与 chunks 按位置对齐，记录 PDF 片段的页码（从 1 开始）。"""
+    if page_numbers is None:
+        page_numbers = [None] * len(chunks)
+    if len(page_numbers) != len(chunks):
+        raise ValueError("page_numbers must align with chunks")
+
     # 同名重传不能继续用 add：Chroma 会忽略重复 id，导致接口成功但正文仍未更新。
     await _ensure_document_slot_available(document_id, owner_id)
 
@@ -811,6 +833,7 @@ async def deal_document(
         embeddings,
         cancellation_event,
         owner_id,
+        page_numbers,
         operation_name="deal_document",
         cancellation_event=cancellation_event,
     )
@@ -878,6 +901,16 @@ def _invalidate_bm25_cache(cache_key: str) -> None:
         _bm25_cache_drop(cache_key)
 
 
+def _page_numbers_by_id(ids: list[str], metadatas: list | None) -> dict[str, int]:
+    """chunk id → PDF 页码；旧索引和非 PDF 片段没有 page_number，不出现在结果里。"""
+    page_numbers: dict[str, int] = {}
+    for chunk_id, metadata in zip(ids, metadatas or []):
+        page = metadata.get("page_number") if isinstance(metadata, dict) else None
+        if isinstance(page, int) and not isinstance(page, bool) and page >= 1:
+            page_numbers[chunk_id] = page
+    return page_numbers
+
+
 def _get_or_build_bm25_index_sync(
     collection,
     document_id: str,
@@ -892,7 +925,7 @@ def _get_or_build_bm25_index_sync(
         cached = _bm25_cache_take(cache_key)
         if cached is not None:
             return cached
-    all_results = collection.get(include=["documents"])
+    all_results = collection.get(include=["documents", "metadatas"])
     all_docs = all_results["documents"]
     all_ids = all_results["ids"]
     bm25 = build_bm25_index(all_docs)
@@ -902,6 +935,7 @@ def _get_or_build_bm25_index_sync(
         "bm25": bm25,
         "all_docs": all_docs,
         "all_ids": all_ids,
+        "page_numbers": _page_numbers_by_id(all_ids, all_results.get("metadatas")),
         "tokenizer_id": BM25_TOKENIZER_ID,
         "cached_chars": sum(len(doc) for doc in all_docs),
     }
@@ -922,7 +956,7 @@ def _get_or_build_bm25_index_sync(
 
 
 async def _get_bm25_index(collection, document_id: str, owner_id: str) -> dict:
-    """取或构建某文档的 BM25 索引,带进程内缓存。返回 {bm25, all_docs, all_ids}。
+    """取或构建某文档的 BM25 索引,带进程内缓存。返回 {bm25, all_docs, all_ids, page_numbers}。
 
     缓存键含属主（见 _invalidate_bm25_cache），在 deal_document / delete_document
     时失效。分词由 services.tokenization 统一提供，确保索引和查询使用同一规则。
@@ -1041,7 +1075,11 @@ async def hybrid_query_document(
             )
             top_docs = [r[0] for r in reranked]
             top_ids = [r[2] for r in reranked]
-            return {"documents": [top_docs], "ids": [top_ids]}
+            return {
+                "documents": [top_docs],
+                "ids": [top_ids],
+                "page_numbers": [[idx["page_numbers"].get(i) for i in top_ids]],
+            }
         except RerankerUnavailable as e:
             logger.warning(
                 "[hybrid] reranker unavailable; fallback to RRF-only: error_type=%s",
@@ -1050,7 +1088,12 @@ async def hybrid_query_document(
             # 降级:用 RRF top n_results
 
     # 5. 不精排 / 精排失败 → 用 RRF top n_results
-    return {"documents": [rrf_top_docs[:n_results]], "ids": [rrf_top_ids[:n_results]]}
+    top_ids = rrf_top_ids[:n_results]
+    return {
+        "documents": [rrf_top_docs[:n_results]],
+        "ids": [top_ids],
+        "page_numbers": [[idx["page_numbers"].get(i) for i in top_ids]],
+    }
 
 
 @traceable(
@@ -1109,6 +1152,7 @@ async def retrieve_with_rewrite(
         return_exceptions=True,
     )
     ranked_lists: list[list[tuple[str, str]]] = []
+    page_by_id: dict[str, int | None] = {}
     for r in results:
         if isinstance(r, Exception):
             logger.warning(
@@ -1118,6 +1162,7 @@ async def retrieve_with_rewrite(
             continue
         docs = r.get("documents", [[]])[0] or []
         ids = r.get("ids", [[]])[0] or []
+        page_by_id.update(zip(ids, r.get("page_numbers", [[]])[0] or []))
         ranked_lists.append(
             [(ids[i], docs[i]) for i in range(min(len(docs), len(ids)))]
         )
@@ -1135,6 +1180,7 @@ async def retrieve_with_rewrite(
     return {
         "documents": [[m[1] for m in merged]],
         "ids": [[m[0] for m in merged]],
+        "page_numbers": [[page_by_id.get(m[0]) for m in merged]],
     }
 
 
