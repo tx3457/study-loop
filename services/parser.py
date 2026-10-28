@@ -16,6 +16,7 @@
        否则 → 文本路径
   4. OCR 失败 graceful：返回带 error metadata 的 Document，不抛异常
      （避免单页失败拖垮整批上传）
+  5. 文本型 PDF 去掉页眉页脚、页码和目录页（见 services/pdf_boilerplate.py）
 """
 
 import asyncio
@@ -33,6 +34,7 @@ from langchain_community.document_loaders import (
 from langchain_core.documents import Document
 
 from services.docx_archive import DocxArchiveValidationError, validate_docx_archive
+from services.pdf_boilerplate import strip_pdf_boilerplate
 
 logger = logging.getLogger(__name__)
 
@@ -304,12 +306,25 @@ def _parse_pdf(file_bytes: bytes, filename: str) -> list[Document]:
             )
             return _ocr_scanned_pdf(file_bytes, filename)
 
-        # 文本型：标注 metadata
-        for d in docs:
+        # 文本型：去掉页眉页脚和目录页，标注 metadata。page 保持物理页码不动，
+        # 丢掉的目录页只是不产出切片，页码引用不受影响。
+        cleanup = strip_pdf_boilerplate([d.page_content or "" for d in docs])
+        if cleanup.removed_lines or cleanup.dropped_pages:
+            logger.info(
+                "[parser] PDF boilerplate removed: lines=%d toc_pages=%d",
+                cleanup.removed_lines,
+                cleanup.dropped_pages,
+            )
+        kept = []
+        for d, text in zip(docs, cleanup.pages):
+            if text is None:
+                continue
+            d.page_content = text
             d.metadata["source"] = filename
             d.metadata["file_type"] = "pdf"
             d.metadata["total_pages"] = total_pages
-        return docs
+            kept.append(d)
+        return kept
     finally:
         Path(tmp_path).unlink(missing_ok=True)
 
