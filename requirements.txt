@@ -34,7 +34,7 @@ mcp>=1.0.0
 httpcore==1.0.9
 
 # LangGraph SQLite checkpointer for interrupt/resume
-langgraph-checkpoint-sqlite==3.1.1
+langgraph-checkpoint-sqlite==3.1.2
 # checkpoint-sqlite 3.x no longer needs Connection.is_alive, so the 0.21 ceiling
 # that 2.x required is gone; 0.22 is verified against the interrupt/resume tests.
 aiosqlite==0.22.1
