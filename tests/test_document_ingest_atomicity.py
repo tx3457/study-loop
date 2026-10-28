@@ -20,6 +20,28 @@ def _embedding_response(texts):
     )
 
 
+def _recording_cancellation_events(worker_function, events: list):
+    """Wrap a Chroma worker function and keep the cancellation event it receives."""
+
+    def wrapper(*args, **kwargs):
+        events.extend(arg for arg in args if isinstance(arg, threading.Event))
+        return worker_function(*args, **kwargs)
+
+    return wrapper
+
+
+async def _wait_until_cancellation_signalled(events: list) -> None:
+    """``task.cancel()`` only schedules the CancelledError. The request signals the
+    worker when the task next runs, so releasing blocked I/O first lets it finish.
+    """
+
+    async def poll() -> None:
+        while not (events and events[0].is_set()):
+            await asyncio.sleep(0.001)
+
+    await asyncio.wait_for(poll(), timeout=2)
+
+
 class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.cache_snapshot = dict(vectorstore._bm25_cache)
@@ -156,24 +178,36 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
 
         def slow_add(**_):
             started.set()
-            release.wait(timeout=2)
+            if not release.wait(timeout=5):
+                raise RuntimeError("test write was not released")
 
         staging.add.side_effect = slow_add
         client.create_collection.return_value = staging
+        cancellation_events: list[threading.Event] = []
 
         with patch.object(vectorstore, "chromadb_client", client), \
              patch.object(vectorstore, "_embed", AsyncMock(
                  return_value=_embedding_response(["content"])
+             )), \
+             patch.object(vectorstore, "_deal_document_sync", _recording_cancellation_events(
+                 vectorstore._deal_document_sync, cancellation_events
              )):
             task = asyncio.create_task(
                 vectorstore.deal_document("notes.md", "notes.md", ["content"], owner_id=DEFAULT_DOCUMENT_OWNER)
             )
-            await asyncio.to_thread(started.wait, 2)
+            self.assertTrue(await asyncio.to_thread(started.wait, 2))
             task.cancel()
-            release.set()
+            try:
+                await _wait_until_cancellation_signalled(cancellation_events)
+            finally:
+                release.set()
             with self.assertRaises(asyncio.CancelledError):
                 await task
 
+        # A cancellation seen after the write must stop before publishing. After
+        # a real rename the staging name is gone, so cleanup's NotFoundError
+        # would leave the cancelled upload published.
+        staging.modify.assert_not_called()
         client.delete_collection.assert_called_once()
         self.assertNotEqual(client.delete_collection.call_args.kwargs["name"], "notes.md")
 
@@ -467,10 +501,18 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError("test BM25 build was not released")
             return original_build(documents)
 
+        cancellation_events: list[threading.Event] = []
+
         with patch.object(vectorstore, "chromadb_client", client), patch.object(
             vectorstore,
             "build_bm25_index",
             gate_bm25_build,
+        ), patch.object(
+            vectorstore,
+            "_get_or_build_bm25_index_sync",
+            _recording_cancellation_events(
+                vectorstore._get_or_build_bm25_index_sync, cancellation_events
+            ),
         ):
             build_task = asyncio.create_task(
                 vectorstore._get_bm25_index(collection, "notes.md", DEFAULT_DOCUMENT_OWNER)
@@ -478,6 +520,7 @@ class TestDocumentIngestAtomicity(unittest.IsolatedAsyncioTestCase):
             await asyncio.wait_for(build_started.wait(), timeout=2)
             try:
                 build_task.cancel()
+                await _wait_until_cancellation_signalled(cancellation_events)
             finally:
                 release_build.set()
             with self.assertRaises(asyncio.CancelledError):
