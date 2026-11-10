@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import routers.chat as chat
+import services.tools as tool_module
 import services.tool_registry as registry_module
 from models.chat import ToolChatRequest
 from services.idempotency import IdempotencyConflictError, IdempotencyStore
@@ -161,6 +162,9 @@ class TestChatToolReceiptPolicy(unittest.IsolatedAsyncioTestCase):
                 "grade_answer",
                 "plan_next_step",
             }
+            if tool_module.DOCUMENT_NAVIGATION_TOOLS_ACTIVE:
+                # Opt-in read-only document tools join the receipt-less set.
+                expected_read_only |= set(tool_module.DOCUMENT_NAVIGATION_TOOLS)
             self.assertEqual(visible, expected_read_only)
             self.assertTrue(captured_allowlists)
             self.assertTrue(all(

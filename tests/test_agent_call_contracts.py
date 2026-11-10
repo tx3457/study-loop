@@ -81,7 +81,7 @@ class TestNoCallSiteOmitsTheOwner(unittest.TestCase):
     REQUIRE_OWNER = {
         "retrieve_with_rewrite", "hybrid_query_document", "query_document",
         "bm25_only_query_document", "deal_document", "delete_document",
-        "get_all_document", "ensure_document_available",
+        "get_all_document", "ensure_document_available", "get_document_chunks",
         "generate_question", "generate_lesson", "generate_learning_path",
         "explore",
     }

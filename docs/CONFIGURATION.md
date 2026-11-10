@@ -79,6 +79,21 @@ exception. It is not a public HTTP endpoint or a default CI step.
   better but did not clear the pre-registered bar on a held-out sample, and Chinese
   material is unmeasured, so the default is unchanged
   ([fusion report](lightrag/evaluation/FUSION_REPORT.md)).
+- `DOCUMENT_NAVIGATION_TOOLS_ENABLED=true` registers two read-only document
+  tools next to `search_document`: `read_document_context` returns a chunk with up
+  to two neighbours on each side, and `find_in_document` returns the chunks that
+  contain every one of 1-3 literal keywords (NFKC, whitespace- and case-insensitive,
+  at most five, in document order). Both return the same citable payload as
+  `search_document`, so Autonomous citations and page numbers work unchanged. The
+  flag is read at startup and is off by default; toggling it changes the tool
+  registry fingerprint, so paused Autonomous sessions from before the change cannot
+  resume. On 48 private Chinese course-slide questions (12 decks, three runs each,
+  `deepseek-v4-flash`), end-to-end success went from 0.875 to 0.951 (+7.6 points,
+  95% CI [0, +16.0]). That does not clear the pre-registered bar (lower bound above
+  zero), so the default stays off. The gain sits where the tools were meant to help:
+  on questions whose answer page lacks the topic words, success went from 0.667 to
+  1.000 (+33 points, CI [+11, +58]). Each question cost about 0.37 more model
+  calls, 4.2k more prompt tokens (+43%) and 1.5 s more.
 - LangSmith, Langfuse, tracing, and live MCP integrations are opt-in and disabled
   by default.
 

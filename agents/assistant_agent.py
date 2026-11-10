@@ -40,6 +40,7 @@ from services.react_controls import (
 from services.tool_loop import run_tool_round
 from services.tool_registry import SideEffectAmbiguousError
 from services.tools import (
+    DOCUMENT_NAVIGATION_TOOLS_ACTIVE,
     get_replay_safe_tool_definitions,
     replay_safe_tool_names,
 )
@@ -54,6 +55,7 @@ _CONTROL_TOOLS = build_control_tools(ask_user_resume_hint="调用后循环会暂
 _ASSIST_SYSTEM = build_react_system_prompt(
     include_review_loop=True,
     replay_safe_only=True,
+    navigation_tools=DOCUMENT_NAVIGATION_TOOLS_ACTIVE,
 )
 
 
