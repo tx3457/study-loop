@@ -74,6 +74,7 @@ from services.react_controls import (
 from services.tools import (
     DOCUMENT_EVIDENCE_TOOLS,
     DOCUMENT_NAVIGATION_TOOLS_ACTIVE,
+    DOCUMENT_OUTLINE_TOOL_ACTIVE,
     get_tool_definitions,
 )
 from services.tool_registry import SideEffectAmbiguousError, tool_registry
@@ -167,6 +168,7 @@ _CONTROL_TOOLS = build_control_tools(
 )
 _REACT_SYSTEM = build_react_system_prompt(
     navigation_tools=DOCUMENT_NAVIGATION_TOOLS_ACTIVE,
+    outline_tool=DOCUMENT_OUTLINE_TOOL_ACTIVE,
 )
 
 
@@ -1419,6 +1421,7 @@ def _build_context_hint(
     *,
     knowledge_context_present: bool,
     navigation_tools: bool,
+    outline_tool: bool = False,
 ) -> str:
     """Request-specific hints appended to the user's query."""
     context_hint = f"\n\n当前用户 ID: {req.user_id}"
@@ -1429,7 +1432,8 @@ def _build_context_hint(
             f"\n当前文档 ID: {req.document_id}"
             + (
                 "\n所有 search_document / find_in_document / read_document_context "
-                "调用都必须使用这个文档 ID。"
+                + ("/ get_document_outline " if outline_tool else "")
+                + "调用都必须使用这个文档 ID。"
                 if navigation_tools else
                 "\n所有 search_document 调用都必须使用这个文档 ID。"
             )
@@ -1450,6 +1454,12 @@ def _build_context_hint(
                 "\nsearch_document 只返回最相关的 3 个片段。片段缺少上下文时，用 "
                 "read_document_context 读取它前后的片段；问题里有原文专有名词、代码标识符或"
                 "编号时，可用 find_in_document 逐字查找。这两个工具返回的 chunk_ids 同样可以引用。"
+            )
+        if navigation_tools and outline_tool:
+            context_hint += (
+                "\n问题涉及文档结构、要通读某一节或综合多个部分时，先用 get_document_outline "
+                "查看章节目录，再用 read_document_context 的 chunk_index 读取对应片段；"
+                "目录条目不能引用。"
             )
     return context_hint
 
@@ -1490,6 +1500,7 @@ async def _execute_autonomous(
         req,
         knowledge_context_present=knowledge_context is not None,
         navigation_tools=DOCUMENT_NAVIGATION_TOOLS_ACTIVE,
+        outline_tool=DOCUMENT_OUTLINE_TOOL_ACTIVE,
     )
 
     # Plan 可选：短 query 跳过

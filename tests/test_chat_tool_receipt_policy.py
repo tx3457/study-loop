@@ -165,6 +165,8 @@ class TestChatToolReceiptPolicy(unittest.IsolatedAsyncioTestCase):
             if tool_module.DOCUMENT_NAVIGATION_TOOLS_ACTIVE:
                 # Opt-in read-only document tools join the receipt-less set.
                 expected_read_only |= set(tool_module.DOCUMENT_NAVIGATION_TOOLS)
+            if tool_module.DOCUMENT_OUTLINE_TOOL_ACTIVE:
+                expected_read_only.add(tool_module.DOCUMENT_OUTLINE_TOOL)
             self.assertEqual(visible, expected_read_only)
             self.assertTrue(captured_allowlists)
             self.assertTrue(all(
