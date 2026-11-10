@@ -275,10 +275,11 @@ class TestNavigationRegistration(unittest.TestCase, _RegistersNavigationTools):
     def tearDown(self):
         self._unregister_navigation_tools()
 
-    def test_flag_is_opt_in(self):
+    def test_flag_is_on_unless_set_to_something_else(self):
         for value, expected in (
-            (None, False), ("", False), ("false", False), ("0", False),
+            (None, True), ("", True), ("  ", True),
             ("true", True), ("TRUE", True), ("1", True), ("yes", True),
+            ("false", False), ("0", False), ("no", False), ("off", False),
         ):
             with self.subTest(value=value), patch.dict("os.environ", {}, clear=False):
                 os.environ.pop("DOCUMENT_NAVIGATION_TOOLS_ENABLED", None)
@@ -286,11 +287,12 @@ class TestNavigationRegistration(unittest.TestCase, _RegistersNavigationTools):
                     os.environ["DOCUMENT_NAVIGATION_TOOLS_ENABLED"] = value
                 self.assertIs(tools.document_navigation_tools_enabled(), expected)
 
-    def test_default_registry_has_no_navigation_tools(self):
-        if tools.DOCUMENT_NAVIGATION_TOOLS_ACTIVE:
-            self.skipTest("suite started with DOCUMENT_NAVIGATION_TOOLS_ENABLED=true")
+    def test_registry_follows_the_flag_read_at_import(self):
         for name in tools.DOCUMENT_NAVIGATION_TOOLS:
-            self.assertIsNone(tool_registry.get(name))
+            if tools.DOCUMENT_NAVIGATION_TOOLS_ACTIVE:
+                self.assertIsNotNone(tool_registry.get(name))
+            else:
+                self.assertIsNone(tool_registry.get(name))
 
     def test_registered_tools_are_read_only_owner_bound_and_idempotent(self):
         before = current_registry_sha256()

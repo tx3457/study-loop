@@ -56,14 +56,15 @@ _KEYWORD_SEPARATORS = re.compile(r"[,，、;；]")
 
 
 def document_navigation_tools_enabled() -> bool:
-    """Parse the opt-in flag.
+    """Parse the flag; the tools are on unless it is set to something other than true.
 
     This module reads it once at import into DOCUMENT_NAVIGATION_TOOLS_ACTIVE;
     the registry and every prompt use that constant, so they cannot disagree.
     """
-    return os.getenv("DOCUMENT_NAVIGATION_TOOLS_ENABLED", "false").strip().lower() in {
-        "1", "true", "yes",
-    }
+    raw = os.getenv("DOCUMENT_NAVIGATION_TOOLS_ENABLED", "")
+    if not raw.strip():
+        return True
+    return raw.strip().lower() in {"1", "true", "yes"}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -695,10 +696,10 @@ _register_all()
 
 
 def register_document_navigation_tools() -> None:
-    """Register the opt-in document navigation tools (idempotent).
+    """Register the document navigation tools (idempotent).
 
-    They return the same citable payload as search_document. Off by default:
-    DOCUMENT_NAVIGATION_TOOLS_ENABLED=true turns them on at startup.
+    They return the same citable payload as search_document. On by default:
+    DOCUMENT_NAVIGATION_TOOLS_ENABLED=false keeps them out at startup.
     """
     if all(tool_registry.get(name) is not None for name in DOCUMENT_NAVIGATION_TOOLS):
         return
