@@ -41,6 +41,7 @@ from services.tool_loop import run_tool_round
 from services.tool_registry import SideEffectAmbiguousError
 from services.tools import (
     DOCUMENT_NAVIGATION_TOOLS_ACTIVE,
+    DOCUMENT_OUTLINE_TOOL_ACTIVE,
     get_replay_safe_tool_definitions,
     replay_safe_tool_names,
 )
@@ -56,6 +57,7 @@ _ASSIST_SYSTEM = build_react_system_prompt(
     include_review_loop=True,
     replay_safe_only=True,
     navigation_tools=DOCUMENT_NAVIGATION_TOOLS_ACTIVE,
+    outline_tool=DOCUMENT_OUTLINE_TOOL_ACTIVE,
 )
 
 

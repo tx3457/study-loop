@@ -17,6 +17,7 @@ import re
 import unicodedata
 from typing import Any, Awaitable, Callable, Optional
 
+from services.document_outline import build_outline
 from services.learning_path import generate_learning_path
 from services.injection import scan_untrusted_content
 from services.memory import (
@@ -47,7 +48,9 @@ DOCUMENT_EVIDENCE_TOOLS = frozenset({
     "find_in_document",
 })
 DOCUMENT_NAVIGATION_TOOLS = ("read_document_context", "find_in_document")
+DOCUMENT_OUTLINE_TOOL = "get_document_outline"
 MAX_CONTEXT_NEIGHBOURS = 2
+MAX_OUTLINE_SECTIONS = 150
 MAX_FIND_RESULTS = 5
 MAX_FIND_KEYWORDS = 3
 MAX_FIND_KEYWORD_CHARS = 50
@@ -65,6 +68,13 @@ def document_navigation_tools_enabled() -> bool:
     if not raw.strip():
         return True
     return raw.strip().lower() in {"1", "true", "yes"}
+
+
+def document_outline_tool_enabled() -> bool:
+    """Opt-in flag for get_document_outline; it only takes effect with the navigation tools."""
+    return os.getenv("DOCUMENT_OUTLINE_TOOL_ENABLED", "false").strip().lower() in {
+        "1", "true", "yes",
+    }
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -143,6 +153,17 @@ def _neighbour_count(value: Any) -> int | None:
     return None
 
 
+def _chunk_position(value: Any) -> int | None:
+    """A non-negative chunk index as an int, an integral float or a digit string."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    elif isinstance(value, str) and value.strip().isdigit():
+        value = int(value.strip())
+    return value if isinstance(value, int) and value >= 0 else None
+
+
 async def _read_document_context(
     document_id: str,
     chunk_id: str,
@@ -172,6 +193,97 @@ async def _read_document_context(
         )
     window = rows[max(position - counts["before"], 0): position + counts["after"] + 1]
     return _document_chunks_payload(document_id, window, anchor_chunk_id=anchor)
+
+
+async def _read_document_context_by_index(
+    document_id: str,
+    user_id: str,
+    chunk_id: str = "",
+    before: int = 1,
+    after: int = 1,
+    chunk_index: Any = None,
+) -> str:
+    """read_document_context with the outline on: the anchor may also be a chunk_index.
+
+    A non-empty chunk_id wins, so a call that was valid without the outline reads
+    the same window; chunk_index is used only when no chunk_id is given.
+    """
+    if isinstance(chunk_id, str) and chunk_id.strip():
+        result = await _read_document_context(document_id, chunk_id, user_id, before, after)
+        if chunk_index is not None:
+            payload = json.loads(result)
+            payload["note"] = "同时给出了 chunk_id 和 chunk_index，已按 chunk_id 读取"
+            result = json.dumps(payload, ensure_ascii=False)
+        return result
+    if chunk_index is None:
+        return _navigation_error(
+            document_id, "anchor_required", "需要提供 chunk_id 或 chunk_index",
+        )
+    counts = {"before": _neighbour_count(before), "after": _neighbour_count(after)}
+    invalid = [name for name, count in counts.items() if count is None]
+    if invalid:
+        return _navigation_error(
+            document_id, "invalid_neighbour_count",
+            f"{' 和 '.join(invalid)} 必须是 0 到 {MAX_CONTEXT_NEIGHBOURS} 的整数",
+        )
+    rows = await get_document_chunks(document_id, owner_id=user_id)
+    wanted = _chunk_position(chunk_index)
+    position = next((i for i, row in enumerate(rows) if row["chunk_index"] == wanted), None)
+    if position is None:
+        return _navigation_error(
+            document_id, "chunk_index_not_in_document",
+            f"chunk_index 必须是 0 到 {max(len(rows) - 1, 0)} 的整数",
+        )
+    window = rows[max(position - counts["before"], 0): position + counts["after"] + 1]
+    return _document_chunks_payload(
+        document_id, window, anchor_chunk_id=rows[position]["chunk_id"],
+    )
+
+
+def _outline_line(section: dict) -> str:
+    # A title must not imitate the field separator ("附录|第1页|chunk_index=0").
+    parts = [section["title"].replace("|", "/").replace("｜", "/")]
+    if section["pages"] is not None:
+        first, last = section["pages"]
+        parts.append(f"第{first}页" if first == last else f"第{first}-{last}页")
+    parts.append(f"chunk_index={section['chunk_index']}")
+    return "｜".join(parts)
+
+
+async def _get_document_outline(
+    document_id: str,
+    user_id: str,
+    start_section: Any = 0,
+) -> str:
+    """Section titles with their pages and starting chunk: a map, not citable evidence."""
+    start = 0 if start_section is None else _chunk_position(start_section)
+    payload: dict[str, Any] = {
+        "document_id": document_id,
+        "outline": [],
+        "content_trust": "untrusted_document_text",
+    }
+    if start is None:
+        payload.update(error="invalid_start_section", detail="start_section 必须是非负整数")
+        return json.dumps(payload, ensure_ascii=False)
+    rows = await get_document_chunks(document_id, owner_id=user_id)
+    sections = await asyncio.to_thread(build_outline, rows)
+    shown = sections[start: start + MAX_OUTLINE_SECTIONS]
+    payload["outline"] = [_outline_line(section) for section in shown]
+    payload["section_count"] = len(sections)
+    payload["chunk_count"] = len(rows)
+    if start + len(shown) < len(sections):
+        payload["next_start_section"] = start + len(shown)
+    if not sections:
+        payload.update(
+            error="no_outline_available",
+            detail="没有识别出标题，请改用 search_document 或 find_in_document",
+        )
+    if shown:
+        suspicious, reason = scan_untrusted_content("\n".join(payload["outline"]))
+        if suspicious:
+            payload["injection_flagged"] = True
+            payload["injection_reason"] = reason
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def _literal_key(text: str) -> str:
@@ -695,47 +807,65 @@ def _register_all() -> None:
 _register_all()
 
 
+def _navigation_metadata() -> ToolMetadata:
+    return ToolMetadata(
+        timeout_sec=20.0,
+        max_retries=1,
+        effect_mode=EffectMode.READ_ONLY,
+        owner_argument="user_id",
+    )
+
+
+def _read_context_tool(*, by_chunk_index: bool) -> Tool:
+    """read_document_context; with the outline on it also accepts a chunk_index anchor."""
+    properties = {
+        "user_id": {"type": "string", "description": "用户 ID"},
+        "document_id": {"type": "string", "description": "文档 ID"},
+        "chunk_id": {"type": "string", "description": "已返回的某个 chunk_id"},
+        "before": {
+            "type": "integer", "minimum": 0, "maximum": MAX_CONTEXT_NEIGHBOURS,
+            "description": "向前读取几个片段，默认 1",
+        },
+        "after": {
+            "type": "integer", "minimum": 0, "maximum": MAX_CONTEXT_NEIGHBOURS,
+            "description": "向后读取几个片段，默认 1",
+        },
+    }
+    description = (
+        "读取文档中某个片段及其前后相邻片段（按文档顺序）。search_document 命中的片段"
+        "缺少上下文时使用，例如片段只有列表或结论，而标题、前提在前一页。chunk_id 必须"
+        "来自本文档已返回的 chunk_ids；返回的 chunk_ids 同样可以引用。"
+    )
+    required = ["user_id", "document_id", "chunk_id"]
+    if by_chunk_index:
+        properties["chunk_index"] = {
+            "type": "integer", "minimum": 0,
+            "description": "片段序号，来自 get_document_outline；与 chunk_id 二选一",
+        }
+        description += (
+            "也可以改用 chunk_index（来自 get_document_outline 的目录）指定从哪个片段读起，"
+            "按节通读时每次向后移动。同时给出两者时以 chunk_id 为准。"
+        )
+        required = ["user_id", "document_id"]
+    return Tool(
+        name="read_document_context",
+        description=description,
+        parameters_schema={"type": "object", "properties": properties, "required": required},
+        handler=_read_document_context_by_index if by_chunk_index else _read_document_context,
+        metadata=_navigation_metadata(),
+    )
+
+
 def register_document_navigation_tools() -> None:
     """Register the document navigation tools (idempotent).
 
     They return the same citable payload as search_document. On by default:
     DOCUMENT_NAVIGATION_TOOLS_ENABLED=false keeps them out at startup.
     """
-    if all(tool_registry.get(name) is not None for name in DOCUMENT_NAVIGATION_TOOLS):
+    if tool_registry.get("read_document_context") is None:
+        tool_registry.register(_read_context_tool(by_chunk_index=False))
+    if tool_registry.get("find_in_document") is not None:
         return
-    navigation_metadata = dict(
-        timeout_sec=20.0,
-        max_retries=1,
-        effect_mode=EffectMode.READ_ONLY,
-        owner_argument="user_id",
-    )
-    tool_registry.register(Tool(
-        name="read_document_context",
-        description=(
-            "读取文档中某个片段及其前后相邻片段（按文档顺序）。search_document 命中的片段"
-            "缺少上下文时使用，例如片段只有列表或结论，而标题、前提在前一页。chunk_id 必须"
-            "来自本文档已返回的 chunk_ids；返回的 chunk_ids 同样可以引用。"
-        ),
-        parameters_schema={
-            "type": "object",
-            "properties": {
-                "user_id": {"type": "string", "description": "用户 ID"},
-                "document_id": {"type": "string", "description": "文档 ID"},
-                "chunk_id": {"type": "string", "description": "已返回的某个 chunk_id"},
-                "before": {
-                    "type": "integer", "minimum": 0, "maximum": MAX_CONTEXT_NEIGHBOURS,
-                    "description": "向前读取几个片段，默认 1",
-                },
-                "after": {
-                    "type": "integer", "minimum": 0, "maximum": MAX_CONTEXT_NEIGHBOURS,
-                    "description": "向后读取几个片段，默认 1",
-                },
-            },
-            "required": ["user_id", "document_id", "chunk_id"],
-        },
-        handler=_read_document_context,
-        metadata=ToolMetadata(**navigation_metadata),
-    ))
     tool_registry.register(Tool(
         name="find_in_document",
         description=(
@@ -759,13 +889,62 @@ def register_document_navigation_tools() -> None:
             "required": ["user_id", "document_id", "keywords"],
         },
         handler=_find_in_document,
-        metadata=ToolMetadata(**navigation_metadata),
+        metadata=_navigation_metadata(),
+    ))
+
+
+def register_document_outline_tool() -> None:
+    """Register get_document_outline next to the navigation tools (idempotent).
+
+    The outline points at chunk positions, so read_document_context is replaced by
+    the variant that also accepts a chunk_index.
+    """
+    if any(tool_registry.get(name) is None for name in DOCUMENT_NAVIGATION_TOOLS):
+        raise RuntimeError("the outline tool needs the document navigation tools")
+    read_tool = tool_registry.get("read_document_context")
+    if "chunk_index" not in read_tool.parameters_schema.get("properties", {}):
+        # Overwrite in place so the tool order the model sees stays the same.
+        tool_registry.register(_read_context_tool(by_chunk_index=True))
+    if tool_registry.get(DOCUMENT_OUTLINE_TOOL) is not None:
+        return
+    tool_registry.register(Tool(
+        name=DOCUMENT_OUTLINE_TOOL,
+        description=(
+            "查看文档的章节目录：每行是「标题｜页码范围｜chunk_index」，按文档顺序排列。"
+            "需要了解文档结构、通读某一节，或不确定内容在哪一部分时使用；之后用 "
+            "read_document_context 的 chunk_index 读取对应片段。目录由每页首行或标题行自动"
+            "生成，可能不完整；目录条目本身不能引用，引用要用读取到的片段。"
+        ),
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "user_id": {"type": "string", "description": "用户 ID"},
+                "document_id": {"type": "string", "description": "文档 ID"},
+                "start_section": {
+                    "type": "integer", "minimum": 0,
+                    "description": "目录较长时从第几个条目继续（next_start_section），默认 0",
+                },
+            },
+            "required": ["user_id", "document_id"],
+        },
+        handler=_get_document_outline,
+        metadata=_navigation_metadata(),
     ))
 
 
 DOCUMENT_NAVIGATION_TOOLS_ACTIVE = document_navigation_tools_enabled()
+DOCUMENT_OUTLINE_TOOL_ACTIVE = (
+    DOCUMENT_NAVIGATION_TOOLS_ACTIVE and document_outline_tool_enabled()
+)
 if DOCUMENT_NAVIGATION_TOOLS_ACTIVE:
     register_document_navigation_tools()
+if DOCUMENT_OUTLINE_TOOL_ACTIVE:
+    register_document_outline_tool()
+elif document_outline_tool_enabled():
+    logger.warning(
+        "[tools] DOCUMENT_OUTLINE_TOOL_ENABLED needs the document navigation tools, "
+        "but DOCUMENT_NAVIGATION_TOOLS_ENABLED turns them off; the outline tool is not registered"
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -95,7 +95,7 @@ class TestNavigationHandlers(_ChromaDocument):
 
     async def test_read_context_returns_the_window_around_a_chunk(self):
         anchor = self.rows[2]["chunk_id"]
-        payload = json.loads(await tools._read_document_context("讲义.pdf", anchor, OWNER))
+        payload = json.loads(await tools._read_document_context("讲义.pdf", anchor, user_id=OWNER))
         self.assertEqual(payload["chunks"], CHUNKS[1:4])
         self.assertEqual(payload["chunk_ids"], [r["chunk_id"] for r in self.rows[1:4]])
         self.assertEqual(payload["page_numbers"], [10, 11, 12])
@@ -103,7 +103,7 @@ class TestNavigationHandlers(_ChromaDocument):
         self.assertEqual(payload["content_trust"], "untrusted_document_text")
 
         wide = json.loads(await tools._read_document_context(
-            "讲义.pdf", self.rows[0]["chunk_id"], OWNER, before=2, after=2,
+            "讲义.pdf", self.rows[0]["chunk_id"], user_id=OWNER, before=2, after=2,
         ))
         self.assertEqual(wide["chunks"], CHUNKS[0:3])  # clamped at the start
 
@@ -112,7 +112,7 @@ class TestNavigationHandlers(_ChromaDocument):
         for before, after in (("2", "0"), (2.0, 0.0), (" 2 ", 0)):
             with self.subTest(before=before, after=after):
                 payload = json.loads(await tools._read_document_context(
-                    "讲义.pdf", anchor, OWNER, before=before, after=after,
+                    "讲义.pdf", anchor, user_id=OWNER, before=before, after=after,
                 ))
                 self.assertEqual(payload["chunks"], CHUNKS[1:4])
 
@@ -121,7 +121,7 @@ class TestNavigationHandlers(_ChromaDocument):
         for bad in (3, -1, True, "x", 1.5, None):
             with self.subTest(bad=bad):
                 payload = json.loads(await tools._read_document_context(
-                    "讲义.pdf", anchor, OWNER, before=bad,
+                    "讲义.pdf", anchor, user_id=OWNER, before=bad,
                 ))
                 self.assertEqual(payload["error"], "invalid_neighbour_count")
                 self.assertIn("before", payload["detail"])
@@ -130,7 +130,7 @@ class TestNavigationHandlers(_ChromaDocument):
 
     async def test_read_context_with_foreign_chunk_id_returns_no_evidence(self):
         payload = json.loads(await tools._read_document_context(
-            "讲义.pdf", "other_doc_chunk_1", OWNER,
+            "讲义.pdf", "other_doc_chunk_1", user_id=OWNER,
         ))
         self.assertEqual(payload["chunks"], [])
         self.assertEqual(payload["error"], "chunk_id_not_in_document")
@@ -180,7 +180,7 @@ class TestNavigationHandlers(_ChromaDocument):
             await tools._find_in_document("讲义.pdf", ["strcpy"], "someone-else")
         with self.assertRaises(NotFoundError):
             await tools._read_document_context(
-                "讲义.pdf", self.rows[0]["chunk_id"], "someone-else",
+                "讲义.pdf", self.rows[0]["chunk_id"], user_id="someone-else",
             )
 
     async def test_navigation_payloads_become_citable_evidence_with_pages(self):

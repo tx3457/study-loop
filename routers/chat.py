@@ -11,6 +11,7 @@ from services.llm import _client as _client, chat_stream, chat_history
 from services.compression import compress_chat_history, COMPRESS_THRESHOLD
 from services.tools import (
     DOCUMENT_NAVIGATION_TOOLS_ACTIVE,
+    DOCUMENT_OUTLINE_TOOL_ACTIVE,
     get_read_only_tool_capabilities,
     get_tool_definitions,
 )
@@ -93,7 +94,10 @@ _CHAT_NAVIGATION_TOOL_LINES = (
 )
 
 
-def _tool_system(navigation_tools: bool) -> str:
+_CHAT_OUTLINE_TOOL_LINE = "- get_document_outline：查看文档的章节目录\n"
+
+
+def _tool_system(navigation_tools: bool, outline_tool: bool = False) -> str:
     return (
         "你是一个智能学习助手，可以调用工具帮助用户完成学习任务。\n"
         "你的能力：\n"
@@ -105,6 +109,7 @@ def _tool_system(navigation_tools: bool) -> str:
         "- get_user_profile：查看用户学习画像\n"
         "- get_learning_path：生成学习路径\n"
         + (_CHAT_NAVIGATION_TOOL_LINES if navigation_tools else "")
+        + (_CHAT_OUTLINE_TOOL_LINE if navigation_tools and outline_tool else "")
         + "\n根据用户的自然语言请求，自主判断需要调用哪些工具。使用完成请求所需的最小充分工具集；"
         "用户已经提供必填参数时，不要额外检索文档或读取画像。"
         "画像工具只能访问和更新当前用户；要求操作其他用户时必须拒绝且不得调用画像工具。"
@@ -113,7 +118,7 @@ def _tool_system(navigation_tools: bool) -> str:
     )
 
 
-_TOOL_SYSTEM = _tool_system(DOCUMENT_NAVIGATION_TOOLS_ACTIVE)
+_TOOL_SYSTEM = _tool_system(DOCUMENT_NAVIGATION_TOOLS_ACTIVE, DOCUMENT_OUTLINE_TOOL_ACTIVE)
 
 MAX_TOOL_ROUNDS = 3  # 防止无限 tool calling 循环
 

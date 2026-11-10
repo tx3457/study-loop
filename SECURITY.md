@@ -174,7 +174,8 @@ four advisories; they are still fixed through the dependency upgrade.
   enough to guess makes the process refuse to start rather than pretend to be
   protected.
 - Retrieved document text is untrusted input. `search_document` (and, when
-  not disabled, `read_document_context` and `find_in_document`) returns it inside
+  not disabled, `read_document_context` and `find_in_document`, and the opt-in
+  `get_document_outline`) returns it inside
   an envelope marked `content_trust: untrusted_document_text`, and a layer-1
   pattern scan sets `injection_flagged` when the passage contains
   instruction-shaped text. Detection deliberately does not block retrieval: the

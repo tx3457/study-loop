@@ -100,6 +100,21 @@ exception. It is not a public HTTP endpoint or a default CI step.
   Each question costs more model calls and prompt tokens: about +0.4 calls and
   +4k tokens on the first set, and +0.7 calls and +11k tokens on the second.
   Set the flag to `false` where that cost matters more than answer coverage.
+- `DOCUMENT_OUTLINE_TOOL_ENABLED=true` adds `get_document_outline` to the
+  navigation tools (off by default; it has no effect when the navigation tools are
+  off). The outline is derived on demand from the indexed chunks, with no model
+  call and no re-upload: for PDFs, the first line of each page is its title
+  candidate and consecutive pages with the same title form a section; documents
+  without pages contribute Markdown `#` headings and `第N章` lines. Each entry is
+  `title｜pages｜chunk_index`, and `read_document_context` then also accepts a
+  `chunk_index`. Titles are heuristic and never citable: a grounded answer still
+  has to cite chunks it read. On the 18 held-out harder questions above, point
+  coverage went from 0.882 with the navigation tools to 0.937 with the outline
+  added (+0.055, CI [-0.016, +0.120]). That misses the outline's pre-registered
+  bar, so it stays off by default. The share of answers that covered every point
+  rose by 0.20 (CI [+0.02, +0.39]), and the original 48 questions did not regress.
+  The outline heuristic was developed on these decks; other slide layouts are
+  unmeasured.
 - LangSmith, Langfuse, tracing, and live MCP integrations are opt-in and disabled
   by default.
 
