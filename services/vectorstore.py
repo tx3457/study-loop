@@ -991,6 +991,33 @@ def clear_bm25_cache() -> None:
         _bm25_cached_chars = 0
 
 
+_CHUNK_INDEX_SUFFIX = re.compile(r"_chunk_(\d+)$")
+
+
+async def get_document_chunks(document_id: str, *, owner_id: str) -> list[dict]:
+    """Every chunk of one owner's document, in document order.
+
+    Each item is ``{chunk_id, chunk_index, text, page_number}``. Reads come from
+    the per-document BM25 cache entry, which already holds every chunk's text, id
+    and page; only the owner/tombstone check touches Chroma once it is cached.
+    """
+    collection = await _get_public_document_collection(document_id, owner_id)
+    idx = await _get_bm25_index(collection, document_id, owner_id)
+    rows = []
+    for chunk_id, text in zip(idx["all_ids"], idx["all_docs"]):
+        match = _CHUNK_INDEX_SUFFIX.search(chunk_id)
+        if match is None:
+            continue
+        rows.append({
+            "chunk_id": chunk_id,
+            "chunk_index": int(match.group(1)),
+            "text": text,
+            "page_number": idx["page_numbers"].get(chunk_id),
+        })
+    rows.sort(key=lambda row: row["chunk_index"])
+    return rows
+
+
 async def query_document(document_id: str, query: str, *, owner_id: str):
     collection = await _get_public_document_collection(document_id, owner_id)
     query_vec = await _embed([query])

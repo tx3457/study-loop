@@ -18,6 +18,7 @@ Autonomous Agent 端点：ReAct + HITL
 """
 import asyncio
 import hashlib
+import json
 import logging
 import uuid
 from typing import Awaitable, Callable, Optional
@@ -70,7 +71,11 @@ from services.react_controls import (
     build_react_decision_prompt,
     build_react_system_prompt,
 )
-from services.tools import get_tool_definitions
+from services.tools import (
+    DOCUMENT_EVIDENCE_TOOLS,
+    DOCUMENT_NAVIGATION_TOOLS_ACTIVE,
+    get_tool_definitions,
+)
 from services.tool_registry import SideEffectAmbiguousError, tool_registry
 from services.tool_loop import TruncatedModelOutputError, run_tool_round
 from services.tool_scope import build_business_tool_scope_guard
@@ -160,7 +165,9 @@ def _parse_knowledge_answer(content: str, *, retrieval_ready: bool) -> _Finalize
 _CONTROL_TOOLS = build_control_tools(
     ask_user_resume_hint="调用后循环会暂停，等用户回答后通过 /agent/autonomous/continue 续跑。"
 )
-_REACT_SYSTEM = build_react_system_prompt()
+_REACT_SYSTEM = build_react_system_prompt(
+    navigation_tools=DOCUMENT_NAVIGATION_TOOLS_ACTIVE,
+)
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -774,6 +781,15 @@ def _build_state_summary(
 # ═══════════════════════════════════════════════════════════════════════════
 # 核心：ReAct Loop（拆出来供主入口和 continue 端点复用）
 # ═══════════════════════════════════════════════════════════════════════════
+def _is_empty_document_payload(result: str | None) -> bool:
+    """A well-formed navigation result that simply found nothing (or reported an error)."""
+    try:
+        payload = json.loads(result or "")
+    except (TypeError, json.JSONDecodeError):
+        return False
+    return isinstance(payload, dict) and payload.get("chunks") == [] and payload.get("chunk_ids") == []
+
+
 async def _run_react_loop(
     messages: list,
     plan: list[str],
@@ -1142,14 +1158,19 @@ async def _run_react_loop(
             tools_called.append(fn_name)
             observation_preview = (oc.result or "")[:300]
             evidence_error = None
-            if fn_name == "search_document":
+            if fn_name in DOCUMENT_EVIDENCE_TOOLS:
                 accepted = collect_search_evidence(
                     oc.result or "",
                     evidence_registry,
                     expected_document_id=document_id,
                 )
                 if accepted == 0:
-                    evidence_error = "citation_payload_invalid_or_empty"
+                    evidence_error = (
+                        "document_tool_returned_no_chunks"
+                        if fn_name != "search_document"
+                        and _is_empty_document_payload(oc.result)
+                        else "citation_payload_invalid_or_empty"
+                    )
             steps.append(StepRecord(
                 round_index=round_idx, tool_name=fn_name, tool_args=fn_args,
                 observation_preview=observation_preview,
@@ -1393,6 +1414,46 @@ def _paused_response(session: AutonomousSession) -> AutonomousResponse:
 # ═══════════════════════════════════════════════════════════════════════════
 # 主入口
 # ═══════════════════════════════════════════════════════════════════════════
+def _build_context_hint(
+    req: AutonomousRequest,
+    *,
+    knowledge_context_present: bool,
+    navigation_tools: bool,
+) -> str:
+    """Request-specific hints appended to the user's query."""
+    context_hint = f"\n\n当前用户 ID: {req.user_id}"
+    if knowledge_context_present:
+        context_hint += f"\n当前知识库：{req.knowledge_base_id}；联网允许：{req.web_enabled}。"
+    if req.document_id:
+        context_hint += (
+            f"\n当前文档 ID: {req.document_id}"
+            + (
+                "\n所有 search_document / find_in_document / read_document_context "
+                "调用都必须使用这个文档 ID。"
+                if navigation_tools else
+                "\n所有 search_document 调用都必须使用这个文档 ID。"
+            )
+        )
+    if req.grounding_required and not knowledge_context_present:
+        context_hint += (
+            (
+                "\n本次请求要求可验证引用：必须先用文档工具（search_document 或 find_in_document）"
+                "取得证据，"
+                if navigation_tools else
+                "\n本次请求要求可验证引用：必须先调用 search_document，"
+            )
+            + "并在 finalize 的 citation_ids 中仅填写 observation 返回的真实 chunk_ids；"
+            "证据不足时设置 abstained=true。"
+        )
+        if navigation_tools:
+            context_hint += (
+                "\nsearch_document 只返回最相关的 3 个片段。片段缺少上下文时，用 "
+                "read_document_context 读取它前后的片段；问题里有原文专有名词、代码标识符或"
+                "编号时，可用 find_in_document 逐字查找。这两个工具返回的 chunk_ids 同样可以引用。"
+            )
+    return context_hint
+
+
 async def _execute_autonomous(
     req: AutonomousRequest,
     *,
@@ -1425,19 +1486,11 @@ async def _execute_autonomous(
         knowledge_context = await KnowledgeAgentContext.start(
             req.knowledge_base_id, req.user_id, req.web_enabled, user_query=req.query,
         )
-    context_hint = f"\n\n当前用户 ID: {req.user_id}"
-    if knowledge_context:
-        context_hint += f"\n当前知识库：{req.knowledge_base_id}；联网允许：{req.web_enabled}。"
-    if req.document_id:
-        context_hint += (
-            f"\n当前文档 ID: {req.document_id}"
-            "\n所有 search_document 调用都必须使用这个文档 ID。"
-        )
-    if req.grounding_required and not knowledge_context:
-        context_hint += (
-            "\n本次请求要求可验证引用：必须先调用 search_document，并在 finalize 的 "
-            "citation_ids 中仅填写 observation 返回的真实 chunk_ids；证据不足时设置 abstained=true。"
-        )
+    context_hint = _build_context_hint(
+        req,
+        knowledge_context_present=knowledge_context is not None,
+        navigation_tools=DOCUMENT_NAVIGATION_TOOLS_ACTIVE,
+    )
 
     # Plan 可选：短 query 跳过
     if knowledge_context or len(req.query.strip()) < PLAN_SKIP_QUERY_LEN:

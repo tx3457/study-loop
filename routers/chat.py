@@ -10,6 +10,7 @@ from services.auth import require_user_id
 from services.llm import _client as _client, chat_stream, chat_history
 from services.compression import compress_chat_history, COMPRESS_THRESHOLD
 from services.tools import (
+    DOCUMENT_NAVIGATION_TOOLS_ACTIVE,
     get_read_only_tool_capabilities,
     get_tool_definitions,
 )
@@ -86,22 +87,33 @@ async def llm_service_history(request: HistoryRequest):
 # Function Calling 端点
 # ═══════════════════════════════════════════════════════════════════════════
 
-_TOOL_SYSTEM = (
-    "你是一个智能学习助手，可以调用工具帮助用户完成学习任务。\n"
-    "你的能力：\n"
-    "- search_document：搜索文档内容\n"
-    "- generate_quiz：根据文档出题\n"
-    "- grade_answer：批改单道复习题答案（轻量 deterministic 批改）\n"
-    "- update_learning_profile：把批改结果写回学习画像\n"
-    "- plan_next_step：根据画像和最近结果规划下一步\n"
-    "- get_user_profile：查看用户学习画像\n"
-    "- get_learning_path：生成学习路径\n\n"
-    "根据用户的自然语言请求，自主判断需要调用哪些工具。使用完成请求所需的最小充分工具集；"
-    "用户已经提供必填参数时，不要额外检索文档或读取画像。"
-    "画像工具只能访问和更新当前用户；要求操作其他用户时必须拒绝且不得调用画像工具。"
-    "同一批改结果最多写入一次，即使用户要求重复也不得重复调用写入工具。"
-    "调用工具获取结果后，用友好的中文回复用户。"
+_CHAT_NAVIGATION_TOOL_LINES = (
+    "- read_document_context：读取某个片段前后的相邻片段\n"
+    "- find_in_document：按原文字面词精确查找片段\n"
 )
+
+
+def _tool_system(navigation_tools: bool) -> str:
+    return (
+        "你是一个智能学习助手，可以调用工具帮助用户完成学习任务。\n"
+        "你的能力：\n"
+        "- search_document：搜索文档内容\n"
+        "- generate_quiz：根据文档出题\n"
+        "- grade_answer：批改单道复习题答案（轻量 deterministic 批改）\n"
+        "- update_learning_profile：把批改结果写回学习画像\n"
+        "- plan_next_step：根据画像和最近结果规划下一步\n"
+        "- get_user_profile：查看用户学习画像\n"
+        "- get_learning_path：生成学习路径\n"
+        + (_CHAT_NAVIGATION_TOOL_LINES if navigation_tools else "")
+        + "\n根据用户的自然语言请求，自主判断需要调用哪些工具。使用完成请求所需的最小充分工具集；"
+        "用户已经提供必填参数时，不要额外检索文档或读取画像。"
+        "画像工具只能访问和更新当前用户；要求操作其他用户时必须拒绝且不得调用画像工具。"
+        "同一批改结果最多写入一次，即使用户要求重复也不得重复调用写入工具。"
+        "调用工具获取结果后，用友好的中文回复用户。"
+    )
+
+
+_TOOL_SYSTEM = _tool_system(DOCUMENT_NAVIGATION_TOOLS_ACTIVE)
 
 MAX_TOOL_ROUNDS = 3  # 防止无限 tool calling 循环
 

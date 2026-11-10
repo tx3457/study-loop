@@ -9,8 +9,12 @@ Function Calling 工具定义与分发
   - dispatch_tool 的 run_id/user_id 为可选参数
 
 """
+import asyncio
 import json
 import logging
+import os
+import re
+import unicodedata
 from typing import Any, Awaitable, Callable, Optional
 
 from services.learning_path import generate_learning_path
@@ -30,9 +34,37 @@ from services.tool_registry import (
     ToolMetadata,
     tool_registry,
 )
-from services.vectorstore import retrieve_with_rewrite
+from services.vectorstore import get_document_chunks, retrieve_with_rewrite
 
 logger = logging.getLogger(__name__)
+
+
+# Tools whose observations carry citable document chunks
+# (document_id + aligned chunks/chunk_ids/page_numbers).
+DOCUMENT_EVIDENCE_TOOLS = frozenset({
+    "search_document",
+    "read_document_context",
+    "find_in_document",
+})
+DOCUMENT_NAVIGATION_TOOLS = ("read_document_context", "find_in_document")
+MAX_CONTEXT_NEIGHBOURS = 2
+MAX_FIND_RESULTS = 5
+MAX_FIND_KEYWORDS = 3
+MAX_FIND_KEYWORD_CHARS = 50
+_WHITESPACE = re.compile(r"\s+")
+_KEYWORD_SEPARATORS = re.compile(r"[,，、;；]")
+
+
+def document_navigation_tools_enabled() -> bool:
+    """Parse the flag; the tools are on unless it is set to something other than true.
+
+    This module reads it once at import into DOCUMENT_NAVIGATION_TOOLS_ACTIVE;
+    the registry and every prompt use that constant, so they cannot disagree.
+    """
+    raw = os.getenv("DOCUMENT_NAVIGATION_TOOLS_ENABLED", "")
+    if not raw.strip():
+        return True
+    return raw.strip().lower() in {"1", "true", "yes"}
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -70,6 +102,128 @@ async def _search_document(document_id: str, query: str, user_id: str) -> str:
         payload["injection_flagged"] = True
         payload["injection_reason"] = reason
     return json.dumps(payload, ensure_ascii=False)
+
+
+def _document_chunks_payload(document_id: str, rows: list[dict], **extra: Any) -> str:
+    """Same citable shape as search_document, so the evidence registry accepts it."""
+    chunks = [row["text"] for row in rows]
+    page_numbers = [row["page_number"] for row in rows]
+    payload: dict[str, Any] = {
+        "document_id": document_id,
+        "chunks": chunks,
+        "chunk_ids": [row["chunk_id"] for row in rows],
+        "content_trust": "untrusted_document_text",
+        **extra,
+    }
+    if any(page is not None for page in page_numbers):
+        payload["page_numbers"] = page_numbers
+    if chunks:
+        suspicious, reason = scan_untrusted_content("\n".join(chunks))
+        if suspicious:
+            payload["injection_flagged"] = True
+            payload["injection_reason"] = reason
+    return json.dumps(payload, ensure_ascii=False)
+
+
+def _navigation_error(document_id: str, code: str, detail: str, **extra: Any) -> str:
+    """A citable-shaped payload with no chunks and a reason the model can act on."""
+    return _document_chunks_payload(document_id, [], error=code, detail=detail, **extra)
+
+
+def _neighbour_count(value: Any) -> int | None:
+    """0..2 as an int, an integral float or a digit string; None when invalid."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    elif isinstance(value, str) and value.strip().isdigit():
+        value = int(value.strip())
+    if isinstance(value, int) and 0 <= value <= MAX_CONTEXT_NEIGHBOURS:
+        return value
+    return None
+
+
+async def _read_document_context(
+    document_id: str,
+    chunk_id: str,
+    user_id: str,
+    before: int = 1,
+    after: int = 1,
+) -> str:
+    """Return a chunk with its neighbours, so a hit that lacks context can be read in place."""
+    anchor = chunk_id[:200] if isinstance(chunk_id, str) else ""
+    counts = {"before": _neighbour_count(before), "after": _neighbour_count(after)}
+    invalid = [name for name, count in counts.items() if count is None]
+    if invalid:
+        return _navigation_error(
+            document_id, "invalid_neighbour_count",
+            f"{' 和 '.join(invalid)} 必须是 0 到 {MAX_CONTEXT_NEIGHBOURS} 的整数",
+            anchor_chunk_id=anchor,
+        )
+    rows = await get_document_chunks(document_id, owner_id=user_id)
+    position = next(
+        (i for i, row in enumerate(rows) if row["chunk_id"] == chunk_id), None
+    )
+    if position is None:
+        return _navigation_error(
+            document_id, "chunk_id_not_in_document",
+            "chunk_id 必须是本文档已返回的 chunk_ids 之一",
+            anchor_chunk_id=anchor,
+        )
+    window = rows[max(position - counts["before"], 0): position + counts["after"] + 1]
+    return _document_chunks_payload(document_id, window, anchor_chunk_id=anchor)
+
+
+def _literal_key(text: str) -> str:
+    return _WHITESPACE.sub("", unicodedata.normalize("NFKC", text)).casefold()
+
+
+def _parse_keywords(keywords: Any) -> list[str] | None:
+    """1..3 non-blank strings of at most MAX_FIND_KEYWORD_CHARS; a lone string may use separators."""
+    if isinstance(keywords, str):
+        keywords = _KEYWORD_SEPARATORS.split(keywords)
+    if not isinstance(keywords, list) or any(not isinstance(k, str) for k in keywords):
+        return None
+    keywords = [k.strip() for k in keywords if k.strip()]
+    if not 1 <= len(keywords) <= MAX_FIND_KEYWORDS:
+        return None
+    if any(len(k) > MAX_FIND_KEYWORD_CHARS or not _literal_key(k) for k in keywords):
+        return None
+    return keywords
+
+
+def _rows_containing(rows: list[dict], keys: list[str]) -> list[dict]:
+    matches = []
+    for row in rows:
+        text = _literal_key(row["text"])
+        if all(key in text for key in keys):
+            matches.append(row)
+    return matches
+
+
+async def _find_in_document(
+    document_id: str,
+    keywords: Any,
+    user_id: str,
+) -> str:
+    """Exact literal lookup: chunks containing every keyword, in document order."""
+    parsed = _parse_keywords(keywords)
+    if parsed is None:
+        return _navigation_error(
+            document_id, "invalid_keywords",
+            f"keywords 必须是 1 到 {MAX_FIND_KEYWORDS} 个非空关键词，"
+            f"每个不超过 {MAX_FIND_KEYWORD_CHARS} 个字符",
+        )
+    keys = [_literal_key(k) for k in parsed]
+    rows = await get_document_chunks(document_id, owner_id=user_id)
+    # A whole-document scan is CPU work; keep it off the event loop.
+    matches = await asyncio.to_thread(_rows_containing, rows, keys)
+    return _document_chunks_payload(
+        document_id,
+        matches[:MAX_FIND_RESULTS],
+        keywords=parsed,
+        total_matches=len(matches),
+    )
 
 
 async def _generate_quiz(
@@ -539,6 +693,79 @@ def _register_all() -> None:
 
 
 _register_all()
+
+
+def register_document_navigation_tools() -> None:
+    """Register the document navigation tools (idempotent).
+
+    They return the same citable payload as search_document. On by default:
+    DOCUMENT_NAVIGATION_TOOLS_ENABLED=false keeps them out at startup.
+    """
+    if all(tool_registry.get(name) is not None for name in DOCUMENT_NAVIGATION_TOOLS):
+        return
+    navigation_metadata = dict(
+        timeout_sec=20.0,
+        max_retries=1,
+        effect_mode=EffectMode.READ_ONLY,
+        owner_argument="user_id",
+    )
+    tool_registry.register(Tool(
+        name="read_document_context",
+        description=(
+            "读取文档中某个片段及其前后相邻片段（按文档顺序）。search_document 命中的片段"
+            "缺少上下文时使用，例如片段只有列表或结论，而标题、前提在前一页。chunk_id 必须"
+            "来自本文档已返回的 chunk_ids；返回的 chunk_ids 同样可以引用。"
+        ),
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "user_id": {"type": "string", "description": "用户 ID"},
+                "document_id": {"type": "string", "description": "文档 ID"},
+                "chunk_id": {"type": "string", "description": "已返回的某个 chunk_id"},
+                "before": {
+                    "type": "integer", "minimum": 0, "maximum": MAX_CONTEXT_NEIGHBOURS,
+                    "description": "向前读取几个片段，默认 1",
+                },
+                "after": {
+                    "type": "integer", "minimum": 0, "maximum": MAX_CONTEXT_NEIGHBOURS,
+                    "description": "向后读取几个片段，默认 1",
+                },
+            },
+            "required": ["user_id", "document_id", "chunk_id"],
+        },
+        handler=_read_document_context,
+        metadata=ToolMetadata(**navigation_metadata),
+    ))
+    tool_registry.register(Tool(
+        name="find_in_document",
+        description=(
+            "在文档中按字面精确查找：返回同时包含全部关键词的片段（最多 5 个，按文档顺序）"
+            "和总匹配数。适合查找原文里的专有名词、代码标识符、函数名、编号、符号；"
+            "不做语义匹配，忽略空白和大小写。返回的 chunk_ids 可以引用。"
+        ),
+        parameters_schema={
+            "type": "object",
+            "properties": {
+                "user_id": {"type": "string", "description": "用户 ID"},
+                "document_id": {"type": "string", "description": "文档 ID"},
+                "keywords": {
+                    "type": "array",
+                    "items": {"type": "string", "maxLength": MAX_FIND_KEYWORD_CHARS},
+                    "minItems": 1,
+                    "maxItems": MAX_FIND_KEYWORDS,
+                    "description": "要在原文中逐字出现的关键词，片段须包含全部关键词",
+                },
+            },
+            "required": ["user_id", "document_id", "keywords"],
+        },
+        handler=_find_in_document,
+        metadata=ToolMetadata(**navigation_metadata),
+    ))
+
+
+DOCUMENT_NAVIGATION_TOOLS_ACTIVE = document_navigation_tools_enabled()
+if DOCUMENT_NAVIGATION_TOOLS_ACTIVE:
+    register_document_navigation_tools()
 
 
 # ═══════════════════════════════════════════════════════════════════════════

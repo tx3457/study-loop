@@ -79,6 +79,27 @@ exception. It is not a public HTTP endpoint or a default CI step.
   better but did not clear the pre-registered bar on a held-out sample, and Chinese
   material is unmeasured, so the default is unchanged
   ([fusion report](lightrag/evaluation/FUSION_REPORT.md)).
+- The Agent has two read-only document tools next to `search_document`
+  (`DOCUMENT_NAVIGATION_TOOLS_ENABLED`, on by default; `false` turns them off): `read_document_context` returns a chunk with up
+  to two neighbours on each side, and `find_in_document` returns the chunks that
+  contain every one of 1-3 literal keywords (NFKC, whitespace- and case-insensitive,
+  at most five, in document order). Both return the same citable payload as
+  `search_document`, so Autonomous citations and page numbers work unchanged. The
+  flag is read at startup; toggling it, including upgrading to a version where it
+  is on by default, changes the tool registry fingerprint, so paused Autonomous
+  sessions from before the change cannot resume.
+
+  Measured on private Chinese course slides (12 decks, three runs per question,
+  `deepseek-v4-flash`):
+  - On 48 single-fact questions, end-to-end success went from 0.875 to 0.951
+    (+7.6 points, 95% CI [0, +16.0]), concentrated on questions whose answer page
+    lacks the topic words (0.667 to 1.000).
+  - On 18 held-out harder questions (whole-section, cross-section and structure),
+    point coverage went from 0.783 to 0.882 (+0.099, CI [+0.027, +0.183]).
+
+  Each question costs more model calls and prompt tokens: about +0.4 calls and
+  +4k tokens on the first set, and +0.7 calls and +11k tokens on the second.
+  Set the flag to `false` where that cost matters more than answer coverage.
 - LangSmith, Langfuse, tracing, and live MCP integrations are opt-in and disabled
   by default.
 
