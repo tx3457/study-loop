@@ -97,10 +97,14 @@ class ToolMetadata:
     )
     dedupe_normalizer_id: Optional[str] = None
     argument_bindings: tuple[ToolArgumentBinding, ...] = ()
+    # A boolean argument that opts a read-only call into untrusted outbound
+    # content (search_document's include_web). The registry refuses it when the
+    # run is already tainted or has no run context to track taint in.
+    taint_gated_argument: Optional[str] = None
 
     def security_contract_payload(self) -> dict:
         """Stable JSON payload for binding/fingerprinting enforced semantics."""
-        return {
+        payload = {
             "version": 1,
             "effect_mode": self.effect_mode.value,
             "owner_argument": self.owner_argument,
@@ -111,6 +115,11 @@ class ToolMetadata:
                 asdict(binding) for binding in self.argument_bindings
             ],
         }
+        # Only present when set, so every tool without a gate keeps the exact
+        # payload (and registry fingerprint) it had before the field existed.
+        if self.taint_gated_argument is not None:
+            payload["taint_gated_argument"] = self.taint_gated_argument
+        return payload
 
 
 @dataclass
@@ -326,6 +335,18 @@ class ToolRegistry:
                 reject_policy("owner_context_missing")
             if arguments.get(owner_argument) != user_id:
                 reject_policy("owner_mismatch")
+
+        # Opting into untrusted outbound content needs a run whose taint can be
+        # tracked, and is refused once that run already carries taint: content
+        # read after a possible injection must not be able to widen what the run
+        # pulls in. Schemas hide the argument in tainted runs; this is the
+        # enforcement point for a model that sends it anyway.
+        gated_argument = tool.metadata.taint_gated_argument
+        if gated_argument is not None and arguments.get(gated_argument) is True:
+            if run_id is None:
+                reject_policy("gated_argument_requires_run")
+            if run_id in self._run_untrusted_content:
+                reject_policy("untrusted_content_taint")
 
         # 间接注入的强制点。本次 run 的某条 observation 已被标记为可疑
         # （检索正文里出现了指令样式的文本，见 services/injection.py），此后

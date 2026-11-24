@@ -185,9 +185,14 @@ def _mark_untrusted_observation(run_id: str, result: str, *, registry=None) -> N
         payload = json.loads(result)
     except (TypeError, ValueError):
         return
-    if isinstance(payload, dict) and payload.get("injection_flagged") is True:
+    if not isinstance(payload, dict):
+        return
+    # Web results are attacker-controllable by design (anyone can rank a page
+    # for a predictable question), so reading them taints the run like a
+    # flagged document chunk does, whether or not a pattern matched.
+    if payload.get("injection_flagged") is True or payload.get("untrusted_web_content") is True:
         logger.warning(
-            "[tool_loop] untrusted content flagged; blocking further writes in this run"
+            "[tool_loop] untrusted content observed; blocking further writes in this run"
         )
         (registry if registry is not None else tool_registry).mark_run_untrusted_content(run_id)
 
