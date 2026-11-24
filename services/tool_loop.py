@@ -185,9 +185,14 @@ def _mark_untrusted_observation(run_id: str, result: str, *, registry=None) -> N
         payload = json.loads(result)
     except (TypeError, ValueError):
         return
-    if isinstance(payload, dict) and payload.get("injection_flagged") is True:
+    if not isinstance(payload, dict):
+        return
+    # Web results are attacker-controllable by design (anyone can rank a page
+    # for a predictable question), so reading them taints the run like a
+    # flagged document chunk does, whether or not a pattern matched.
+    if payload.get("injection_flagged") is True or payload.get("untrusted_web_content") is True:
         logger.warning(
-            "[tool_loop] untrusted content flagged; blocking further writes in this run"
+            "[tool_loop] untrusted content observed; blocking further writes in this run"
         )
         (registry if registry is not None else tool_registry).mark_run_untrusted_content(run_id)
 
@@ -241,6 +246,7 @@ async def run_tool_round(
     business_tool_guard: Callable[[str, dict], Optional[str]] | None = None,
     registry: ToolRegistry | None = None,
     reject_truncated_output: bool = False,
+    allowed_gated_arguments: frozenset[str] = frozenset(),
     **llm_kwargs,
 ) -> ToolRoundResult:
     """跑单轮 tool-calling 并把结果回灌进 messages（原地 append）。
@@ -268,6 +274,9 @@ async def run_tool_round(
         business_tool_guard: 可选的调用级范围检查。返回 reason 时，本轮工具调用
                         会在 dispatch 前被拒绝并把结构化错误回灌给模型。
         reject_truncated_output: finish_reason=length 时在 transcript 或工具执行前拒绝。
+        allowed_gated_arguments: 本轮 tools schema 里确实提供给模型的门控参数
+                        （如 search_document 的 include_web）；默认空，注册表会拒绝
+                        任何门控参数。
         其余 llm_kwargs 透传给 llm_chat（temperature/max_tokens...）。
 
     Returns:
@@ -613,6 +622,13 @@ async def run_tool_round(
         )
         try:
             dispatcher = dispatch_tool if registry is None else active_registry.invoke
+            # Only callers that offered a gated argument this round pass it on;
+            # everyone else dispatches exactly as before, and the registry then
+            # refuses the argument (see ToolMetadata.taint_gated_argument).
+            gated = (
+                {"allowed_gated_arguments": allowed_gated_arguments}
+                if allowed_gated_arguments else {}
+            )
             result = await dispatcher(
                 name,
                 args,
@@ -621,6 +637,7 @@ async def run_tool_round(
                 idempotency_key=idempotency_key,
                 idempotency_lease=idempotency_lease,
                 on_before_handler=on_before_tool_dispatch,
+                **gated,
             )
             blocked_reason = None
             # observation 即将被回灌进 messages。若工具报告这次取回的是可疑的

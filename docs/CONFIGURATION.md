@@ -115,6 +115,57 @@ exception. It is not a public HTTP endpoint or a default CI step.
   rose by 0.20 (CI [+0.02, +0.39]), and the original 48 questions did not regress.
   The outline heuristic was developed on these decks; other slide layouts are
   unmeasured.
+- `AGENT_WEB_SEARCH_ENABLED=true` lets the Autonomous agent add web search as a
+  third retrieval route of `search_document` (off by default; it also needs
+  `MCP_LIVE_ENABLED=true`, otherwise it logs a warning and stays off). The tool
+  then declares an optional `include_web` boolean, and the model decides per call
+  whether to set it: the prompt asks for it only when the documents look
+  insufficient, the question is about recent events, or the user asks to search
+  the web.
+  - When it is offered: only to the Autonomous agent, only in rounds where the
+    DuckDuckGo MCP search actually registered at startup, never when the request
+    sets `grounding_required`, and at most once per run. Any `include_web` attempt
+    uses up the run's chance, whatever it returned (results, nothing, a timeout
+    or an error); the marker survives a pause and resume. Chat, the assistant
+    graph and the legacy `TOOL_DEFINITIONS` snapshot never see the option, and
+    the registry refuses `include_web=true` from any caller that did not offer it
+    that round, without a run, in a tainted run, or a second time in a run.
+  - With `include_web=true`, document retrieval and one web search run in
+    parallel. The search goes through `services.knowledge_web.search_web`, which
+    returns result rows only (URL validated, title and snippet length-capped,
+    response at most 256 KB); no page is fetched, and the raw MCP tools stay out
+    of the main registry. The web route waits at most
+    `AGENT_WEB_SEARCH_TIMEOUT_SECONDS` (default 8, capped at 15, below the tool's
+    20 s timeout); on a timeout or any search error the call answers from the
+    documents alone and reports `web_search` as `timeout`, `unavailable` or
+    `failed`. Such a call is not retried as a whole (that would repeat the web
+    search); only the document retrieval retries.
+  - Results are fused with the document ranking by weighted reciprocal rank
+    (k=60; `AGENT_WEB_SEARCH_WEIGHT`, default 1, is the web route's weight) into
+    at most five chunks, of which at least two stay documents when the document
+    retrieval found any. Web chunks have ids `web:<16 hex>` and their first line
+    is `来源：<URL>`, with the host in IDNA (punycode) form and the path and query
+    percent-encoded, truncated to 150 characters. They enter the run's evidence
+    registry and can be cited, and the Web page labels them 网页证据. With
+    `grounding_required`, an answer whose only citations are web chunks
+    abstains.
+  - Web text is untrusted. Results whose title, snippet or decoded URL match the
+    injection patterns are dropped and flag the run; any web result that reaches
+    the model taints the run, so later non-idempotent writes (profile updates)
+    are refused, exactly as for a flagged document chunk. Results that fusion
+    leaves out never reach the model and do not taint.
+  - Privacy: the query is written by the model and may contain text from the
+    selected document; it is sent to DuckDuckGo through the MCP server.
+  - The flag is read at startup. Off, `search_document`'s schema, its security
+    contract, the registry fingerprint, every tool schema list and the prompts
+    are byte-identical to before, and pause snapshots keep their format. One
+    observable difference: a model that passes `include_web` anyway used to get
+    an invalid-arguments error and now gets the document results with
+    `web_search: "disabled"`. On, the fingerprint changes, so paused Autonomous
+    sessions from before the change cannot resume (the same rule as the
+    navigation tools).
+  - Not evaluated: there is no measurement of answer quality, latency or cost
+    with the web route.
 - LangSmith, Langfuse, tracing, and live MCP integrations are opt-in and disabled
   by default.
 

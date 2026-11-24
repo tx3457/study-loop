@@ -122,6 +122,11 @@ function FormattedAnswer({ text }) {
   )
 }
 
+// Web results that search_document fused into the evidence (server ids are web:<16 hex>).
+function isWebCitation(citation) {
+  return /^web:[0-9a-f]{16}$/.test(citation.chunk_id)
+}
+
 function safeExternalUrl(value) {
   try {
     const url = new URL(value)
@@ -1016,7 +1021,9 @@ export default function Autonomous() {
 
           {!isAbstained && citations.length > 0 && (
             <section className="result-section citation-section" aria-labelledby="autonomous-citations-title">
-              <h3 id="autonomous-citations-title">文档证据</h3>
+              <h3 id="autonomous-citations-title">
+                {citations.some(isWebCitation) ? '文档与网页证据' : '文档证据'}
+              </h3>
               <ol className="citation-list">
                 {citations.map((citation, index) => (
                   <li className="citation-item" key={`${citation.chunk_id}-${index}`}>
@@ -1028,7 +1035,9 @@ export default function Autonomous() {
                     </div>
                     <blockquote className="citation-snippet">{citation.snippet}</blockquote>
                     <div className="citation-meta">
-                      <span>文档 <code>{citation.document_id}</code></span>
+                      {isWebCitation(citation)
+                        ? <span>网页证据</span>
+                        : <span>文档 <code>{citation.document_id}</code></span>}
                       {Number.isInteger(citation.page_number) && (
                         <span>第 {citation.page_number} 页</span>
                       )}

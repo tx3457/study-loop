@@ -59,6 +59,8 @@ class AutonomousSession:
     semantic_reservation_digests: tuple[tuple[str, str], ...] = ()
     knowledge_state: KnowledgeRunState | None = None
     untrusted_content: bool = False
+    # 本次运行已用掉唯一一次联网（search_document 的 include_web），结果如何都算。
+    web_search_attempted: bool = False
 
 
 class StepRecord(BaseModel):
@@ -254,6 +256,8 @@ class _AutonomousSessionPayload(BaseModel):
     # 暂停前本次运行是否读到过被标记为注入的检索正文。可疑正文仍留在
     # messages 里，续跑必须沿用同一条写入禁令。
     untrusted_content: bool = False
+    # 暂停前本次运行是否已发起过联网检索；续跑后不再提供 include_web。
+    web_search_attempted: bool = False
 
     @model_validator(mode="after")
     def validate_pause_boundary(self):
@@ -532,12 +536,16 @@ def session_to_payload(session: AutonomousSession) -> dict:
             session.semantic_reservation_digests
         ),
         untrusted_content=session.untrusted_content,
+        web_search_attempted=session.web_search_attempted,
     )
     data = payload.model_dump(mode="json")
     # 未受污染时不写这个键：旧版本按 extra="forbid" 读快照，回滚后这些
     # 会话仍能续跑；受污染的快照被旧版本拒绝，宁可作废也不丢掉写入禁令。
     if not data["untrusted_content"]:
         del data["untrusted_content"]
+    # 同理：没联网过的会话（联网开关关闭时总是如此）快照格式不变。
+    if not data["web_search_attempted"]:
+        del data["web_search_attempted"]
     return data
 
 
@@ -599,4 +607,5 @@ def session_from_payload(
             snapshot.semantic_reservation_digests
         ),
         untrusted_content=snapshot.untrusted_content,
+        web_search_attempted=snapshot.web_search_attempted,
     )

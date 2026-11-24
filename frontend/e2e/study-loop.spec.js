@@ -5594,6 +5594,63 @@ test('Autonomous grounds a selected document and renders server evidence as plai
   expect(problems).toEqual([])
 })
 
+test('Autonomous labels web search results as web evidence, not document evidence', async ({ page }) => {
+  const problems = trackBrowserProblems(page)
+  const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
+    if (request.method() === 'POST' && path === '/agent/autonomous') {
+      return {
+        body: {
+          awaiting_user_input: false,
+          final_answer: 'RAG 先检索再生成；网页资料也这样描述。',
+          finalize_reason: 'evidence_ready',
+          rounds_used: 2,
+          steps: [],
+          tools_called: ['search_document'],
+          truncated: false,
+          citations: [
+            {
+              chunk_id: 'notes.md_chunk_3',
+              document_id: 'notes.md',
+              chunk_index: 3,
+              rank: 1,
+              snippet: 'RAG 先检索相关片段，再生成回答。',
+            },
+            {
+              chunk_id: 'web:0123456789abcdef',
+              document_id: 'notes.md',
+              rank: 2,
+              snippet: '来源：https://example.com/rag\nRAG 综述',
+            },
+          ],
+          invalid_citation_ids: [],
+          invalid_citation_count: 0,
+          abstained: false,
+          grounding_status: 'citation_ids_valid',
+          grounding_required: false,
+          grounding_document_id: 'notes.md',
+        },
+      }
+    }
+    return null
+  })
+
+  await page.goto('/autonomous')
+  await page.getByLabel('文档 ID（可选）').fill('notes.md')
+  await page.getByRole('checkbox', { name: /要求可核验文档引用/ }).uncheck()
+  await page.getByLabel('你的学习目标').fill('RAG 有什么新进展')
+  await page.getByRole('button', { name: '开始执行' }).click()
+
+  await expect(page.getByRole('heading', { name: '文档与网页证据' })).toBeVisible()
+  const items = page.locator('.citation-item')
+  await expect(items).toHaveCount(2)
+  await expect(items.nth(0).locator('.citation-meta')).toContainText('文档 notes.md')
+  await expect(items.nth(1).locator('.citation-meta')).toContainText('网页证据')
+  await expect(items.nth(1).locator('.citation-meta')).not.toContainText('文档 notes.md')
+  await expect(items.nth(1).locator('.citation-meta')).toContainText('web:0123456789abcdef')
+  expect(unexpectedRequests).toEqual([])
+  expect(problems).toEqual([])
+})
+
 test('Autonomous shows a strict grounding refusal without fabricated evidence', async ({ page }) => {
   let startRequest
   const unexpectedRequests = await mockApi(page, async ({ path, request }) => {
