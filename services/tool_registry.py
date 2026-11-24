@@ -98,8 +98,10 @@ class ToolMetadata:
     dedupe_normalizer_id: Optional[str] = None
     argument_bindings: tuple[ToolArgumentBinding, ...] = ()
     # A boolean argument that opts a read-only call into untrusted outbound
-    # content (search_document's include_web). The registry refuses it when the
-    # run is already tainted or has no run context to track taint in.
+    # content (search_document's include_web). The registry accepts it only
+    # when the caller passes it in allowed_gated_arguments, with a run context,
+    # before the run carries taint, and once per run; such a call is not
+    # retried as a whole.
     taint_gated_argument: Optional[str] = None
 
     def security_contract_payload(self) -> dict:
@@ -200,6 +202,7 @@ class ToolRegistry:
         instance._run_effect_digests = {}
         instance._run_effect_attempts = set()
         instance._run_untrusted_content = set()
+        instance._run_gated_attempts = set()
         return instance
 
     # ── 注册 / 查询 ──────────────────────────────────────────────────────
@@ -248,10 +251,13 @@ class ToolRegistry:
         idempotency_key: Optional[str] = None,
         idempotency_lease: ReceiptLease | None = None,
         on_before_handler: Callable[[], Awaitable[None]] | None = None,
+        allowed_gated_arguments: frozenset[str] = frozenset(),
     ) -> str:
         """调用工具：带 per-tool timeout、retry、audit。
 
         返回工具的 str 输出（通常是 JSON 字符串，喂给 LLM 的 tool message）。
+        allowed_gated_arguments 列出调用方本轮确实向模型提供了的门控参数；
+        不在其中的门控参数一律拒绝（见 ToolMetadata.taint_gated_argument）。
         """
         tool = self._tools.get(name)
         if not tool:
@@ -336,17 +342,28 @@ class ToolRegistry:
             if arguments.get(owner_argument) != user_id:
                 reject_policy("owner_mismatch")
 
-        # Opting into untrusted outbound content needs a run whose taint can be
-        # tracked, and is refused once that run already carries taint: content
-        # read after a possible injection must not be able to widen what the run
-        # pulls in. Schemas hide the argument in tainted runs; this is the
-        # enforcement point for a model that sends it anyway.
+        # Opting into untrusted outbound content is allowed only where the caller
+        # offered the argument this round, in a run whose taint can be tracked,
+        # before that run carries taint, and once per run. Schemas hide the
+        # argument everywhere else; this is the enforcement point for a model
+        # that sends it anyway (an open schema would otherwise accept it).
         gated_argument = tool.metadata.taint_gated_argument
-        if gated_argument is not None and arguments.get(gated_argument) is True:
+        gated_opt_in = (
+            gated_argument is not None and arguments.get(gated_argument) is True
+        )
+        if gated_opt_in:
+            if gated_argument not in allowed_gated_arguments:
+                reject_policy("gated_argument_not_offered")
             if run_id is None:
                 reject_policy("gated_argument_requires_run")
+            self._validate_policy_run_id(run_id)
             if run_id in self._run_untrusted_content:
                 reject_policy("untrusted_content_taint")
+            if run_id in self._run_gated_attempts:
+                reject_policy("gated_argument_already_used")
+            # No await between the check and the insertion, so two calls in the
+            # same parallel batch cannot both pass.
+            self._run_gated_attempts.add(run_id)
 
         # 间接注入的强制点。本次 run 的某条 observation 已被标记为可疑
         # （检索正文里出现了指令样式的文本，见 services/injection.py），此后
@@ -425,7 +442,12 @@ class ToolRegistry:
 
         start = time.monotonic()
         replay_safe = effect_mode in _REPLAY_SAFE_EFFECTS
-        effective_retries = tool.metadata.max_retries if replay_safe else 0
+        # An opted-in gated call reaches outside once: retrying the whole
+        # handler would repeat the outbound request, so the handler retries
+        # its local part itself and the registry does not.
+        effective_retries = (
+            tool.metadata.max_retries if replay_safe and not gated_opt_in else 0
+        )
         if not replay_safe and tool.metadata.max_retries:
             logger.warning(
                 "[tool_registry] suppressing retries for non-replayable tool %s",
@@ -615,6 +637,14 @@ class ToolRegistry:
     def has_untrusted_content(self, run_id: str) -> bool:
         return run_id in self._run_untrusted_content
 
+    def mark_gated_attempt(self, run_id: str) -> None:
+        """Record that this run already used its one gated opt-in (sticky, like taint)."""
+        self._validate_policy_run_id(run_id)
+        self._run_gated_attempts.add(run_id)
+
+    def has_gated_attempt(self, run_id: str) -> bool:
+        return run_id in self._run_gated_attempts
+
 
     def snapshot_run_policy_state(
         self,
@@ -679,6 +709,7 @@ class ToolRegistry:
         self._run_effect_attempts.discard(run_id)
         # run 结束才解除注入 taint；不清会随 run_id 复用泄漏到下一次调度。
         self._run_untrusted_content.discard(run_id)
+        self._run_gated_attempts.discard(run_id)
 
     @staticmethod
     def _validate_policy_run_id(run_id: str) -> None:

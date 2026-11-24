@@ -14,15 +14,16 @@ import copy
 import hashlib
 import json
 import logging
-import math
 import os
 import re
 import unicodedata
 from typing import Any, Awaitable, Callable, Optional
+from urllib.parse import quote, unquote, urlsplit
 
 from services.document_outline import build_outline
 from services.learning_path import generate_learning_path
 from services.injection import scan_untrusted_content
+from services.mcp_client import mcp_registry
 from services.mcp_servers import mcp_live_enabled
 from services.memory import (
     append_weak_points,
@@ -39,7 +40,13 @@ from services.tool_registry import (
     ToolMetadata,
     tool_registry,
 )
-from services.vectorstore import get_document_chunks, retrieve_with_rewrite, weighted_rrf
+from services.retry import with_retry
+from services.vectorstore import (
+    _positive_finite_float_environment,
+    get_document_chunks,
+    retrieve_with_rewrite,
+    weighted_rrf,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,11 +94,20 @@ def document_outline_tool_enabled() -> bool:
 # registry fingerprint exactly as before, so paused sessions keep resuming.
 WEB_SEARCH_ARGUMENT = "include_web"
 WEB_CHUNK_PREFIX = "web:"
+_WEB_CHUNK_ID = re.compile(r"web:[0-9a-f]{16}")
 WEB_SEARCH_MAX_RESULTS = 5
+WEB_SEARCH_BACKEND_TOOL = "mcp_ddg_search"
 SEARCH_LOCAL_CHUNK_LIMIT = 3      # what search_document has always returned
 SEARCH_FUSED_CHUNK_LIMIT = 5      # local + web after fusion, when web is used
+MIN_LOCAL_SLOTS = 2               # web can never push the documents out entirely
+SEARCH_DOCUMENT_TIMEOUT_SEC = 20.0
+SEARCH_DOCUMENT_MAX_RETRIES = 2
+SEARCH_DOCUMENT_BASE_DELAY = 1.0
 _WEB_SEARCH_DEFAULT_TIMEOUT = 8.0
-_WEB_SEARCH_MAX_TIMEOUT = 15.0    # stays below search_document's 20 s tool timeout
+_WEB_SEARCH_MAX_TIMEOUT = 15.0
+_DISPLAY_URL_MAX_CHARS = 150
+if _WEB_SEARCH_MAX_TIMEOUT >= SEARCH_DOCUMENT_TIMEOUT_SEC:
+    raise RuntimeError("the web route timeout cap must stay below search_document's timeout")
 
 
 def agent_web_search_enabled() -> bool:
@@ -102,34 +118,32 @@ def agent_web_search_enabled() -> bool:
 
 
 def agent_web_search_timeout_seconds() -> float:
-    """Read per call; invalid or non-positive values fall back to the default."""
-    raw = os.getenv("AGENT_WEB_SEARCH_TIMEOUT_SECONDS", "")
-    try:
-        value = float(raw) if raw.strip() else _WEB_SEARCH_DEFAULT_TIMEOUT
-    except ValueError:
-        value = -1.0
-    if not math.isfinite(value) or value <= 0:
-        logger.warning("[tools] invalid AGENT_WEB_SEARCH_TIMEOUT_SECONDS; using default")
-        return _WEB_SEARCH_DEFAULT_TIMEOUT
-    return min(value, _WEB_SEARCH_MAX_TIMEOUT)
+    """Read per call; invalid or non-positive values fall back to 8 s, and 15 s is the cap."""
+    return min(
+        _positive_finite_float_environment(
+            "AGENT_WEB_SEARCH_TIMEOUT_SECONDS", _WEB_SEARCH_DEFAULT_TIMEOUT
+        ),
+        _WEB_SEARCH_MAX_TIMEOUT,
+    )
 
 
 def agent_web_search_weight() -> float:
     """RRF weight of the web route against the local ranking (1.0 = equal), read per call."""
-    raw = os.getenv("AGENT_WEB_SEARCH_WEIGHT", "")
-    try:
-        value = float(raw) if raw.strip() else 1.0
-    except ValueError:
-        value = -1.0
-    if not math.isfinite(value) or value <= 0:
-        logger.warning("[tools] invalid AGENT_WEB_SEARCH_WEIGHT; using 1.0")
-        return 1.0
-    return value
+    return _positive_finite_float_environment("AGENT_WEB_SEARCH_WEIGHT", 1.0)
 
 
 def agent_web_search_active() -> bool:
     """include_web is offered only when the flag is on and the live MCP search can exist."""
     return agent_web_search_enabled() and mcp_live_enabled()
+
+
+def web_search_backend_ready() -> bool:
+    """The DDG MCP search actually registered at startup (it fails soft when it cannot)."""
+    return mcp_registry.has(WEB_SEARCH_BACKEND_TOOL)
+
+
+def is_web_chunk_id(chunk_id: object) -> bool:
+    return isinstance(chunk_id, str) and _WEB_CHUNK_ID.fullmatch(chunk_id) is not None
 
 
 # Read once at import, like the navigation flags: the registered schema, the
@@ -153,8 +167,8 @@ async def _search_document(
     include_web: bool = False,
 ) -> str:
     # include_web 只是模型的请求；能不能联网由服务端开关决定（纵深防御：schema
-    # 里没有这个参数时模型仍可能传，这里再判一次）。运行是否已被污染由注册表
-    # 在调用前按 taint_gated_argument 拦截，handler 拿不到 run_id。
+    # 里没有这个参数时模型仍可能传，这里再判一次）。调用方是否提供了该参数、
+    # 运行是否已被污染或已联网过，由注册表在调用前按 taint_gated_argument 拦截。
     if include_web is True and AGENT_WEB_SEARCH_ACTIVE:
         return await _search_document_with_web(document_id, query, user_id)
     payload = await _local_search_payload(document_id, query, user_id)
@@ -163,19 +177,31 @@ async def _search_document(
     return json.dumps(payload, ensure_ascii=False)
 
 
-async def _local_search_payload(document_id: str, query: str, user_id: str) -> dict:
+async def _local_ranking(
+    document_id: str, query: str, user_id: str, limit: int,
+) -> tuple[list[str], list[str], list]:
     # 走统一生产检索入口（含 HyDE/Multi-query 改写），与出题流保持一致。
     # user_id 由注册表按 owner_argument 对照可信上下文校验过，检索因此
     # 只可能命中该属主自己的文档。
     result = await retrieve_with_rewrite(document_id, query, owner_id=user_id)
-    chunks = result["documents"][0][:3]    # 避免 token 爆炸
-    chunk_ids = result["ids"][0][:3]
+    chunks = result["documents"][0][:limit]    # 避免 token 爆炸
+    chunk_ids = result["ids"][0][:limit]
     if len(chunks) != len(chunk_ids):
         raise ValueError("retrieval returned misaligned documents and ids")
-    page_numbers = (result.get("page_numbers") or [[]])[0][:3]
+    page_numbers = (result.get("page_numbers") or [[]])[0][:limit]
     if page_numbers and len(page_numbers) != len(chunk_ids):
         raise ValueError("retrieval returned misaligned page numbers and ids")
+    return chunk_ids, chunks, page_numbers
 
+
+def _chunks_payload(
+    document_id: str,
+    chunk_ids: list[str],
+    chunks: list[str],
+    page_numbers: list,
+    *,
+    content_trust: str = "untrusted_document_text",
+) -> dict:
     # chunks 是用户上传文件的原文，会被 tool_loop 原样回灌给模型。它是数据，
     # 不是指令：显式标注来源可信度，并在命中注入模式时打标，让 tool_loop 给
     # 本次 run 上 taint（随后禁止非幂等写入）。这里不拦截，理由见
@@ -185,7 +211,7 @@ async def _local_search_payload(document_id: str, query: str, user_id: str) -> d
         "document_id": document_id,
         "chunks": chunks,
         "chunk_ids": chunk_ids,
-        "content_trust": "untrusted_document_text",
+        "content_trust": content_trust,
     }
     # 只有 PDF 片段有页码；全无页码时不加这个键，非 PDF 文档的载荷保持原样。
     if any(page is not None for page in page_numbers):
@@ -196,21 +222,61 @@ async def _local_search_payload(document_id: str, query: str, user_id: str) -> d
     return payload
 
 
-def _web_chunk_id(url: str) -> str:
-    """Stable per URL, and never collides with a document chunk id."""
-    return WEB_CHUNK_PREFIX + hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+async def _local_search_payload(document_id: str, query: str, user_id: str) -> dict:
+    chunk_ids, chunks, page_numbers = await _local_ranking(
+        document_id, query, user_id, SEARCH_LOCAL_CHUNK_LIMIT,
+    )
+    return _chunks_payload(document_id, chunk_ids, chunks, page_numbers)
 
 
-def _web_chunk_text(row: dict) -> str:
+def _display_url(url: str) -> str | None:
+    """Render a result URL so it cannot pass for text or for another host.
+
+    The host is shown in IDNA (punycode) form, so a homograph such as a
+    Cyrillic letter in a familiar domain is visible; path and query are
+    percent-encoded, so a URL cannot carry readable sentences. None means the
+    URL cannot be rendered safely and the row is dropped.
+    """
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+        port = parts.port
+    except ValueError:
+        return None
+    if parts.scheme not in {"http", "https"} or not host:
+        return None
+    if ":" in host:
+        ascii_host = f"[{host}]"
+    else:
+        try:
+            ascii_host = host.encode("idna").decode("ascii")
+        except UnicodeError:
+            return None
+    netloc = ascii_host + (f":{port}" if port else "")
+    path = quote(unquote(parts.path) or "/", safe="/-._~")
+    query = quote(unquote(parts.query), safe="=&-._~")
+    return f"{parts.scheme}://{netloc}{path}" + (f"?{query}" if query else "")
+
+
+def _web_chunk_id(display_url: str) -> str:
+    """Stable per rendered URL, and never collides with a document chunk id."""
+    return WEB_CHUNK_PREFIX + hashlib.sha256(display_url.encode("utf-8")).hexdigest()[:16]
+
+
+def _web_chunk_text(row: dict, display_url: str) -> str:
     # The URL is part of the evidence text, so a cited web chunk always shows its
     # source without a new field in the evidence registry or the session snapshot.
-    # It comes first: citation snippets keep only the first 240 characters.
-    lines = [f"来源：{row['url']}", row.get("title") or "", row.get("snippet") or ""]
+    # It comes first and is truncated: citation snippets keep only 240 characters.
+    shown = (
+        display_url if len(display_url) <= _DISPLAY_URL_MAX_CHARS
+        else display_url[:_DISPLAY_URL_MAX_CHARS - 1] + "…"
+    )
+    lines = [f"来源：{shown}", row.get("title") or "", row.get("snippet") or ""]
     return "\n".join(line for line in lines if line.strip())
 
 
 async def _bounded_web_search(query: str) -> tuple[list[dict], str]:
-    """Search through the SSRF-bounded knowledge_web adapter; never raises except on cancel.
+    """One search through the knowledge_web adapter; never raises except on cancel.
 
     Returns (rows, status). Any failure degrades to no web rows so the local
     retrieval still answers the call.
@@ -236,84 +302,110 @@ async def _bounded_web_search(query: str) -> tuple[list[dict], str]:
     return rows, ("ok" if rows else "no_results")
 
 
-async def _search_document_with_web(document_id: str, query: str, user_id: str) -> str:
-    """Local hybrid ranking and web search in parallel, fused by weighted RRF."""
-    web_task = asyncio.create_task(_bounded_web_search(query))
-    try:
-        result = await retrieve_with_rewrite(document_id, query, owner_id=user_id)
-    except BaseException:
-        web_task.cancel()
-        raise
-    rows, web_status = await web_task
+def _web_candidates(rows: list) -> tuple[list[str], list[str], int]:
+    """Usable web rows as (chunk_ids, texts) plus how many were dropped as injection-shaped.
 
-    local_docs = result["documents"][0][:SEARCH_FUSED_CHUNK_LIMIT]
-    local_ids = result["ids"][0][:SEARCH_FUSED_CHUNK_LIMIT]
-    if len(local_docs) != len(local_ids):
-        raise ValueError("retrieval returned misaligned documents and ids")
-    local_pages = (result.get("page_numbers") or [[]])[0][:SEARCH_FUSED_CHUNK_LIMIT]
-    if local_pages and len(local_pages) != len(local_ids):
-        raise ValueError("retrieval returned misaligned page numbers and ids")
-    page_by_id = dict(zip(local_ids, local_pages)) if local_pages else {}
-
-    # Titles and snippets are attacker-controlled. Rows carrying instruction-shaped
-    # text are dropped rather than shown, as the knowledge-base web search does;
-    # the URL stays out of the scan (paths like /wiki/Jailbreak are not injections).
+    Titles, snippets and URLs are all attacker-controlled. A row whose text
+    or decoded URL matches the injection patterns is dropped rather than
+    shown, as the knowledge-base web search does for titles and snippets.
+    """
     web_ids: list[str] = []
     web_docs: list[str] = []
-    sources: dict[str, dict] = {}
     filtered = 0
     for row in rows:
         if not isinstance(row, dict) or not isinstance(row.get("url"), str):
             continue
-        if scan_untrusted_content(f"{row.get('title', '')} {row.get('snippet', '')}")[0]:
+        display_url = _display_url(row["url"])
+        if display_url is None:
+            continue
+        scanned = f"{row.get('title', '')} {row.get('snippet', '')} {unquote(row['url'])}"
+        if scan_untrusted_content(scanned)[0]:
             filtered += 1
             continue
-        chunk_id = _web_chunk_id(row["url"])
-        if chunk_id in sources:
+        chunk_id = _web_chunk_id(display_url)
+        if chunk_id in web_ids:
             continue
-        sources[chunk_id] = {
-            "chunk_id": chunk_id,
-            "title": row.get("title") or "",
-            "url": row["url"],
-        }
         web_ids.append(chunk_id)
-        web_docs.append(_web_chunk_text(row))
+        web_docs.append(_web_chunk_text(row, display_url))
+    return web_ids, web_docs, filtered
 
-    if web_ids:
-        fused_ids, fused_docs = weighted_rrf(
-            [
-                (1.0, local_ids, local_docs),
-                (agent_web_search_weight(), web_ids, web_docs),
-            ],
-            limit=SEARCH_FUSED_CHUNK_LIMIT,
+
+def _fuse_with_local_floor(
+    local_ids: list[str],
+    local_docs: list[str],
+    web_ids: list[str],
+    web_docs: list[str],
+) -> tuple[list[str], list[str]]:
+    """Weighted RRF of the two routes, keeping MIN_LOCAL_SLOTS for the documents.
+
+    Fused order is preserved; a web chunk is skipped only when taking it would
+    leave too few slots for the documents still owed their floor.
+    """
+    ranked_ids, ranked_docs = weighted_rrf(
+        [(1.0, local_ids, local_docs), (agent_web_search_weight(), web_ids, web_docs)],
+        limit=len(local_ids) + len(web_ids),
+    )
+    web = set(web_ids)
+    floor = min(MIN_LOCAL_SLOTS, len(local_ids))
+    fused_ids: list[str] = []
+    fused_docs: list[str] = []
+    local_taken = 0
+    for chunk_id, doc in zip(ranked_ids, ranked_docs):
+        if len(fused_ids) == SEARCH_FUSED_CHUNK_LIMIT:
+            break
+        is_web = chunk_id in web
+        if is_web and SEARCH_FUSED_CHUNK_LIMIT - len(fused_ids) <= floor - local_taken:
+            continue
+        fused_ids.append(chunk_id)
+        fused_docs.append(doc)
+        local_taken += not is_web
+    return fused_ids, fused_docs
+
+
+async def _search_document_with_web(document_id: str, query: str, user_id: str) -> str:
+    """Local hybrid ranking and one web search in parallel, fused by weighted RRF.
+
+    The registry does not retry an opted-in call as a whole (that would repeat
+    the web search), so the local part retries here on the same terms the
+    tool's metadata gives every other search_document call.
+    """
+    web_task = asyncio.create_task(_bounded_web_search(query))
+    try:
+        local_ids, local_docs, local_pages = await with_retry(
+            lambda: _local_ranking(document_id, query, user_id, SEARCH_FUSED_CHUNK_LIMIT),
+            max_retries=SEARCH_DOCUMENT_MAX_RETRIES,
+            base_delay=SEARCH_DOCUMENT_BASE_DELAY,
         )
+    except BaseException:
+        web_task.cancel()
+        raise
+    rows, web_status = await web_task
+    page_by_id = dict(zip(local_ids, local_pages)) if local_pages else {}
+
+    web_ids, web_docs, filtered = _web_candidates(rows)
+    if web_ids:
+        fused_ids, fused_docs = _fuse_with_local_floor(local_ids, local_docs, web_ids, web_docs)
     else:
         # Web gave nothing usable: exactly the local answer search_document gives.
         fused_ids = local_ids[:SEARCH_LOCAL_CHUNK_LIMIT]
         fused_docs = local_docs[:SEARCH_LOCAL_CHUNK_LIMIT]
-    used_web = [chunk_id for chunk_id in fused_ids if chunk_id in sources]
+    used_web = any(is_web_chunk_id(chunk_id) for chunk_id in fused_ids)
 
-    payload: dict[str, Any] = {
-        "document_id": document_id,
-        "chunks": fused_docs,
-        "chunk_ids": fused_ids,
-        "content_trust": (
+    payload = _chunks_payload(
+        document_id,
+        fused_ids,
+        fused_docs,
+        [page_by_id.get(chunk_id) for chunk_id in fused_ids],
+        content_trust=(
             "untrusted_document_and_web_text" if used_web else "untrusted_document_text"
         ),
-    }
-    page_numbers = [page_by_id.get(chunk_id) for chunk_id in fused_ids]
-    if any(page is not None for page in page_numbers):
-        payload["page_numbers"] = page_numbers
+    )
     payload["web_search"] = web_status
     if used_web:
-        payload["web_sources"] = [sources[chunk_id] for chunk_id in used_web]
         # tool_loop taints the run on this key: web text is untrusted even when
-        # no pattern matched, so later writes in this run are refused.
+        # no pattern matched, so later writes in this run are refused. Rows that
+        # fusion dropped never reach the model and do not taint.
         payload["untrusted_web_content"] = True
-    suspicious, reason = scan_untrusted_content("\n".join(fused_docs))
-    if suspicious:
-        payload["injection_flagged"] = True
-        payload["injection_reason"] = reason
     if filtered:
         payload["web_filtered_result_count"] = filtered
         # A dropped row still shows someone aimed instructions at this query.
@@ -793,7 +885,7 @@ def search_document_tool(*, web_search: bool) -> Tool:
             "description": (
                 "可选，默认 false。仅在文档证据明显不足、问题涉及最新信息、或用户明确要求联网时设为 true："
                 "并行做一次联网搜索，与文档检索结果按名次融合；网页结果的 chunk_id 以 web: 开头，"
-                "正文末尾带来源 URL。联网后本次运行不能再写入学情画像。"
+                "正文第一行是来源 URL。每次运行最多联网一次；联网后本次运行不能再写入学情画像。"
             ),
         }
         description += _WEB_DESCRIPTION_SUFFIX
@@ -808,8 +900,9 @@ def search_document_tool(*, web_search: bool) -> Tool:
         handler=_search_document,
         # 检索：embed + ChromaDB + BM25，应该快。给 20s 应付偶发慢
         metadata=ToolMetadata(
-            timeout_sec=20.0,
-            max_retries=2,
+            timeout_sec=SEARCH_DOCUMENT_TIMEOUT_SEC,
+            max_retries=SEARCH_DOCUMENT_MAX_RETRIES,
+            base_delay=SEARCH_DOCUMENT_BASE_DELAY,
             effect_mode=EffectMode.READ_ONLY,
             owner_argument="user_id",
             taint_gated_argument=WEB_SEARCH_ARGUMENT if web_search else None,
@@ -1277,12 +1370,17 @@ async def dispatch_tool(
     idempotency_key: Optional[str] = None,
     idempotency_lease=None,
     on_before_handler: Callable[[], Awaitable[None]] | None = None,
+    allowed_gated_arguments: frozenset[str] = frozenset(),
 ) -> str:
     """根据 tool_call 名字调用工具，返回 JSON 字符串。
 
     可选 run_id / user_id 用于 audit 关联，省略时按无关联标识执行。
     """
     logger.info("[tools] dispatch tool=%s arg_count=%d", name, len(arguments))
+    gated = (
+        {"allowed_gated_arguments": allowed_gated_arguments}
+        if allowed_gated_arguments else {}
+    )
     return await tool_registry.invoke(
         name,
         arguments,
@@ -1291,4 +1389,5 @@ async def dispatch_tool(
         idempotency_key=idempotency_key,
         idempotency_lease=idempotency_lease,
         on_before_handler=on_before_handler,
+        **gated,
     )

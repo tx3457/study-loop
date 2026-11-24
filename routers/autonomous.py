@@ -76,7 +76,10 @@ from services.tools import (
     DOCUMENT_EVIDENCE_TOOLS,
     DOCUMENT_NAVIGATION_TOOLS_ACTIVE,
     DOCUMENT_OUTLINE_TOOL_ACTIVE,
+    WEB_SEARCH_ARGUMENT,
     get_tool_definitions,
+    is_web_chunk_id,
+    web_search_backend_ready,
 )
 from services.tool_registry import SideEffectAmbiguousError, tool_registry
 from services.tool_loop import TruncatedModelOutputError, run_tool_round
@@ -172,6 +175,24 @@ _REACT_SYSTEM = build_react_system_prompt(
     outline_tool=DOCUMENT_OUTLINE_TOOL_ACTIVE,
     web_search=AGENT_WEB_SEARCH_ACTIVE,
 )
+
+
+def _web_search_offered(registry, run_id: str, *, grounding_required: bool) -> bool:
+    """Whether this round offers search_document's include_web.
+
+    One decision drives both the schema shown to the model and the registry's
+    allowed_gated_arguments, so the model can only use what it was shown.
+    Never in strict grounding (web text is not document evidence), never
+    without the live search backend, and at most once per run: not after taint
+    or after any earlier attempt, whatever it returned.
+    """
+    return (
+        AGENT_WEB_SEARCH_ACTIVE
+        and not grounding_required
+        and web_search_backend_ready()
+        and not registry.has_untrusted_content(run_id)
+        and not registry.has_gated_attempt(run_id)
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -875,20 +896,22 @@ async def _run_react_loop(
             }]
 
         # ── 单轮：run_tool_round 处理业务工具，控制工具交回本函数处理。──
+        offer_web = knowledge_context is None and _web_search_offered(
+            active_registry, run_id, grounding_required=grounding_required,
+        )
         try:
             rr = await run_tool_round(
                 messages,
                 tools=(
                     active_registry.get_openai_schemas()
-                    if knowledge_context else get_tool_definitions(
-                        # include_web is offered only while the run has no taint;
-                        # the registry refuses it anyway once taint is set.
-                        web_search=(
-                            AGENT_WEB_SEARCH_ACTIVE
-                            and not active_registry.has_untrusted_content(run_id)
-                        ),
-                    )
+                    if knowledge_context else get_tool_definitions(web_search=offer_web)
                 ) + controls,
+                # Passed only in rounds that offer include_web, so every other
+                # round dispatches exactly as before and the registry refuses it.
+                **(
+                    {"allowed_gated_arguments": frozenset({WEB_SEARCH_ARGUMENT})}
+                    if offer_web else {}
+                ),
                 client=(
                     knowledge_context.llm_profile.client
                     if knowledge_context else _client
@@ -1107,6 +1130,7 @@ async def _run_react_loop(
                     ),
                     knowledge_state=knowledge_context.state if knowledge_context else None,
                     untrusted_content=untrusted_content,
+                    web_search_attempted=active_registry.has_gated_attempt(run_id),
                 )
                 response = AutonomousResponse(
                     plan=_public_plan(plan),
@@ -1330,6 +1354,17 @@ def _build_response(
     elif grounding_required and not resolution.citations:
         final_answer = _GROUNDING_ABSTENTION
         finalize_reason = "grounding_required_without_valid_citation"
+        abstained = True
+    elif (
+        grounding_required
+        and knowledge_context is None
+        and all(is_web_chunk_id(citation.chunk_id) for citation in resolution.citations)
+    ):
+        # Strict grounding means grounded in the selected document. Web results
+        # are never offered in that mode; if one is cited anyway it cannot be
+        # the only support.
+        final_answer = _GROUNDING_ABSTENTION
+        finalize_reason = "grounding_required_without_document_citation"
         abstained = True
 
     if abstained:
@@ -1949,6 +1984,9 @@ async def continue_autonomous(
         # 正文还在上下文里，写入禁令却已解除。
         if session.untrusted_content:
             active_registry.mark_run_untrusted_content(run_id)
+        # 联网机会同样是一次运行一次，续跑不重新给。
+        if session.web_search_attempted:
+            active_registry.mark_gated_attempt(run_id)
     except ValueError as exc:
         await autonomous_sessions.consume(req.conversation_id, claim_token)
         await _abort_receipt(receipt_lease)
