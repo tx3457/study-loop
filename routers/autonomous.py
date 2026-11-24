@@ -427,6 +427,7 @@ async def _validate_replayed_response(
             "model_abstained",
             "grounding_required_with_invalid_citation",
             "grounding_required_without_valid_citation",
+            "grounding_required_without_document_citation",
             "legacy_invalid_citation_replay",
         }
         fixed_answers = {

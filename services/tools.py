@@ -234,8 +234,9 @@ def _display_url(url: str) -> str | None:
 
     The host is shown in IDNA (punycode) form, so a homograph such as a
     Cyrillic letter in a familiar domain is visible; path and query are
-    percent-encoded, so a URL cannot carry readable sentences. None means the
-    URL cannot be rendered safely and the row is dropped.
+    percent-encoded, so spaces and non-ASCII text cannot pose as prose (an ASCII
+    path can still read like words; the injection scan covers it). None means
+    the URL cannot be rendered safely and the row is dropped.
     """
     try:
         parts = urlsplit(url)
