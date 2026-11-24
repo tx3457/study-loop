@@ -10,8 +10,11 @@ Function Calling 工具定义与分发
 
 """
 import asyncio
+import copy
+import hashlib
 import json
 import logging
+import math
 import os
 import re
 import unicodedata
@@ -20,6 +23,7 @@ from typing import Any, Awaitable, Callable, Optional
 from services.document_outline import build_outline
 from services.learning_path import generate_learning_path
 from services.injection import scan_untrusted_content
+from services.mcp_servers import mcp_live_enabled
 from services.memory import (
     append_weak_points,
     get_user_profile,
@@ -35,7 +39,7 @@ from services.tool_registry import (
     ToolMetadata,
     tool_registry,
 )
-from services.vectorstore import get_document_chunks, retrieve_with_rewrite
+from services.vectorstore import get_document_chunks, retrieve_with_rewrite, weighted_rrf
 
 logger = logging.getLogger(__name__)
 
@@ -77,11 +81,89 @@ def document_outline_tool_enabled() -> bool:
     }
 
 
+# ── Web search as a third retrieval route of search_document ────────────────
+# The Agent opts in per call with include_web=true. The deployment flag is the
+# ceiling: off (the default) leaves search_document's schema, contract and
+# registry fingerprint exactly as before, so paused sessions keep resuming.
+WEB_SEARCH_ARGUMENT = "include_web"
+WEB_CHUNK_PREFIX = "web:"
+WEB_SEARCH_MAX_RESULTS = 5
+SEARCH_LOCAL_CHUNK_LIMIT = 3      # what search_document has always returned
+SEARCH_FUSED_CHUNK_LIMIT = 5      # local + web after fusion, when web is used
+_WEB_SEARCH_DEFAULT_TIMEOUT = 8.0
+_WEB_SEARCH_MAX_TIMEOUT = 15.0    # stays below search_document's 20 s tool timeout
+
+
+def agent_web_search_enabled() -> bool:
+    """Opt-in flag for search_document's include_web; it needs the live MCP search too."""
+    return os.getenv("AGENT_WEB_SEARCH_ENABLED", "false").strip().lower() in {
+        "1", "true", "yes",
+    }
+
+
+def agent_web_search_timeout_seconds() -> float:
+    """Read per call; invalid or non-positive values fall back to the default."""
+    raw = os.getenv("AGENT_WEB_SEARCH_TIMEOUT_SECONDS", "")
+    try:
+        value = float(raw) if raw.strip() else _WEB_SEARCH_DEFAULT_TIMEOUT
+    except ValueError:
+        value = -1.0
+    if not math.isfinite(value) or value <= 0:
+        logger.warning("[tools] invalid AGENT_WEB_SEARCH_TIMEOUT_SECONDS; using default")
+        return _WEB_SEARCH_DEFAULT_TIMEOUT
+    return min(value, _WEB_SEARCH_MAX_TIMEOUT)
+
+
+def agent_web_search_weight() -> float:
+    """RRF weight of the web route against the local ranking (1.0 = equal), read per call."""
+    raw = os.getenv("AGENT_WEB_SEARCH_WEIGHT", "")
+    try:
+        value = float(raw) if raw.strip() else 1.0
+    except ValueError:
+        value = -1.0
+    if not math.isfinite(value) or value <= 0:
+        logger.warning("[tools] invalid AGENT_WEB_SEARCH_WEIGHT; using 1.0")
+        return 1.0
+    return value
+
+
+def agent_web_search_active() -> bool:
+    """include_web is offered only when the flag is on and the live MCP search can exist."""
+    return agent_web_search_enabled() and mcp_live_enabled()
+
+
+# Read once at import, like the navigation flags: the registered schema, the
+# handler and the Autonomous prompt all use this constant, so they cannot disagree.
+AGENT_WEB_SEARCH_ACTIVE = agent_web_search_active()
+if agent_web_search_enabled() and not AGENT_WEB_SEARCH_ACTIVE:
+    logger.warning(
+        "[tools] AGENT_WEB_SEARCH_ENABLED needs MCP_LIVE_ENABLED=true for its search "
+        "backend; include_web is not offered"
+    )
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # 1. Tool Handler（业务实现，保持 async + 返回 str 的契约）
 # ═══════════════════════════════════════════════════════════════════════════
 
-async def _search_document(document_id: str, query: str, user_id: str) -> str:
+async def _search_document(
+    document_id: str,
+    query: str,
+    user_id: str,
+    include_web: bool = False,
+) -> str:
+    # include_web 只是模型的请求；能不能联网由服务端开关决定（纵深防御：schema
+    # 里没有这个参数时模型仍可能传，这里再判一次）。运行是否已被污染由注册表
+    # 在调用前按 taint_gated_argument 拦截，handler 拿不到 run_id。
+    if include_web is True and AGENT_WEB_SEARCH_ACTIVE:
+        return await _search_document_with_web(document_id, query, user_id)
+    payload = await _local_search_payload(document_id, query, user_id)
+    if include_web is True:
+        payload["web_search"] = "disabled"
+    return json.dumps(payload, ensure_ascii=False)
+
+
+async def _local_search_payload(document_id: str, query: str, user_id: str) -> dict:
     # 走统一生产检索入口（含 HyDE/Multi-query 改写），与出题流保持一致。
     # user_id 由注册表按 owner_argument 对照可信上下文校验过，检索因此
     # 只可能命中该属主自己的文档。
@@ -111,6 +193,132 @@ async def _search_document(document_id: str, query: str, user_id: str) -> str:
     if suspicious:
         payload["injection_flagged"] = True
         payload["injection_reason"] = reason
+    return payload
+
+
+def _web_chunk_id(url: str) -> str:
+    """Stable per URL, and never collides with a document chunk id."""
+    return WEB_CHUNK_PREFIX + hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+
+
+def _web_chunk_text(row: dict) -> str:
+    # The URL is part of the evidence text, so a cited web chunk always shows its
+    # source without a new field in the evidence registry or the session snapshot.
+    # It comes first: citation snippets keep only the first 240 characters.
+    lines = [f"来源：{row['url']}", row.get("title") or "", row.get("snippet") or ""]
+    return "\n".join(line for line in lines if line.strip())
+
+
+async def _bounded_web_search(query: str) -> tuple[list[dict], str]:
+    """Search through the SSRF-bounded knowledge_web adapter; never raises except on cancel.
+
+    Returns (rows, status). Any failure degrades to no web rows so the local
+    retrieval still answers the call.
+    """
+    from services.knowledge_web import WebRetrievalError, search_web
+
+    try:
+        rows = await asyncio.wait_for(
+            search_web(query, max_results=WEB_SEARCH_MAX_RESULTS),
+            timeout=agent_web_search_timeout_seconds(),
+        )
+    except asyncio.CancelledError:
+        raise
+    except TimeoutError:
+        return [], "timeout"
+    except WebRetrievalError as exc:
+        return [], "unavailable" if exc.code == "search_unavailable" else "failed"
+    except Exception as exc:
+        logger.warning("[tools] web search failed: error_type=%s", type(exc).__name__)
+        return [], "failed"
+    if not isinstance(rows, list):
+        return [], "failed"
+    return rows, ("ok" if rows else "no_results")
+
+
+async def _search_document_with_web(document_id: str, query: str, user_id: str) -> str:
+    """Local hybrid ranking and web search in parallel, fused by weighted RRF."""
+    web_task = asyncio.create_task(_bounded_web_search(query))
+    try:
+        result = await retrieve_with_rewrite(document_id, query, owner_id=user_id)
+    except BaseException:
+        web_task.cancel()
+        raise
+    rows, web_status = await web_task
+
+    local_docs = result["documents"][0][:SEARCH_FUSED_CHUNK_LIMIT]
+    local_ids = result["ids"][0][:SEARCH_FUSED_CHUNK_LIMIT]
+    if len(local_docs) != len(local_ids):
+        raise ValueError("retrieval returned misaligned documents and ids")
+    local_pages = (result.get("page_numbers") or [[]])[0][:SEARCH_FUSED_CHUNK_LIMIT]
+    if local_pages and len(local_pages) != len(local_ids):
+        raise ValueError("retrieval returned misaligned page numbers and ids")
+    page_by_id = dict(zip(local_ids, local_pages)) if local_pages else {}
+
+    # Titles and snippets are attacker-controlled. Rows carrying instruction-shaped
+    # text are dropped rather than shown, as the knowledge-base web search does;
+    # the URL stays out of the scan (paths like /wiki/Jailbreak are not injections).
+    web_ids: list[str] = []
+    web_docs: list[str] = []
+    sources: dict[str, dict] = {}
+    filtered = 0
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get("url"), str):
+            continue
+        if scan_untrusted_content(f"{row.get('title', '')} {row.get('snippet', '')}")[0]:
+            filtered += 1
+            continue
+        chunk_id = _web_chunk_id(row["url"])
+        if chunk_id in sources:
+            continue
+        sources[chunk_id] = {
+            "chunk_id": chunk_id,
+            "title": row.get("title") or "",
+            "url": row["url"],
+        }
+        web_ids.append(chunk_id)
+        web_docs.append(_web_chunk_text(row))
+
+    if web_ids:
+        fused_ids, fused_docs = weighted_rrf(
+            [
+                (1.0, local_ids, local_docs),
+                (agent_web_search_weight(), web_ids, web_docs),
+            ],
+            limit=SEARCH_FUSED_CHUNK_LIMIT,
+        )
+    else:
+        # Web gave nothing usable: exactly the local answer search_document gives.
+        fused_ids = local_ids[:SEARCH_LOCAL_CHUNK_LIMIT]
+        fused_docs = local_docs[:SEARCH_LOCAL_CHUNK_LIMIT]
+    used_web = [chunk_id for chunk_id in fused_ids if chunk_id in sources]
+
+    payload: dict[str, Any] = {
+        "document_id": document_id,
+        "chunks": fused_docs,
+        "chunk_ids": fused_ids,
+        "content_trust": (
+            "untrusted_document_and_web_text" if used_web else "untrusted_document_text"
+        ),
+    }
+    page_numbers = [page_by_id.get(chunk_id) for chunk_id in fused_ids]
+    if any(page is not None for page in page_numbers):
+        payload["page_numbers"] = page_numbers
+    payload["web_search"] = web_status
+    if used_web:
+        payload["web_sources"] = [sources[chunk_id] for chunk_id in used_web]
+        # tool_loop taints the run on this key: web text is untrusted even when
+        # no pattern matched, so later writes in this run are refused.
+        payload["untrusted_web_content"] = True
+    suspicious, reason = scan_untrusted_content("\n".join(fused_docs))
+    if suspicious:
+        payload["injection_flagged"] = True
+        payload["injection_reason"] = reason
+    if filtered:
+        payload["web_filtered_result_count"] = filtered
+        # A dropped row still shows someone aimed instructions at this query.
+        payload["injection_flagged"] = True
+        payload.setdefault("injection_reason", "web_result_matched_injection_pattern")
     return json.dumps(payload, ensure_ascii=False)
 
 
@@ -563,18 +771,38 @@ async def _plan_next_step(
 # 2. 注册到 Registry（每个 tool 单独声明 SLO）
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _register_all() -> None:
-    """模块加载时注册所有工具。幂等（registry 重复注册会 warn 但不出错）。"""
-    tool_registry.register(Tool(
+_SEARCH_DOCUMENT_DESCRIPTION = "搜索已上传文档的相关段落（Hybrid BM25 + 向量 + RRF + 改写）"
+_WEB_DESCRIPTION_SUFFIX = "；可选 include_web 加一路联网搜索"
+
+
+def search_document_tool(*, web_search: bool) -> Tool:
+    """search_document; with web_search it also declares and gates include_web.
+
+    Without web_search the schema and security contract are the ones it has
+    always had, which keeps the registry fingerprint unchanged.
+    """
+    properties: dict[str, Any] = {
+        "user_id": {"type": "string", "description": "用户 ID"},
+        "document_id": {"type": "string", "description": "文档 ID"},
+        "query": {"type": "string", "description": "搜索关键词或问题"},
+    }
+    description = _SEARCH_DOCUMENT_DESCRIPTION
+    if web_search:
+        properties[WEB_SEARCH_ARGUMENT] = {
+            "type": "boolean",
+            "description": (
+                "可选，默认 false。仅在文档证据明显不足、问题涉及最新信息、或用户明确要求联网时设为 true："
+                "并行做一次联网搜索，与文档检索结果按名次融合；网页结果的 chunk_id 以 web: 开头，"
+                "正文末尾带来源 URL。联网后本次运行不能再写入学情画像。"
+            ),
+        }
+        description += _WEB_DESCRIPTION_SUFFIX
+    return Tool(
         name="search_document",
-        description="搜索已上传文档的相关段落（Hybrid BM25 + 向量 + RRF + 改写）",
+        description=description,
         parameters_schema={
             "type": "object",
-            "properties": {
-                "user_id": {"type": "string", "description": "用户 ID"},
-                "document_id": {"type": "string", "description": "文档 ID"},
-                "query": {"type": "string", "description": "搜索关键词或问题"},
-            },
+            "properties": properties,
             "required": ["user_id", "document_id", "query"],
         },
         handler=_search_document,
@@ -584,8 +812,26 @@ def _register_all() -> None:
             max_retries=2,
             effect_mode=EffectMode.READ_ONLY,
             owner_argument="user_id",
+            taint_gated_argument=WEB_SEARCH_ARGUMENT if web_search else None,
         ),
-    ))
+    )
+
+
+def without_web_search_option(schema: dict) -> dict:
+    """Return an OpenAI tool schema with include_web removed (no-op when absent)."""
+    function = schema.get("function", {})
+    properties = function.get("parameters", {}).get("properties", {})
+    if function.get("name") != "search_document" or WEB_SEARCH_ARGUMENT not in properties:
+        return schema
+    stripped = copy.deepcopy(schema)
+    del stripped["function"]["parameters"]["properties"][WEB_SEARCH_ARGUMENT]
+    stripped["function"]["description"] = _SEARCH_DOCUMENT_DESCRIPTION
+    return stripped
+
+
+def _register_all() -> None:
+    """模块加载时注册所有工具。幂等（registry 重复注册会 warn 但不出错）。"""
+    tool_registry.register(search_document_tool(web_search=AGENT_WEB_SEARCH_ACTIVE))
 
     tool_registry.register(Tool(
         name="generate_quiz",
@@ -955,12 +1201,22 @@ elif document_outline_tool_enabled():
 # standalone agent 与带收据的 Chat 可用 get_tool_definitions() 动态发现全量工具；
 # 无收据 Chat 仅使用严格只读快照，interrupt-capable 节点则使用下面的
 # replay-safe schema + allowlist 双重约束。
-TOOL_DEFINITIONS = tool_registry.get_openai_schemas()
+TOOL_DEFINITIONS = [
+    without_web_search_option(schema) for schema in tool_registry.get_openai_schemas()
+]
 
 
-def get_tool_definitions() -> list[dict]:
-    """Return current OpenAI tool schemas from the live registry."""
-    return tool_registry.get_openai_schemas()
+def get_tool_definitions(*, web_search: bool = False) -> list[dict]:
+    """Return current OpenAI tool schemas from the live registry.
+
+    include_web is offered only when the caller asks for it (Autonomous, in a
+    run without taint); every other caller gets search_document as it was.
+    With AGENT_WEB_SEARCH_ENABLED off there is nothing to strip either way.
+    """
+    schemas = tool_registry.get_openai_schemas()
+    if web_search:
+        return schemas
+    return [without_web_search_option(schema) for schema in schemas]
 
 
 def allowed_tool_names() -> set[str]:
@@ -984,7 +1240,10 @@ def get_read_only_tool_capabilities() -> tuple[list[dict], set[str]]:
         tool = tool_registry.get(name)
         if tool is not None and tool.metadata.effect_mode is EffectMode.READ_ONLY:
             tools.append(tool)
-    return [tool.to_openai_schema() for tool in tools], {tool.name for tool in tools}
+    return (
+        [without_web_search_option(tool.to_openai_schema()) for tool in tools],
+        {tool.name for tool in tools},
+    )
 
 
 def replay_safe_tool_names() -> set[str]:
@@ -1002,7 +1261,7 @@ def get_replay_safe_tool_definitions() -> list[dict]:
     """Return schemas for tools whose declared effects are replay-safe."""
     safe_names = replay_safe_tool_names()
     return [
-        tool.to_openai_schema()
+        without_web_search_option(tool.to_openai_schema())
         for name in tool_registry.list_tools()
         if name in safe_names
         and (tool := tool_registry.get(name)) is not None

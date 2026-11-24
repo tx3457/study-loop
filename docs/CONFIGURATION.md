@@ -115,6 +115,38 @@ exception. It is not a public HTTP endpoint or a default CI step.
   rose by 0.20 (CI [+0.02, +0.39]), and the original 48 questions did not regress.
   The outline heuristic was developed on these decks; other slide layouts are
   unmeasured.
+- `AGENT_WEB_SEARCH_ENABLED=true` lets the Autonomous agent add web search as a
+  third retrieval route of `search_document` (off by default; it also needs
+  `MCP_LIVE_ENABLED=true`, otherwise it logs a warning and stays off). The tool
+  then declares an optional `include_web` boolean, and the model decides per call
+  whether to set it: the prompt asks for it only when the documents look
+  insufficient, the question is about recent events, or the user asks to search
+  the web.
+  - With `include_web=true`, document retrieval and one web search run in
+    parallel. The search goes through `services.knowledge_web.search_web`, the
+    same SSRF- and size-bounded adapter the knowledge base uses; the raw MCP
+    tools stay out of the main registry. The web route waits at most
+    `AGENT_WEB_SEARCH_TIMEOUT_SECONDS` (default 8, capped at 15); on a timeout or
+    any search error the call answers from the documents alone and reports
+    `web_search` as `timeout`, `unavailable` or `failed`.
+  - Results are fused with the document ranking by weighted reciprocal rank
+    (k=60; `AGENT_WEB_SEARCH_WEIGHT`, default 1, is the web route's weight) into
+    at most five chunks. Web chunks have ids `web:<hash of the URL>`, start with
+    `来源：<URL>`, enter the run's evidence registry and can be cited like
+    document chunks.
+  - Web text is untrusted. Results whose title or snippet match the injection
+    patterns are dropped and flag the run; any web result that reaches the
+    model taints the run, so later non-idempotent writes (profile updates) are
+    refused, exactly as for a flagged document chunk. `include_web` is shown to
+    the model only while the run has no taint, and the registry refuses it in a
+    tainted run or without a run context. Chat and the assistant graph never see
+    the option.
+  - The flag is read at startup. Off, `search_document`'s schema, its security
+    contract, the registry fingerprint and the prompts are exactly as before.
+    On, the fingerprint changes, so paused Autonomous sessions from before the
+    change cannot resume (the same rule as the navigation tools).
+  - Not evaluated: there is no measurement of answer quality, latency or cost
+    with the web route.
 - LangSmith, Langfuse, tracing, and live MCP integrations are opt-in and disabled
   by default.
 

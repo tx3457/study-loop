@@ -72,6 +72,7 @@ from services.react_controls import (
     build_react_system_prompt,
 )
 from services.tools import (
+    AGENT_WEB_SEARCH_ACTIVE,
     DOCUMENT_EVIDENCE_TOOLS,
     DOCUMENT_NAVIGATION_TOOLS_ACTIVE,
     DOCUMENT_OUTLINE_TOOL_ACTIVE,
@@ -169,6 +170,7 @@ _CONTROL_TOOLS = build_control_tools(
 _REACT_SYSTEM = build_react_system_prompt(
     navigation_tools=DOCUMENT_NAVIGATION_TOOLS_ACTIVE,
     outline_tool=DOCUMENT_OUTLINE_TOOL_ACTIVE,
+    web_search=AGENT_WEB_SEARCH_ACTIVE,
 )
 
 
@@ -878,7 +880,14 @@ async def _run_react_loop(
                 messages,
                 tools=(
                     active_registry.get_openai_schemas()
-                    if knowledge_context else get_tool_definitions()
+                    if knowledge_context else get_tool_definitions(
+                        # include_web is offered only while the run has no taint;
+                        # the registry refuses it anyway once taint is set.
+                        web_search=(
+                            AGENT_WEB_SEARCH_ACTIVE
+                            and not active_registry.has_untrusted_content(run_id)
+                        ),
+                    )
                 ) + controls,
                 client=(
                     knowledge_context.llm_profile.client
